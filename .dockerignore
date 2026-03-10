@@ -1,0 +1,50 @@
+# Virtual environments
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Git
+.git/
+
+# Claude
+.claude/
+
+# Documentation
+docs/
+
+# Runtime data
+logs/
+data/sessions/
+
+# Media files
+*.avi
+*.mp4
+*.jpg
+*.png
+
+# Model files (mounted via volume)
+*.engine
+*.onnx
+*.trt
+*.pt
+
+# Environment files
+.env
+.env.*
+!.env.docker
+
+# Security files
+*.pem
+*.key
+*.crt
+credentials.json
+
+# Lock file
+uv.lock
+
+# Test/lint cache
+.coverage
+.pytest_cache/
+.ruff_cache/

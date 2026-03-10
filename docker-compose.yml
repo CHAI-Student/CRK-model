@@ -1,0 +1,91 @@
+# Edge Environment Docker Compose (v5.4)
+#
+# 2개 컨테이너 구성:
+#   1. model    - Model Service (장기 실행)
+#   2. convert  - TensorRT .pt → .engine 변환 (일회성)
+#
+# 사용법:
+#   # .pt → .engine 변환 (일회성)
+#   docker compose --profile convert run --rm convert
+#
+#   # 다른 모델 변환
+#   PT_FILE=new_model.pt docker compose --profile convert run --rm convert
+#
+#   # 서비스 시작
+#   docker compose up -d model
+#
+#   # 로그 확인
+#   docker compose logs -f model
+
+services:
+  # ─────────────────────────────────────────────
+  # Container 1: Model Service (장기 실행)
+  # ─────────────────────────────────────────────
+  model:
+    build:
+      context: .
+      dockerfile: services/model/Dockerfile
+    image: model-service:latest
+    container_name: model-service
+    runtime: nvidia
+    ports:
+      - "8002:8002"
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+        reservations:
+          memory: 2G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./models:/data/models:ro
+      - ./data/sessions:/data/sessions:rw
+      - ./logs:/app/logs:rw
+    env_file: .env.docker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────
+  # Container 2: TensorRT 변환 (일회성)
+  # ─────────────────────────────────────────────
+  convert:
+    build:
+      context: .
+      dockerfile: docker/convert/Dockerfile
+    image: tensorrt-convert:latest
+    container_name: tensorrt-convert
+    runtime: nvidia
+    profiles: ["convert"]
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+        reservations:
+          memory: 2G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./models:/models:rw
+    environment:
+      - PT_FILE=${PT_FILE:-siyeon_best.pt}
+      - IMGSZ=${IMGSZ:-480}
+
+networks:
+  default:
+    name: edge-network
+    driver: bridge

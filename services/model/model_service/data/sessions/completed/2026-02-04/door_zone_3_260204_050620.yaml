@@ -1,0 +1,43 @@
+door_session_id: door_zone_3_260204_050620
+zone: 3
+status: complete
+triggers:
+- trigger_id: trigger_001
+  session_id: zone_3_260204_050558
+  timestamp: 1770149180.3207796
+  products:
+  - product_id: 26
+    product_idx: '26'
+    name: CAN_WELCHS_ZERO_GRAPE_355ML
+    count: 1
+    price: 1000
+    confidence: 0.630810546875
+  delta_weight: -373.0
+  confidence: 0.630810546875
+  video_paths:
+    top: /home/chai/Documents/Edge_Environment/20260204_050549/inference/zone_3/2026-02-03_20-05-54/top.avi
+    side: /home/chai/Documents/Edge_Environment/20260204_050549/inference/zone_3/2026-02-03_20-05-54/side.avi
+  is_return: false
+  processing_time_ms: 21675.028562545776
+aggregated_products:
+  '26':
+    product_id: 26
+    product_idx: '26'
+    name: CAN_WELCHS_ZERO_GRAPE_355ML
+    count: 1
+    unit_price: 1000
+    weight: 0.0
+    total_price: 1000
+    average_confidence: 0.6308
+    detection_count: 1
+unmatched_returns: []
+created_at: 1770149180.3208108
+last_trigger_at: 1770149180.3208108
+finalized_at: 1770149354.9635592
+summary:
+  trigger_count: 1
+  total_price: 1000
+  product_count: 1
+  duration_seconds: 174.6
+  unmatched_returns_count: 0
+  unmatched_returns_weight: 0
