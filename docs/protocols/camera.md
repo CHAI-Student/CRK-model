@@ -117,6 +117,9 @@ Error cases:
 
 - Camera does not upload video binaries. It sends file paths only.
 - Camera and model must share the same host or filesystem namespace.
+- The model receives AVI paths, then splits each AVI into frame images and runs inference per frame.
+- Trigger frame traces are persisted at `services/model/logs/frame_split_YYYYMMDD.jsonl`.
+- Optional sample split-frame JPEG export is controlled by `MODEL__TRACE__SAMPLE_EXPORT_ENABLED`, `MODEL__TRACE__SAMPLE_COUNT_PER_CAMERA`, and `MODEL__TRACE__SAMPLE_EXPORT_DIR`.
 - Camera-side [loadcell.py](../../../../CRK-CAMERA/src/services/loadcell.py) logs `/trigger` failures but does not retry them.
 - Camera runtime currently assumes Python 3.14 based on [.python-version](../../../../CRK-CAMERA/.python-version).
 

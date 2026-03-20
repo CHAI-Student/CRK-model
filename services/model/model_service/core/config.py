@@ -206,6 +206,29 @@ class AsyncStreamingModel(BaseModel):
     )
 
 
+class TraceModel(BaseModel):
+    """Frame split trace logging configuration."""
+
+    sample_export_enabled: bool = Field(
+        default=False,
+        description="샘플 split 프레임 JPEG export 활성화 여부",
+    )
+    sample_count_per_camera: int = Field(
+        default=3,
+        description="카메라별 최대 샘플 프레임 수",
+    )
+    sample_export_dir: str = Field(
+        default="logs/frame_samples",
+        description="샘플 프레임 export 경로 (services/model 기준 상대경로 허용)",
+    )
+
+    @field_validator("sample_count_per_camera", mode="after")
+    def validate_sample_count_per_camera(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("sample_count_per_camera must be >= 0")
+        return value
+
+
 class BufferModel(BaseModel):
     """Session store configuration settings (v4.2)."""
 
@@ -279,6 +302,7 @@ class Settings(BaseSettings):
     door_session: DoorSessionModel = DoorSessionModel()
     trigger: TriggerModel = TriggerModel()  # v5.2
     async_streaming: AsyncStreamingModel = AsyncStreamingModel()  # v5.3
+    trace: TraceModel = TraceModel()
 
     # Node.js Orchestrator settings
     nodejs_url: str = Field(

@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Tuple
 
 import model_service.core.loadcell_stats as loadcell_stats
 from model_service.video import VideoProcessor, VoteResult
+from model_service.video.frame_trace import TriggerTraceContext
 from model_service.engine import ProductDecisionEngine, EnsembleResult
 from model_service.session import SessionStore, SessionData, ProductResult, DoorSessionStore, TriggerResult
 from model_service.session.session_store import generate_session_id
@@ -91,6 +92,7 @@ class QueueItem:
     allowed_class_ids: Optional[List[int]] = None
     cached_active_products: Optional[List] = None
     product_weights: Optional[Dict[int, float]] = None
+    trace_context: Optional[TriggerTraceContext] = None
 
 
 class TriggerService:
@@ -237,6 +239,18 @@ class TriggerService:
         with self._dedup_lock:
             self._dedup_cache[idempotency_key] = (time.time(), session_id)
 
+    def _new_trace_context(
+        self,
+        session_id: str,
+        input_data: TriggerInput,
+    ) -> TriggerTraceContext:
+        return TriggerTraceContext(
+            session_id=session_id,
+            zone=input_data.zone,
+            top_path=input_data.top_video_path,
+            side_path=input_data.side_video_path,
+        )
+
     # ========================================================================
     # Queue Worker (v4.10)
     # ========================================================================
@@ -301,6 +315,10 @@ class TriggerService:
         idempotency_key = self._generate_idempotency_key(input_data)
         duplicate_session_id = self._check_duplicate(idempotency_key)
         if duplicate_session_id is not None:
+            self._new_trace_context(duplicate_session_id, input_data).finalize(
+                status="duplicate",
+                error="duplicate request",
+            )
             logger.warning(
                 f"[TRIGGER] Duplicate request detected: "
                 f"zone={input_data.zone}, idempotency_key={idempotency_key[:8]}..., "
@@ -315,6 +333,7 @@ class TriggerService:
             )
 
         session_id = generate_session_id(input_data.zone)
+        trace_context = self._new_trace_context(session_id, input_data)
 
         logger.info(f"[TRIGGER] ========== 큐 등록 시작 ==========")
         logger.info(f"[TRIGGER] zone={input_data.zone}, session_id={session_id}")
@@ -327,6 +346,7 @@ class TriggerService:
             input_data.side_video_path,
         )
         if validation_error:
+            trace_context.finalize(status="error", error=validation_error)
             return TriggerOutput(
                 success=False,
                 session_id=session_id,
@@ -355,7 +375,11 @@ class TriggerService:
         # 4. 무게 < 5g이면 YOLO 불필요 → 즉시 처리 (큐 거치지 않음)
         if abs(delta_weight) <= self.MIN_WEIGHT_CHANGE_GRAMS:
             return self._handle_low_weight_skip(
-                input_data, session_id, idempotency_key, delta_weight
+                input_data,
+                session_id,
+                idempotency_key,
+                delta_weight,
+                trace_context=trace_context,
             )
 
         # 5. active_products 캐시 (v4.11: 조회 시점 통일)
@@ -393,6 +417,7 @@ class TriggerService:
             allowed_class_ids=allowed_class_ids,
             cached_active_products=cached_active_products,
             product_weights=product_weights,
+            trace_context=trace_context,
         )
 
         try:
@@ -401,6 +426,10 @@ class TriggerService:
             logger.error(
                 f"[TRIGGER] Queue full ({self.QUEUE_MAX_SIZE}), rejecting trigger: "
                 f"zone={input_data.zone}, session_id={session_id}"
+            )
+            trace_context.finalize(
+                status="error",
+                error="QUEUE_FULL",
             )
             # 큐 등록 실패 → pending 알림 취소
             if self._door_session_store is not None:
@@ -441,6 +470,7 @@ class TriggerService:
         session_id: str,
         idempotency_key: str,
         delta_weight: float,
+        trace_context: Optional[TriggerTraceContext] = None,
     ) -> TriggerOutput:
         """
         무게 변화 미미 시 즉시 처리 (v4.10, 큐 거치지 않음).
@@ -496,6 +526,8 @@ class TriggerService:
             )
 
         self._register_request(idempotency_key, session_id)
+        if trace_context is not None:
+            trace_context.finalize(status="skipped")
         return TriggerOutput(
             success=True,
             session_id=session_id,
@@ -527,6 +559,8 @@ class TriggerService:
             try:
                 await self._process_trigger_internal(item)
             except Exception as e:
+                if item.trace_context is not None:
+                    item.trace_context.finalize(status="error", error=str(e))
                 logger.error(
                     f"[TRIGGER-WORKER] Error processing zone={item.input_data.zone}, "
                     f"session_id={item.session_id}: {e}",
@@ -560,6 +594,7 @@ class TriggerService:
         start_time = time.time()
         input_data = item.input_data
         session_id = item.session_id
+        trace_context = item.trace_context or self._new_trace_context(session_id, input_data)
 
         logger.info(
             f"[TRIGGER-WORKER] Processing: zone={input_data.zone}, "
@@ -576,22 +611,28 @@ class TriggerService:
 
         # 2. 비디오 처리 (YOLO 추론) - GPU 독점
         # v5.3: feature flag 기반 async/sync 선택
-        if config.async_streaming.enabled:
-            logger.info("[TRIGGER-WORKER] v5.3: Async streaming 모드로 비디오 처리")
-            processing_result = await self._video_processor.process_videos_async(
-                top_path=input_data.top_video_path,
-                side_path=input_data.side_video_path,
-                allowed_class_ids=item.allowed_class_ids,
-                product_weights=item.product_weights or {},
-            )
-        else:
-            processing_result = await asyncio.to_thread(
-                self._video_processor.process_videos,
-                top_path=input_data.top_video_path,
-                side_path=input_data.side_video_path,
-                allowed_class_ids=item.allowed_class_ids,
-                product_weights=item.product_weights or {},
-            )
+        try:
+            if config.async_streaming.enabled:
+                logger.info("[TRIGGER-WORKER] v5.3: Async streaming 모드로 비디오 처리")
+                processing_result = await self._video_processor.process_videos_async(
+                    top_path=input_data.top_video_path,
+                    side_path=input_data.side_video_path,
+                    allowed_class_ids=item.allowed_class_ids,
+                    product_weights=item.product_weights or {},
+                    trace_context=trace_context,
+                )
+            else:
+                processing_result = await asyncio.to_thread(
+                    self._video_processor.process_videos,
+                    top_path=input_data.top_video_path,
+                    side_path=input_data.side_video_path,
+                    allowed_class_ids=item.allowed_class_ids,
+                    product_weights=item.product_weights or {},
+                    trace_context=trace_context,
+                )
+        except Exception as exc:
+            trace_context.finalize(status="error", error=str(exc))
+            raise
 
         vote_results = processing_result.vote_results
         stats = processing_result.stats
@@ -728,6 +769,7 @@ class TriggerService:
             f"[TRIGGER-WORKER] total_price={final_total_price}원, "
             f"elapsed={elapsed_ms:.1f}ms (wait={start_time - item.enqueued_at:.1f}s)"
         )
+        trace_context.finalize(status="complete")
 
     def get_queue_stats(self) -> dict:
         """
@@ -762,6 +804,10 @@ class TriggerService:
         idempotency_key = self._generate_idempotency_key(input_data)
         duplicate_session_id = self._check_duplicate(idempotency_key)
         if duplicate_session_id is not None:
+            self._new_trace_context(duplicate_session_id, input_data).finalize(
+                status="duplicate",
+                error="duplicate request",
+            )
             logger.warning(
                 f"[TRIGGER] Duplicate request detected: "
                 f"zone={input_data.zone}, idempotency_key={idempotency_key[:8]}..., "
@@ -776,6 +822,7 @@ class TriggerService:
             )
 
         session_id = generate_session_id(input_data.zone)
+        trace_context = self._new_trace_context(session_id, input_data)
 
         logger.info(f"[TRIGGER] ========== 추론 시작 ==========")
         logger.info(f"[TRIGGER] zone={input_data.zone}, session_id={session_id}")
@@ -788,6 +835,7 @@ class TriggerService:
             input_data.side_video_path,
         )
         if validation_error:
+            trace_context.finalize(status="error", error=validation_error)
             return TriggerOutput(
                 success=False,
                 session_id=session_id,
@@ -857,6 +905,7 @@ class TriggerService:
                 )
 
             self._register_request(idempotency_key, session_id)
+            trace_context.finalize(status="skipped")
             return TriggerOutput(
                 success=True,
                 session_id=session_id,
@@ -896,22 +945,28 @@ class TriggerService:
                 logger.info(f"[TRIGGER] v4.11: active_products {len(cached_active_products)}개 캐시됨")
 
         # v5.3: feature flag 기반 async/sync 선택
-        if config.async_streaming.enabled:
-            logger.info("[TRIGGER] v5.3: Async streaming 모드로 비디오 처리")
-            processing_result = await self._video_processor.process_videos_async(
-                top_path=input_data.top_video_path,
-                side_path=input_data.side_video_path,
-                allowed_class_ids=allowed_class_ids,
-                product_weights=product_weights,
-            )
-        else:
-            processing_result = await asyncio.to_thread(
-                self._video_processor.process_videos,
-                top_path=input_data.top_video_path,
-                side_path=input_data.side_video_path,
-                allowed_class_ids=allowed_class_ids,
-                product_weights=product_weights,
-            )
+        try:
+            if config.async_streaming.enabled:
+                logger.info("[TRIGGER] v5.3: Async streaming 모드로 비디오 처리")
+                processing_result = await self._video_processor.process_videos_async(
+                    top_path=input_data.top_video_path,
+                    side_path=input_data.side_video_path,
+                    allowed_class_ids=allowed_class_ids,
+                    product_weights=product_weights,
+                    trace_context=trace_context,
+                )
+            else:
+                processing_result = await asyncio.to_thread(
+                    self._video_processor.process_videos,
+                    top_path=input_data.top_video_path,
+                    side_path=input_data.side_video_path,
+                    allowed_class_ids=allowed_class_ids,
+                    product_weights=product_weights,
+                    trace_context=trace_context,
+                )
+        except Exception as exc:
+            trace_context.finalize(status="error", error=str(exc))
+            raise
 
         vote_results = processing_result.vote_results
         stats = processing_result.stats
@@ -1045,6 +1100,7 @@ class TriggerService:
 
         # v4.5: 요청 등록 (중복 방지용)
         self._register_request(idempotency_key, session_id)
+        trace_context.finalize(status="complete")
 
         return TriggerOutput(
             success=True,

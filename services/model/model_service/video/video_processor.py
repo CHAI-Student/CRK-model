@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .frame_extractor import create_frame_extractor
+from .frame_trace import TriggerTraceContext
 from .voting_ensemble import VotingEnsemble, VoteResult
 from model_service.vision import YOLOWrapper
 from model_service.vision.hand_path_tracker import HandPathTracker
@@ -227,6 +228,7 @@ class VideoProcessor:
         side_path: Optional[str] = None,
         allowed_class_ids: Optional[List[int]] = None,
         product_weights: Optional[Dict[int, float]] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
     ) -> VideoProcessingResult:
         """
         Process top and side camera videos.
@@ -265,6 +267,7 @@ class VideoProcessor:
             top_stats = self._process_single_video(
                 top_path, top_ensemble, "top", allowed_class_ids,
                 hand_path_tracker=top_hand_tracker,
+                trace_context=trace_context,
             )
             stats.top_frames = top_stats["frames"]
             stats.top_detections = top_stats["detections"]
@@ -280,6 +283,7 @@ class VideoProcessor:
             side_stats = self._process_single_video(
                 side_path, side_ensemble, "side", allowed_class_ids,
                 hand_path_tracker=None,  # Side 카메라에서는 손 경로 필터링 안 함
+                trace_context=trace_context,
             )
             stats.side_frames = side_stats["frames"]
             stats.side_detections = side_stats["detections"]
@@ -350,6 +354,7 @@ class VideoProcessor:
         side_path: Optional[str] = None,
         allowed_class_ids: Optional[List[int]] = None,
         product_weights: Optional[Dict[int, float]] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
     ) -> VideoProcessingResult:
         """
         Async streaming video processing (v5.3).
@@ -432,6 +437,11 @@ class VideoProcessor:
                 use_hwaccel=self.use_hwaccel,
                 camera_type=camera_type,
             )
+            if trace_context is not None:
+                trace_context.plan_camera(
+                    camera_type,
+                    int(getattr(extractor, "total_frames", 0) or 0),
+                )
 
             frame_idx = 0
             # ffmpeg 미존재 시 CV2FrameExtractor가 반환될 수 있음(__aiter__ 미지원)
@@ -446,6 +456,8 @@ class VideoProcessor:
 
             try:
                 async for frame in extractor:
+                    if trace_context is not None:
+                        trace_context.record_frame(camera_type, frame_idx, frame)
                     await frame_queue.put((camera_type, frame_idx, frame))
                     frame_idx += 1
 
@@ -779,6 +791,7 @@ class VideoProcessor:
         camera_type: str = "unknown",
         allowed_class_ids: Optional[List[int]] = None,
         hand_path_tracker: Optional[HandPathTracker] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
     ) -> dict:
         """
         Process a single video file with motion-based filtering.
@@ -824,12 +837,19 @@ class VideoProcessor:
             use_hwaccel=self.use_hwaccel,
             camera_type=camera_type,
         )
+        if trace_context is not None:
+            trace_context.plan_camera(
+                camera_type,
+                int(getattr(extractor, "total_frames", 0) or 0),
+            )
 
         # ROI 필터링 통계
         roi_filtered_count = 0
 
         for frame in extractor:
             frame_count += 1
+            if trace_context is not None:
+                trace_context.record_frame(camera_type, frame_count - 1, frame)
 
             # YOLO inference (single frame) - v4.4: allowed_class_ids 전달
             detections = self.yolo.detect(frame, allowed_class_ids=allowed_class_ids)

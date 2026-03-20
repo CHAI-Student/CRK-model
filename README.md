@@ -73,6 +73,22 @@ uv run --no-sync model-service
 uv run --no-sync pytest services/model/tests -q
 ```
 
+## AVI Split Trace
+
+- `/trigger` still receives AVI file paths from the camera service.
+- The model does not run inference on the AVI blob directly. It splits the AVI into frame images and runs YOLO per frame.
+- Every trigger now writes a persistent trace entry to `services/model/logs/frame_split_YYYYMMDD.jsonl`.
+- Each trace entry records `processing_mode="avi_to_frames"`, `inference_unit="image_frame"`, trigger status, video paths, and per-camera frame counts.
+- Optional sample frame export is off by default. Enable it with:
+
+```bash
+MODEL__TRACE__SAMPLE_EXPORT_ENABLED=true
+MODEL__TRACE__SAMPLE_COUNT_PER_CAMERA=3
+MODEL__TRACE__SAMPLE_EXPORT_DIR=logs/frame_samples
+```
+
+- When enabled, sample JPEGs are written under `services/model/logs/frame_samples/<session_id>/<camera>/`.
+
 ## `uv` Notes for Jetson
 
 - Create the venv with `--system-site-packages`. JetPack system packages provide CUDA, TensorRT, PyTorch, and often OpenCV.

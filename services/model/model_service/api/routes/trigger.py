@@ -37,6 +37,7 @@ from model_service.session import (
 )
 from model_service.session.active_product_store import ActiveProductStore
 from model_service.session.session_store import generate_session_id
+from model_service.video.frame_trace import TriggerTraceContext
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,8 @@ async def trigger_judgment(
     logger.info(f"[TRIGGER] videos: top={request.videos.top}, side={request.videos.side}")
     logger.info(f"[TRIGGER] loadcells: {len(request.loadcells)}")
 
+    trace_context = None
+
     try:
         if trigger_service is not None:
             from model_service.service.trigger_service import LoadcellReading, TriggerInput
@@ -211,6 +214,12 @@ async def trigger_judgment(
             )
 
         logger.warning("[TRIGGER] TriggerService not available, using fallback logic")
+        trace_context = TriggerTraceContext(
+            session_id=session_id,
+            zone=request.zone,
+            top_path=request.videos.top,
+            side_path=request.videos.side,
+        )
 
         _validate_video_paths(request.videos)
 
@@ -233,6 +242,7 @@ async def trigger_judgment(
             video_processor.process_videos,
             top_path=request.videos.top,
             side_path=request.videos.side,
+            trace_context=trace_context,
         )
 
         vote_results = processing_result.vote_results
@@ -339,6 +349,7 @@ async def trigger_judgment(
             f"confidence={result.confidence:.3f}, "
             f"total_price={result.total_price}, elapsed_ms={elapsed_ms:.1f}"
         )
+        trace_context.finalize(status="complete")
 
         return TriggerResponse(
             success=True,
@@ -349,6 +360,8 @@ async def trigger_judgment(
         )
 
     except HTTPException as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc.detail))
         logger.error(
             f"[TRIGGER ERROR] session_id={session_id}, "
             f"status={exc.status_code}, detail={exc.detail}"
@@ -362,6 +375,8 @@ async def trigger_judgment(
         raise
 
     except FileNotFoundError as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, video file not found: {exc}")
         session_store.update_stage(
             session_id,
@@ -378,6 +393,8 @@ async def trigger_judgment(
         )
 
     except (VideoCorruptedError, FFmpegError) as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, video processing: {exc}", exc_info=True)
         session_store.update_stage(
             session_id,
@@ -395,6 +412,8 @@ async def trigger_judgment(
         )
 
     except VideoProcessingError as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, video processing: {exc}", exc_info=True)
         session_store.update_stage(
             session_id,
@@ -411,6 +430,8 @@ async def trigger_judgment(
         )
 
     except YOLOModelNotLoadedError as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, YOLO model not loaded: {exc}")
         session_store.update_stage(
             session_id,
@@ -427,6 +448,8 @@ async def trigger_judgment(
         )
 
     except YOLOGPUError as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, YOLO GPU: {exc}", exc_info=True)
         session_store.update_stage(
             session_id,
@@ -443,6 +466,8 @@ async def trigger_judgment(
         )
 
     except YOLOInferenceError as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, YOLO inference: {exc}", exc_info=True)
         session_store.update_stage(
             session_id,
@@ -459,6 +484,8 @@ async def trigger_judgment(
         )
 
     except Exception as exc:
+        if trace_context is not None:
+            trace_context.finalize(status="error", error=str(exc))
         logger.error(f"[TRIGGER ERROR] session_id={session_id}, unexpected: {exc}", exc_info=True)
         session_store.update_stage(
             session_id,
