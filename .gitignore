@@ -1,178 +1,75 @@
-# =============================================================================
-# Node.js
-# =============================================================================
-node_modules/
-/build
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-
-# =============================================================================
-# Python
-# =============================================================================
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg
-*.egg-info/
-.eggs/
-dist/
-build/
-*.manifest
-*.spec
-
-# Virtual environments
-venv/
-.venv/
-ENV/
-env/
-.python-version
-
-# pytest / coverage
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# =============================================================================
-# IDE / Editor
-# =============================================================================
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.project
-.pydevproject
-.settings/
-*.sublime-workspace
-*.sublime-project
-
-# =============================================================================
-# OS Generated
-# =============================================================================
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# Windows temporary files
-nul
-*.tmp
-*.temp
-
-# =============================================================================
-# Archive / Deprecated (다른 레포로 이관된 서비스)
-# =============================================================================
-_archive/
-services/_archive/
-services/deadbolt_driver/
-services/loadcell_driver/
-services/product_judge/
-
-# =============================================================================
-# Test Results / Temporary Data (로컬 테스트 결과)
-# =============================================================================
-*_results.json
-test_results.json
-*.results.json
-viz_results/
-test_output/
-
-# =============================================================================
-# Environment / Secrets (보안 - 절대 커밋 금지)
-# =============================================================================
+# Environment and local secrets
 .env
 .env.*
 !.env.example
 !.env.docker
 *.local
 
-# Credentials / API Keys
-credentials.json
-secrets.json
-*.pem
-*.key
-*.crt
-*.p12
-*.pfx
-service-account*.json
-google-credentials*.json
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+site/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+uv.lock
 
-# =============================================================================
-# YOLO Model Files (별도 제공 - 용량 문제)
-# =============================================================================
-models/
-!models/.gitkeep
-*.pt
-*.onnx
-*.engine
-*.trt
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
 
-# =============================================================================
-# Media / Large Files
-# =============================================================================
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.bmp
-!client/public/**/*.png
-!client/public/**/*.jpg
-!client/src/**/*.png
-!client/src/**/*.svg
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# =============================================================================
-# Logs
-# =============================================================================
-*.log
-logs/
-*.log.*
-
-# =============================================================================
-# minkyu Branch Only (PR 제외 대상)
-# =============================================================================
-README_MINKYU.md
-INTEGRATION_GUIDE.md
-SECURITY_AUDIT_REPORT.md
-
-# =============================================================================
-# Jupyter Notebooks (체크포인트)
-# =============================================================================
-.ipynb_checkpoints/
-
-
-multisave.py
+# Local assistant files
+AGENTS.md
+CLAUDE.md
 .claude/
-IF11_상품정보.pdf
-G:\다른 컴퓨터\내 컴퓨터\VOICE\2026\crk\win_pc_test_sw2io_board\Edge_Environment\260204 시연대상 상품 리스트_민경수정.xlsx
-docs/Jetson_Nano_Testing_Guide.md
-post_api.txt
-/services/model/tests/
-direction.txt
-docs/SEMINAR_PRESENTATION.md
-CRK_테스트_시나리오_회의결과.pdf
-
-# =============================================================================
-# Claude Code Local Guides (on-demand, not for remote)
-# =============================================================================
 docs/agent-guides/
 docs/plans/
-docs/IMPLEMENTATION_ROADMAP.md
-docs/MODEL_PROCESS_RISK_REVIEW_2026-03-04.md
-docs/REQUIRED_FIXES_REVIEW_2026-03-04.md
-docs/FIXES_APPLIED_2026-03-05.md
-docs/SEMINAR_CLAUDE_CODE.md
-uv.lock
-CRK.pptx
+docs/REQUIRED_FIXES_REVIEW_*.md
+docs/SEMINAR_*.md
+
+# Tool caches
+.gocache/
+.cache/
+
+# Local runtime outputs
+*.log
+*.log.*
+/data/
+/services/model/logs/
+/services/model/model_service/data/sessions/
+
+# Local model artifacts
+/models/
+
+# Optional local media captures
+*.avi
+*.mp4
+*.mov
+*.mkv
