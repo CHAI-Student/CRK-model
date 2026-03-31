@@ -113,18 +113,15 @@ class ProductAggregator:
         aggregated: Dict[int, AggregatedProduct] = {}
         unmatched_returns: List[UnmatchedReturn] = []
 
+        # Replay triggers in order so later returns can cancel earlier removals
+        # within the same door session.
         for trigger in triggers:
             if trigger.is_return:
                 # 반환 처리: 무게 매칭하여 차감
                 matched_id = self._handle_return(aggregated, trigger.delta_weight)
                 if matched_id is None:
                     # 매칭 실패 → 기록
-                    unmatched_returns.append(UnmatchedReturn(
-                        trigger_id=trigger.trigger_id,
-                        delta_weight=trigger.delta_weight,
-                        timestamp=trigger.timestamp,
-                        tolerance_used=self._weight_tolerance,
-                    ))
+                    self._record_unmatched_return(unmatched_returns, trigger)
             else:
                 # 제거 처리: YOLO 결과 합산
                 self._handle_removal(aggregated, trigger)
@@ -139,6 +136,36 @@ class ProductAggregator:
             products=aggregated,
             unmatched_returns=unmatched_returns,
         )
+
+    def _record_unmatched_return(
+        self,
+        unmatched_returns: List[UnmatchedReturn],
+        trigger: TriggerResult,
+    ) -> None:
+        """Persist an unmatched return so later recovery passes can inspect it."""
+        unmatched_returns.append(
+            UnmatchedReturn(
+                trigger_id=trigger.trigger_id,
+                delta_weight=trigger.delta_weight,
+                timestamp=trigger.timestamp,
+                tolerance_used=self._weight_tolerance,
+            )
+        )
+
+    @staticmethod
+    def _estimate_return_count(unit_weight: float, delta_weight: float, count: int) -> int:
+        """Estimate how many units were returned while avoiding over-deduction.
+
+        When the inferred count is larger than the currently aggregated count,
+        the delta is treated as noisy and only a single unit is rolled back.
+        """
+        if unit_weight <= 0:
+            return 1
+
+        estimated_count = max(1, round(delta_weight / unit_weight))
+        if estimated_count > count:
+            return 1
+        return estimated_count
 
     def _handle_removal(
         self,
@@ -206,6 +233,8 @@ class ProductAggregator:
         Returns:
             차감된 product_id 또는 None (매칭 실패)
         """
+        # Only positive deltas represent "put back" operations. Negative deltas
+        # are handled upstream as removals.
         if delta_weight <= 0:
             return None
 
@@ -217,12 +246,14 @@ class ProductAggregator:
             if agg.count > 0:
                 # 무게 기반 개수 추정: delta / unit_weight (최소 1)
                 # Phase 0b 안전장치: 비정상적으로 큰 추정치(> 재고)면 1개만 차감
-                if agg.weight > 0:
-                    estimated_count = max(1, round(delta_weight / agg.weight))
-                    if estimated_count > agg.count:
-                        estimated_count = 1
-                else:
-                    estimated_count = 1
+                # Estimate the returned unit count from the load delta, but
+                # stay conservative when the rounded count would erase more
+                # inventory than is currently aggregated.
+                estimated_count = self._estimate_return_count(
+                    unit_weight=agg.weight,
+                    delta_weight=delta_weight,
+                    count=agg.count,
+                )
                 agg.count = max(0, agg.count - estimated_count)
                 logger.info(
                     f"Return processed: {agg.name} x{estimated_count} "
@@ -232,6 +263,8 @@ class ProductAggregator:
                 return matched_product_id
 
         # Step 2: 조합 매칭 폴백 (Phase 1) - 다중 상품 동시 반납
+        # If no single product explains the return, try a conservative
+        # combination match so "remove then reinsert" flows can still recover.
         combo = self._weight_matcher.find_return_combination(aggregated, delta_weight)
         if combo is not None:
             names = []
@@ -366,12 +399,7 @@ class ProductAggregator:
             matched_id = self._handle_return(aggregated, trigger.delta_weight)
             if matched_id is None:
                 # 매칭 실패 → 기록
-                unmatched_returns.append(UnmatchedReturn(
-                    trigger_id=trigger.trigger_id,
-                    delta_weight=trigger.delta_weight,
-                    timestamp=trigger.timestamp,
-                    tolerance_used=self._weight_tolerance,
-                ))
+                self._record_unmatched_return(unmatched_returns, trigger)
         else:
             # 제거 처리: YOLO 결과 합산
             self._handle_removal(aggregated, trigger)

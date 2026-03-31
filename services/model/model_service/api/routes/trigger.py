@@ -158,6 +158,13 @@ async def trigger_judgment(
     """Handle a completed camera recording."""
     start_time = time.time()
     session_id = generate_session_id(request.zone)
+    # Capture the active-product snapshot once per request so the service path
+    # and the fallback path evaluate the same live machine state.
+    active_products_snapshot = (
+        active_product_store.get_all_products()
+        if active_product_store is not None
+        else []
+    )
 
     logger.info("[TRIGGER] ========== inference start ==========")
     logger.info(f"[TRIGGER] zone={request.zone}, session_id={session_id}")
@@ -183,6 +190,9 @@ async def trigger_judgment(
                 ],
                 top_video_path=request.videos.top,
                 side_video_path=request.videos.side,
+            )
+            logger.info(
+                f"[TRIGGER][path=service] active_products_snapshot={len(active_products_snapshot)}"
             )
 
             output = await trigger_service.enqueue_trigger(trigger_input)
@@ -213,7 +223,12 @@ async def trigger_judgment(
                 waiting_for=output.waiting_for,
             )
 
-        logger.warning("[TRIGGER] TriggerService not available, using fallback logic")
+        # The fallback route exists for compatibility. Keep it behaviorally
+        # aligned with TriggerService, especially around active-product context.
+        logger.warning(
+            f"[TRIGGER][path=fallback] TriggerService not available, "
+            f"active_products_snapshot={len(active_products_snapshot)}"
+        )
         trace_context = TriggerTraceContext(
             session_id=session_id,
             zone=request.zone,
@@ -276,6 +291,7 @@ async def trigger_judgment(
             vision_candidates=vision_candidates,
             delta_weight=delta_weight,
             vision_only=vision_only,
+            active_products=active_products_snapshot,
         )
 
         def get_product_idx(product_id: int) -> str | None:

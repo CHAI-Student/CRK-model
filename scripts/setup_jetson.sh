@@ -33,6 +33,28 @@ print_err() {
     echo -e "${RED}ERROR${NC} $1"
 }
 
+install_activation_hook() {
+    local activate_path hook_block
+    activate_path="${VENV_PATH}/bin/activate"
+
+    if [[ ! -f "${activate_path}" ]]; then
+        print_err "Activation script not found: ${activate_path}"
+        exit 1
+    fi
+
+    # Persist the Jetson runtime linker setup across future shells so users only
+    # need `source .venv/bin/activate` before starting the service.
+    hook_block=$'\n# model-service Jetson runtime hook\nif [ -n "${VIRTUAL_ENV:-}" ] && [ -f "${VIRTUAL_ENV}/../scripts/jetson_env.sh" ]; then\n    . "${VIRTUAL_ENV}/../scripts/jetson_env.sh"\nfi\n'
+
+    if grep -Fq 'model-service Jetson runtime hook' "${activate_path}"; then
+        print_ok "Jetson activation hook already installed"
+        return
+    fi
+
+    printf '%s' "${hook_block}" >> "${activate_path}"
+    print_ok "Installed Jetson activation hook into .venv/bin/activate"
+}
+
 install_project_packages() {
     uv pip install --no-deps -e .
 
@@ -131,6 +153,9 @@ else
 fi
 
 source "${VENV_PATH}/bin/activate"
+# Load the runtime paths in the current shell as well, so the validation steps
+# below exercise the same CUDA/TensorRT environment that normal runtime uses.
+. "${PROJECT_ROOT}/scripts/jetson_env.sh"
 
 print_step "4/9" "Ensuring Jetson-compatible torch"
 
@@ -219,7 +244,11 @@ else
     exit 1
 fi
 
-print_step "9/9" "Done"
+print_step "9/10" "Installing activation hook"
+
+install_activation_hook
+
+print_step "10/10" "Done"
 
 echo -e "${BLUE}Recommended runtime commands${NC}"
 echo "  source .venv/bin/activate"

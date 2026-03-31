@@ -1,6 +1,6 @@
 # Jetson Orin Nano Setup Guide
 
-Last reviewed: 2026-03-09
+Last reviewed: 2026-03-31
 
 This guide is for the direct Jetson runtime, not the Windows dev environment.
 
@@ -40,6 +40,7 @@ cd ~/Edge_Environment
 
 chmod +x scripts/setup_jetson.sh
 chmod +x scripts/install_jetson_torch.sh
+chmod +x scripts/jetson_env.sh
 ./scripts/setup_jetson.sh
 
 source .venv/bin/activate
@@ -55,6 +56,8 @@ The setup script now does all of the following:
 - forces NumPy back to `1.x` if needed
 - creates `.env` from `.env.example` if missing
 - checks that the `model-service` entry point exists
+- installs a `.venv/bin/activate` hook that restores Jetson CUDA/TensorRT paths
+  in every future shell
 
 ## Manual Setup
 
@@ -63,6 +66,7 @@ cd ~/Edge_Environment
 
 uv venv --system-site-packages --python python3.10 .venv
 source .venv/bin/activate
+source scripts/jetson_env.sh
 ./scripts/install_jetson_torch.sh
 uv pip install --no-deps -e .
 uv pip install "fastapi>=0.100.0" "uvicorn[standard]>=0.23.0" "pydantic>=2.0.0" "pydantic-settings>=2.0.0" "python-multipart>=0.0.6" "httpx>=0.24.0" "aiohttp>=3.8.0" "numpy>=1.24.0,<2.0.0" "pillow>=10.0.0" "pyyaml>=6.0.0" "requests>=2.23.0" "scipy>=1.4.1" "matplotlib>=3.3.0" "psutil>=5.8.0" "polars>=0.20.0" "ultralytics-thop>=2.0.18"
@@ -86,6 +90,11 @@ If your engine file uses a different name, point the variable at the real file i
 - The default engine path in code is `models/siyeon_best.engine`.
 - FastAPI startup now fails fast if the TensorRT engine cannot be loaded.
 - Startup errors now include the root cause from the YOLO loader. If CUDA is unavailable, the message says so instead of looking like a pure path problem.
+- `model-service` now bootstraps the common Jetson CUDA/TensorRT runtime paths
+  before importing the app. After the one-time setup, a fresh terminal should
+  only need `source .venv/bin/activate` followed by `model-service`.
+- `scripts/jetson_env.sh` remains available as a manual recovery command when
+  you want to inspect CUDA visibility inside the shell itself.
 
 ## Recommended Runtime Commands
 
@@ -206,8 +215,9 @@ WantedBy=multi-user.target
 | Problem | Cause | Action |
 |---------|-------|--------|
 | `Name or service not known` while downloading torch | DNS failure on Jetson | verify network and `getent hosts pypi.jetson-ai-lab.io`, then rerun the helper |
-| `torch.cuda.is_available()` is `False` and `torch.version.cuda` is `None` | CPU-only PyPI torch is installed in `.venv` | run `./scripts/install_jetson_torch.sh`, then rerun `./scripts/setup_jetson.sh` |
-| `torch.cuda.is_available()` is `False` but `torch.version.cuda` is set | CUDA libraries are not visible to torch | verify JetPack / CUDA install and rerun the helper inside `.venv` |
+| `torch.cuda.is_available()` is `False` and `torch.version.cuda` is `None` | CPU-only PyPI torch is installed in `.venv` | run `./scripts/install_jetson_torch.sh`; rerun `./scripts/setup_jetson.sh` only if the venv entry points or activation hook also need to be rebuilt |
+| `torch.cuda.is_available()` is `False` but `torch.version.cuda` is set | CUDA libraries are not visible to torch | first retry in a fresh shell with `source .venv/bin/activate && model-service`; if shell tools still cannot see CUDA, run `source scripts/jetson_env.sh` and recheck |
+| `model-service` works only after manually rerunning `./scripts/setup_jetson.sh` | Jetson runtime paths were not restored in the new shell | rerun `./scripts/setup_jetson.sh` once to reinstall the activation hook, then use only `source .venv/bin/activate` in later shells |
 | `import torch` fails with `libcudss.so` | cuDSS runtime missing for the Jetson wheel | run `pip install nvidia-cudss-cu12` inside `.venv`, then retry |
 | `No module named tensorrt` | TensorRT Python bindings unavailable | verify JetPack install and Python path |
 | `numpy.core.multiarray failed to import` | NumPy 2.x or mixed packages | reinstall NumPy 1.x in `.venv` |

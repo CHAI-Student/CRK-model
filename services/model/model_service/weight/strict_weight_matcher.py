@@ -197,6 +197,9 @@ class StrictWeightMatcher:
         Returns:
             유효한 조합 리스트 (match_score 내림차순 정렬)
         """
+        # Strict matching is direction-agnostic. The caller keeps track of
+        # whether the delta means removal or return; this matcher only tries
+        # to explain the absolute magnitude.
         target_weight = abs(delta_weight)
 
         logger.info(f"[STRICT] ========== 엄격 무게 매칭 ==========")
@@ -211,6 +214,8 @@ class StrictWeightMatcher:
             return []
 
         # active_products 빠른 조회용 맵 생성
+        # Key the live product snapshot by YOLO class id so candidate filtering
+        # is deterministic and does not repeatedly scan the full list.
         active_product_map: Dict[int, Any] = {}
         if active_products:
             for ap in active_products:
@@ -218,9 +223,19 @@ class StrictWeightMatcher:
                     active_product_map[ap.yolo_class_id] = ap
 
         # 후보 상품 추출 (YOLO 감지 + 무게 정보 있음)
-        candidate_products = self._extract_candidate_products(
+        candidate_products, extraction_stats = self._extract_candidate_products(
             candidates, active_product_map
         )
+        logger.info(
+            f"[STRICT][context] active_products={len(active_product_map)}, "
+            f"candidate_products={len(candidate_products)}, "
+            f"zero_stock_filtered={extraction_stats['zero_stock']}"
+        )
+        if extraction_stats["zero_stock"] > 0:
+            logger.warning(
+                f"[STRICT][reason=stock_filtered] "
+                f"zero_stock_filtered={extraction_stats['zero_stock']}"
+            )
 
         if not candidate_products:
             logger.warning("[STRICT] 유효한 후보 상품 없음 (무게 정보 없거나 재고 없음)")
@@ -271,7 +286,7 @@ class StrictWeightMatcher:
         self,
         candidates: List[EnsembleResult],
         active_product_map: Dict[int, Any],
-    ) -> List[CandidateProduct]:
+    ) -> tuple[List[CandidateProduct], Dict[str, int]]:
         """
         YOLO 후보에서 유효한 CandidateProduct 추출.
 
@@ -285,14 +300,20 @@ class StrictWeightMatcher:
             active_product_map: class_id → ActiveProduct 맵
 
         Returns:
-            CandidateProduct 리스트
+            CandidateProduct 리스트와 추출 통계
         """
         result = []
+        stats = {
+            "missing_mapping": 0,
+            "invalid_weight": 0,
+            "zero_stock": 0,
+        }
 
         for candidate in candidates:
             active_product = active_product_map.get(candidate.class_id)
 
             if active_product is None:
+                stats["missing_mapping"] += 1
                 logger.debug(
                     f"[STRICT] Skip class_id={candidate.class_id}: "
                     "not in active_products"
@@ -303,6 +324,7 @@ class StrictWeightMatcher:
             stock = getattr(active_product, 'stock_qty', 0)
 
             if weight <= 0:
+                stats["invalid_weight"] += 1
                 logger.debug(
                     f"[STRICT] Skip {active_product.product_name}: "
                     f"weight={weight}g (invalid)"
@@ -310,6 +332,7 @@ class StrictWeightMatcher:
                 continue
 
             if stock <= 0:
+                stats["zero_stock"] += 1
                 logger.debug(
                     f"[STRICT] Skip {active_product.product_name}: "
                     f"stock={stock} (out of stock)"
@@ -326,7 +349,7 @@ class StrictWeightMatcher:
             )
             result.append(cp)
 
-        return result
+        return result, stats
 
     def _backtrack(
         self,
@@ -349,6 +372,8 @@ class StrictWeightMatcher:
             results: 결과 저장 리스트
         """
         # 성능 제한: 최대 조합 수 초과 시 중단
+        # Stop once enough valid combinations have been collected. Beyond that
+        # point, extra combinations mostly add latency rather than signal.
         if len(results) >= self.max_combinations:
             return
 
@@ -478,6 +503,9 @@ class StrictWeightMatcher:
         Returns:
             {product_id: count} 또는 None (조합 없음)
         """
+        # Return matching works against already aggregated counts rather than
+        # fresh vision output, so it exits early when the delta is too small to
+        # explain any concrete product movement.
         if delta_weight <= self.tolerance:
             return None
 

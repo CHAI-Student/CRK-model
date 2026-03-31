@@ -125,10 +125,14 @@ class VisionModel(BaseModel):
 class WeightModel(BaseModel):
     """Weight verification configuration settings."""
 
+    # Percent-based tolerance remains useful for relaxed matching where the
+    # unit count is inferred from the delta and product weight.
     tolerance_percent: float = Field(
         default=0.08,
         description="Weight tolerance percentage (0.08 = 8%)",
     )
+    # Strict matching uses a fixed gram window so operators can reason about
+    # loadcell error budgets directly in the field.
     tolerance_grams: float = Field(
         default=3.0,
         description="Fixed weight tolerance in grams (고정 허용 오차, v5.1: 5g→3g)",
@@ -141,6 +145,8 @@ class WeightModel(BaseModel):
         default=2,
         description="Maximum combination size for weight matching",
     )
+    # Strict mode is the weight-first branch. `strict_mode_fallback` controls
+    # whether a strict miss degrades to relaxed matching or hard-fails.
     strict_mode: bool = Field(
         default=True,
         description="엄격 무게 검증 모드 (v5.1: 무게로 설명 불가 시 NO_DETECTION)",
@@ -150,6 +156,8 @@ class WeightModel(BaseModel):
         description="조합 검색 시 최대 상품 종류 수 (v5.1)",
     )
     # v5.2: StrictWeightMatcher 추가 설정
+    # Strict matcher search limits bound runtime on noisy deltas and large
+    # catalogs without changing the matching policy itself.
     max_count_per_item: int = Field(
         default=10,
         description="상품당 최대 개수 (v5.2)",
@@ -158,8 +166,10 @@ class WeightModel(BaseModel):
         default=100,
         description="최대 조합 수 (성능 제한, v5.2)",
     )
+    # The operational default is to recover into the relaxed path so minor
+    # weight mismatches do not immediately collapse to NO_DETECTION.
     strict_mode_fallback: bool = Field(
-        default=False,
+        default=True,
         description="strict 모드 실패 시 기존 로직 폴백 여부 (v5.2)",
     )
 

@@ -15,6 +15,7 @@ Vision 후보군 + 무게 검증을 결합하여 최종 상품과 개수를 결�
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional
 import logging
 import time
@@ -32,8 +33,20 @@ from model_service.session.active_product_store import ActiveProductStore
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _WeightOnlyCandidate:
+    """Minimal product view used by the loadcell-only fallback path."""
+
+    product_id: int
+    product_idx: str
+    name: str
+    weight: float
+    price: int
+    stock: int
+
+
 def _get_count_calculator():
-    """Lazy import WeightBasedCountCalculator to avoid circular import."""
+    """Lazy import the count calculator to avoid circular imports."""
     from model_service.weight.count_calculator import WeightBasedCountCalculator
     return WeightBasedCountCalculator
 
@@ -110,8 +123,15 @@ class ProductDecisionEngine:
         Returns:
             JudgmentResult (Node.js 전달용)
         """
+        # The active-product snapshot is the authoritative inventory context for
+        # strict and loadcell-only inference. Logging it here makes it obvious
+        # when the trigger path forgot to forward that snapshot.
         timestamp = time.time()
         abs_weight = abs(delta_weight)
+        active_product_count, zero_stock_filtered = self._summarize_active_products(
+            active_products
+        )
+        delta_reason = self._get_delta_reason(delta_weight)
 
         logger.info(f"[ENGINE] ========== 판단 엔진 ==========")
         logger.info(
@@ -119,42 +139,91 @@ class ProductDecisionEngine:
             f"delta_weight={delta_weight:.1f}g, vision_only={vision_only}, "
             f"strict_mode={self.strict_mode}"
         )
+        logger.info(
+            f"[ENGINE][reason={delta_reason}] active_products={active_product_count}, "
+            f"zero_stock_filtered={zero_stock_filtered}"
+        )
+        if active_product_count == 0:
+            logger.warning(
+                "[ENGINE][reason=no_active_products] active_products snapshot is empty"
+            )
         if active_products:
             logger.info(f"[ENGINE] v4.7: active_products {len(active_products)}개 수신")
 
         # Vision 전용 모드: 카메라만으로 판단
         if vision_only:
-            return self._judge_vision_only(vision_candidates, timestamp)
+            result = self._judge_vision_only(vision_candidates, timestamp)
+            self._log_final_branch("vision_only", result)
+            return result
 
         # 1. 후보군이 없는 경우 → Loadcell-only 폴백
         if not vision_candidates:
             logger.warning(
-                f"[ENGINE] No vision candidates provided (delta_weight={delta_weight:.1f}g), "
-                f"trying loadcell-only fallback"
+                f"[ENGINE][reason=no_vision_candidates] "
+                f"delta_weight={delta_weight:.1f}g, trying loadcell-only fallback"
             )
-            return self.judge_by_weight_only(delta_weight, timestamp, active_products=active_products)
+            result = self.judge_by_weight_only(
+                delta_weight, timestamp, active_products=active_products
+            )
+            self._log_final_branch("loadcell_only_no_vision", result)
+            return result
 
         # 2. 무게 변화가 없는 경우
         if abs_weight < self.min_weight_change:
-            logger.info(f"Weight change too small: {abs_weight:.1f}g < {self.min_weight_change}g")
-            return self._create_no_detection_result(delta_weight, timestamp)
+            logger.info(
+                f"[ENGINE][reason=min_weight_change] "
+                f"{abs_weight:.1f}g < {self.min_weight_change}g"
+            )
+            result = self._create_no_detection_result(delta_weight, timestamp)
+            self._log_final_branch("no_detection_min_weight", result)
+            return result
 
         # v5.1: strict_mode 분기 - 무게 우선 엄격 매칭
         if self.strict_mode:
-            logger.info("[ENGINE] v5.1: strict_mode 활성화 - 무게 우선 엄격 매칭")
-            return self._judge_strict(
+            logger.info("[ENGINE][reason=strict_mode] v5.1 strict matching enabled")
+            strict_result = self._judge_strict(
                 vision_candidates, delta_weight, timestamp, active_products
             )
+            if strict_result is not None:
+                branch = (
+                    "strict_match"
+                    if strict_result.status == JudgmentStatus.COMPLETE
+                    else "strict_no_detection"
+                )
+                self._log_final_branch(branch, strict_result)
+                return strict_result
 
-        # 기존 로직 (strict_mode=False)
-        # 3. 개수 계산 (각 후보별) - v4.7: active_products 전달
+        result, branch = self._judge_relaxed(
+            vision_candidates=vision_candidates,
+            delta_weight=delta_weight,
+            timestamp=timestamp,
+            active_products=active_products,
+        )
+        self._log_final_branch(branch, result)
+        return result
+
+    def _judge_relaxed(
+        self,
+        vision_candidates: List[EnsembleResult],
+        delta_weight: float,
+        timestamp: float,
+        active_products: Optional[List] = None,
+    ) -> tuple[JudgmentResult, str]:
+        """Run the legacy non-strict flow and report which branch was used."""
+        # Prefer fully validated matches first, then progressively relax the
+        # matching requirements if the stricter branches fail.
         estimates = self.count_calculator.calculate(
             vision_candidates, delta_weight, active_products=active_products
         )
 
         if not estimates:
-            logger.warning("No valid count estimates, trying loadcell-only fallback")
-            return self.judge_by_weight_only(delta_weight, timestamp, active_products=active_products)
+            logger.warning(
+                "[ENGINE][reason=no_count_estimates] trying loadcell-only fallback"
+            )
+            result = self.judge_by_weight_only(
+                delta_weight, timestamp, active_products=active_products
+            )
+            return result, "loadcell_only_no_estimates"
 
         # 4. 단일 상품 매칭 시도
         logger.info(f"[ENGINE] 전략: single_product_match 시도...")
@@ -163,7 +232,7 @@ class ProductDecisionEngine:
         )
         if single_result and single_result.status == JudgmentStatus.COMPLETE:
             logger.info(f"[ENGINE] 단일 상품 매칭 성공: {single_result.products[0].name}")
-            return single_result
+            return single_result, "single_product_match"
 
         # 5. 다중 상품 조합 시도 - v4.7: active_products 전달
         logger.info(f"[ENGINE] 전략: combination_match 시도...")
@@ -173,11 +242,11 @@ class ProductDecisionEngine:
         if combo_result and combo_result.status == JudgmentStatus.COMPLETE:
             names = [p.name for p in combo_result.products]
             logger.info(f"[ENGINE] 조합 매칭 성공: {names}")
-            return combo_result
+            return combo_result, "combination_match"
 
         # 6. 불완전 결과 반환 (최선의 추정)
         logger.info(f"[ENGINE] 전략: partial_result 반환 (매칭 실패)")
-        return self._create_partial_result(estimates, delta_weight, timestamp)
+        return self._create_partial_result(estimates, delta_weight, timestamp), "partial_result"
 
     def _judge_strict(
         self,
@@ -185,7 +254,7 @@ class ProductDecisionEngine:
         delta_weight: float,
         timestamp: float,
         active_products: Optional[List] = None,
-    ) -> JudgmentResult:
+    ) -> Optional[JudgmentResult]:
         """
         무게 우선 엄격 판단 (v5.1).
 
@@ -202,8 +271,10 @@ class ProductDecisionEngine:
             active_products: ActiveProductStore의 상품 정보
 
         Returns:
-            JudgmentResult (status: COMPLETE 또는 NO_DETECTION)
+            JudgmentResult on strict success, None when relaxed fallback should continue.
         """
+        # The strict path is weight-first. If it cannot fully explain the load
+        # delta, the caller decides whether to degrade to the relaxed path.
         from model_service.weight.strict_weight_matcher import StrictWeightMatcher
 
         # StrictWeightMatcher 생성
@@ -220,24 +291,18 @@ class ProductDecisionEngine:
         )
 
         if not valid_combos:
-            # v5.2: strict_mode_fallback이면 기존 로직으로 폴백
             if config.weight.strict_mode_fallback:
                 logger.warning(
-                    f"[ENGINE] v5.2 strict: 무게로 설명 불가, 기존 로직 폴백 "
-                    f"(delta={delta_weight:.1f}g, tolerance=±{config.weight.tolerance_grams}g)"
+                    f"[ENGINE][reason=strict_mismatch] "
+                    f"delta={delta_weight:.1f}g, tolerance=±{config.weight.tolerance_grams}g, "
+                    "fallback=enabled"
                 )
-                # 기존 non-strict 로직으로 폴백
-                estimates = self.count_calculator.calculate(
-                    vision_candidates, delta_weight, active_products=active_products
-                )
-                if estimates:
-                    return self._create_partial_result(estimates, delta_weight, timestamp)
+                return None
 
-            # 무게로 설명 불가 → NO_DETECTION
             logger.warning(
-                f"[ENGINE] v5.1 strict: 무게로 설명 불가 "
-                f"(delta={delta_weight:.1f}g, tolerance=±{config.weight.tolerance_grams}g) "
-                f"→ NO_DETECTION"
+                f"[ENGINE][reason=strict_mismatch] "
+                f"delta={delta_weight:.1f}g, tolerance=±{config.weight.tolerance_grams}g, "
+                "fallback=disabled -> NO_DETECTION"
             )
             return self._create_no_detection_result(delta_weight, timestamp)
 
@@ -245,7 +310,7 @@ class ProductDecisionEngine:
         best = valid_combos[0]
 
         logger.info(
-            f"[ENGINE] v5.1 strict: 최적 조합 선택 - "
+            f"[ENGINE][reason=strict_match] 최적 조합 선택 - "
             f"weight={best.total_weight:.1f}g (err={best.weight_error:.1f}g), "
             f"score={best.match_score:.3f}"
         )
@@ -270,6 +335,8 @@ class ProductDecisionEngine:
         Returns:
             JudgmentResult (status: COMPLETE)
         """
+        # Strict combinations already fully explain the load delta, so each
+        # item can safely inherit the combination-level confidence.
         products = []
         total_price = 0
 
@@ -340,6 +407,38 @@ class ProductDecisionEngine:
             logger.warning("No vision candidates for vision-only judgment")
             return self._create_no_detection_result(0.0, timestamp)
 
+        best_candidate = max(vision_candidates, key=lambda c: c.combined_confidence)
+
+        # Vision-only mode should stay available even when the product DB has
+        # not been injected yet. In that case we still emit a partial answer
+        # using the raw class metadata from the detector.
+        if self.product_db is None:
+            confidence = best_candidate.combined_confidence * 0.7
+            logger.warning(
+                f"Vision-only fallback without product DB: "
+                f"class_id={best_candidate.class_id}, name={best_candidate.class_name}"
+            )
+            return JudgmentResult(
+                products=[
+                    ProductJudgment(
+                        product_id=best_candidate.class_id,
+                        name=best_candidate.class_name,
+                        count=1,
+                        unit_price=0,
+                        total_price=0,
+                        confidence=confidence,
+                        unit_weight=0.0,
+                    )
+                ],
+                total_price=0,
+                confidence=confidence,
+                status=JudgmentStatus.PARTIAL,
+                weight_delta=0.0,
+                weight_explained=0.0,
+                weight_residual=0.0,
+                timestamp=timestamp,
+            )
+
         # 후보군 로그 출력
         for i, c in enumerate(vision_candidates[:5]):
             logger.debug(
@@ -359,7 +458,7 @@ class ProductDecisionEngine:
 
         # 상품 정보 조회 (YOLO 매핑 우선)
         # 1. YOLO class_id로 매핑된 상품 조회
-        product = self.product_db.get_by_yolo_class_id(best_candidate.class_id)
+        product = self._lookup_product_for_candidate(best_candidate)
 
         # 2. 폴백: YOLO 클래스명으로 조회
         if product is None:
@@ -477,7 +576,10 @@ class ProductDecisionEngine:
 
         abs_weight = abs(delta_weight)
 
-        logger.info(f"Loadcell-only fallback: delta_weight={delta_weight:.1f}g")
+        logger.info(
+            f"[ENGINE][reason=loadcell_only] delta_weight={delta_weight:.1f}g, "
+            f"active_products={len(active_products) if active_products else 0}"
+        )
 
         # 무게 변화가 너무 작은 경우
         if abs_weight < self.min_weight_change:
@@ -485,8 +587,10 @@ class ProductDecisionEngine:
             return self._create_no_detection_result(delta_weight, timestamp)
 
         # v4.8: active_products 우선 사용 (Node.js 최신 무게)
-        candidate_products = []
-        if active_products:
+        # Normalize the live snapshot into a minimal candidate list before
+        # doing any weight math so type quirks stay isolated here.
+        candidate_products = self._build_weight_only_candidates(active_products)
+        if False and active_products:  # Legacy path intentionally disabled.
             for ap in active_products:
                 # has_loadcell 확인: "false"/"null"이면 제외
                 has_loadcell = getattr(ap, 'has_loadcell', 'true')
@@ -516,9 +620,15 @@ class ProductDecisionEngine:
                 )
 
         # v4.9: active_products가 없으면 no_detection 반환
+        if candidate_products:
+            logger.info(
+                f"[LOADCELL-ONLY] using {len(candidate_products)} products "
+                "from normalized active_products snapshot"
+            )
+
         if not candidate_products:
             logger.warning(
-                f"[LOADCELL-ONLY] v4.9: No active_products available "
+                f"[ENGINE][reason=no_active_products] [LOADCELL-ONLY] v4.9: No active_products available "
                 f"(delta_weight={delta_weight:.1f}g, input_count={len(active_products) if active_products else 0}), "
                 f"ProductDB fallback disabled → no_detection"
             )
@@ -707,6 +817,8 @@ class ProductDecisionEngine:
         timestamp: float,
     ) -> JudgmentResult:
         """불완전 결과 생성."""
+        # Keep the best available estimate so downstream aggregation can still
+        # reason about likely products even when strict validation fails.
         if not estimates:
             return self._create_no_detection_result(delta_weight, timestamp)
 
@@ -742,6 +854,8 @@ class ProductDecisionEngine:
         timestamp: float,
     ) -> JudgmentResult:
         """감지된 상품 없음 결과 생성."""
+        # Preserve the raw delta even for NO_DETECTION so operators can tell
+        # whether inference failed after a meaningful weight change.
         return JudgmentResult(
             products=[],
             total_price=0,
@@ -753,6 +867,106 @@ class ProductDecisionEngine:
             timestamp=timestamp,
         )
 
+    @staticmethod
+    def _get_delta_reason(delta_weight: float) -> str:
+        if delta_weight < 0:
+            return "negative_delta_weight(removal)"
+        if delta_weight > 0:
+            return "positive_delta_weight(return)"
+        return "zero_delta_weight"
+
+    @staticmethod
+    def _summarize_active_products(active_products: Optional[List]) -> tuple[int, int]:
+        if not active_products:
+            return 0, 0
+
+        zero_stock_filtered = sum(
+            1 for product in active_products
+            if getattr(product, "stock_qty", 0) <= 0
+        )
+        return len(active_products), zero_stock_filtered
+
+    @staticmethod
+    def _active_product_has_loadcell(product: object) -> bool:
+        """Normalize `has_loadcell` values from Node.js into a bool."""
+        raw_value = getattr(product, "has_loadcell", "true")
+        if isinstance(raw_value, bool):
+            return raw_value
+        if raw_value is None:
+            return False
+        if isinstance(raw_value, str):
+            return raw_value.strip().lower() not in {"", "0", "false", "null", "none"}
+        return bool(raw_value)
+
+    def _lookup_product_for_candidate(self, candidate: EnsembleResult):
+        """Resolve a vision candidate against the configured product DB."""
+        if self.product_db is None:
+            return None
+
+        product = self.product_db.get_by_yolo_class_id(candidate.class_id)
+        if product is not None:
+            return product
+
+        product = self.product_db.get_by_yolo_class_name(candidate.class_name)
+        if product is not None:
+            logger.debug(
+                f"Resolved by yolo_class_name: {candidate.class_name} -> "
+                f"product_id={product.product_id}, name={product.name}"
+            )
+            return product
+
+        product = self.product_db.get_product(candidate.class_id)
+        if product is not None:
+            logger.debug(
+                f"Resolved by legacy product_id lookup: class_id={candidate.class_id} -> "
+                f"name={product.name}"
+            )
+        return product
+
+    def _build_weight_only_candidates(
+        self,
+        active_products: Optional[List],
+    ) -> List[_WeightOnlyCandidate]:
+        """Convert active-product snapshots into weight-only candidates."""
+        if not active_products:
+            return []
+
+        candidates: List[_WeightOnlyCandidate] = []
+        for active_product in active_products:
+            if not self._active_product_has_loadcell(active_product):
+                logger.debug(
+                    f"[LOADCELL-ONLY] Skip no-loadcell product: "
+                    f"{active_product.product_name}"
+                )
+                continue
+
+            if (
+                active_product.yolo_class_id is None
+                or active_product.product_weight <= 0
+                or active_product.stock_qty <= 0
+            ):
+                continue
+
+            candidates.append(
+                _WeightOnlyCandidate(
+                    product_id=active_product.yolo_class_id,
+                    product_idx=active_product.product_idx,
+                    name=active_product.product_name,
+                    weight=active_product.product_weight,
+                    price=active_product.sale_price,
+                    stock=active_product.stock_qty,
+                )
+            )
+
+        return candidates
+
+    def _log_final_branch(self, branch: str, result: JudgmentResult) -> None:
+        logger.info(
+            f"[ENGINE][final_branch={branch}] "
+            f"status={result.status.value}, products={len(result.products)}, "
+            f"confidence={result.confidence:.3f}"
+        )
+
     def _create_product_judgment(
         self,
         estimate: CountEstimate,
@@ -760,6 +974,8 @@ class ProductDecisionEngine:
     ) -> ProductJudgment:
         """CountEstimate에서 ProductJudgment 생성. v4.7: estimate.unit_price 우선 사용."""
         # v4.7: active_products에서 가격이 있으면 우선 사용
+        # Prefer live prices from the active-product snapshot over the static
+        # catalog because stock and pricing can drift during operations.
         if estimate.unit_price > 0:
             price = estimate.unit_price
         elif self.product_db is not None:
@@ -792,6 +1008,8 @@ class ProductDecisionEngine:
         - 무게 매칭 점수: 50%
         - 개수 합리성: 10%
         """
+        # Clamp upstream values into the expected confidence domain first so
+        # malformed inputs cannot skew the fused score.
         vision_normalized = min(max(vision_score, 0.0), 1.0)
         weight_normalized = min(max(weight_score, 0.0), 1.0)
 

@@ -115,6 +115,9 @@ if [[ ! -d "${VENV_PATH}" ]]; then
 fi
 
 source "${VENV_PATH}/bin/activate"
+# The wheel import checks below need the same Jetson runtime linker paths that
+# the service process uses at startup.
+. "${PROJECT_ROOT}/scripts/jetson_env.sh"
 
 if ! command -v python >/dev/null 2>&1; then
     print_err "Python is not available after activating ${VENV_PATH}."

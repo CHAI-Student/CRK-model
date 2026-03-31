@@ -343,13 +343,21 @@ def test_trigger_route_fallback_writes_trace_entry(monkeypatch, tmp_path, sessio
 
     engine = MagicMock()
     engine.judge.return_value = complete_judgment_result()
+    active_products = [SimpleNamespace(product_name="Chicken Mayo", stock_qty=5)]
+
+    class FakeActiveProductStore:
+        def get_all_products(self):
+            return active_products
+
+        def get_by_yolo_class_id(self, product_id):
+            return None
 
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_video_processor] = lambda: FakeVideoProcessor()
     app.dependency_overrides[get_decision_engine] = lambda: engine
     app.dependency_overrides[get_session_store] = lambda: session_store
-    app.dependency_overrides[get_active_product_store_optional] = lambda: None
+    app.dependency_overrides[get_active_product_store_optional] = lambda: FakeActiveProductStore()
     app.dependency_overrides[get_door_session_store_optional] = lambda: None
     app.dependency_overrides[get_trigger_service_optional] = lambda: None
 
@@ -367,6 +375,7 @@ def test_trigger_route_fallback_writes_trace_entry(monkeypatch, tmp_path, sessio
     )
 
     assert response.status_code == 200
+    assert engine.judge.call_args.kwargs["active_products"] is active_products
     entries = read_trace_entries(tmp_path / "logs")
     assert len(entries) == 1
     assert entries[0]["status"] == "complete"

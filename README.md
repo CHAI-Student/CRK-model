@@ -1,6 +1,6 @@
 # Edge Environment - Model Service
 
-Last reviewed: 2026-03-09
+Last reviewed: 2026-03-31
 
 This repository contains the FastAPI-based model service for the AI smart vending machine stack. The primary runtime target is Jetson Orin Nano 4GB with TensorRT `.engine` inference.
 
@@ -22,11 +22,27 @@ cd Edge_Environment
 
 chmod +x scripts/setup_jetson.sh
 chmod +x scripts/install_jetson_torch.sh
+chmod +x scripts/jetson_env.sh
 ./scripts/setup_jetson.sh
 
 source .venv/bin/activate
 model-service
 ```
+
+`./scripts/setup_jetson.sh` is a one-time environment preparation step. After it
+completes, opening a new terminal only needs:
+
+```bash
+cd Edge_Environment
+source .venv/bin/activate
+model-service
+```
+
+The setup script installs a small activation hook into `.venv/bin/activate`.
+That hook restores the Jetson CUDA/TensorRT runtime paths automatically for
+future shells, and `model-service` itself now performs the same bootstrap
+before importing the service stack. In practice, a fresh terminal should no
+longer require rerunning `./scripts/setup_jetson.sh`.
 
 Health checks:
 
@@ -40,6 +56,7 @@ curl http://localhost:8002/api/health/detailed
 ```bash
 uv venv --system-site-packages --python python3.10 .venv
 source .venv/bin/activate
+source scripts/jetson_env.sh
 ./scripts/install_jetson_torch.sh
 uv pip install --no-deps -e .
 uv pip install "fastapi>=0.100.0" "uvicorn[standard]>=0.23.0" "pydantic>=2.0.0" "pydantic-settings>=2.0.0" "python-multipart>=0.0.6" "httpx>=0.24.0" "aiohttp>=3.8.0" "numpy>=1.24.0,<2.0.0" "pillow>=10.0.0" "pyyaml>=6.0.0" "requests>=2.23.0" "scipy>=1.4.1" "matplotlib>=3.3.0" "psutil>=5.8.0" "polars>=0.20.0" "ultralytics-thop>=2.0.18"
@@ -65,6 +82,9 @@ After activation, prefer the installed entry points:
 model-service
 pytest services/model/tests -q
 ```
+
+`model-service` now bootstraps the common Jetson CUDA/TensorRT library paths on
+startup, so it does not depend on rerunning `setup_jetson.sh` in each shell.
 
 If you want to keep using `uv run`, prefer `--no-sync` once the environment is already prepared:
 

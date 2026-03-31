@@ -193,6 +193,19 @@ class TestStrictWeightMatcher:
         assert len(combos_valid) > 0
         assert combos_valid[0].items[0].count == 2
 
+    def test_zero_stock_candidate_is_excluded(self, matcher):
+        """stock=0 상품은 strict 매칭 후보에서 제외한다."""
+        candidates = [self._make_candidate(1, "치킨마요", 0.95)]
+        active_products = [self._make_active_product(1, "치킨마요", 365.0, stock=0)]
+
+        combos = matcher.find_valid_combinations(
+            candidates=candidates,
+            delta_weight=-365.0,
+            active_products=active_products,
+        )
+
+        assert combos == []
+
     def test_max_combinations_limit(self):
         """최대 조합 수 제한 테스트."""
         # Given: 제한된 max_combinations

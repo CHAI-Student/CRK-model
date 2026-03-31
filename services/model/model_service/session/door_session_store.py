@@ -906,6 +906,9 @@ class DoorSessionStore:
 
         전량 반환 또는 부분 반환 시 aggregated_products 개수를 보정합니다.
         """
+        # This pass is a safety net after trigger-level aggregation. It uses
+        # the net door-session delta to repair counts when an item was removed
+        # and later put back before the session closes.
         net_delta = sum(t.delta_weight for t in session.triggers)
         active_products = [
             p for p in session.aggregated_products.values()
@@ -977,6 +980,8 @@ class DoorSessionStore:
         modified_zones: List[int] = []
         still_unmatched: List[UnmatchedReturn] = []
 
+        # Same-zone recovery runs first inside ProductAggregator. Only returns
+        # that are still unmatched reach this cross-zone reconciliation pass.
         for unmatched in session.unmatched_returns:
             matched = False
 
