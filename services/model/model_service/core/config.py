@@ -195,6 +195,19 @@ class TriggerModel(BaseModel):
     )
 
 
+class LoadcellModel(BaseModel):
+    """Loadcell delta analysis settings."""
+
+    stable_window_size: int = Field(
+        default=5,
+        description="Stable window size for trigger weight delta analysis",
+    )
+    stability_threshold_grams: float = Field(
+        default=15.0,
+        description="Maximum per-window standard deviation for a stable loadcell region",
+    )
+
+
 class AsyncStreamingModel(BaseModel):
     """Async streaming video processing configuration (v5.3)."""
 
@@ -213,6 +226,12 @@ class AsyncStreamingModel(BaseModel):
     early_termination_vote_threshold: int = Field(
         default=50,
         description="조기 종료를 위한 최소 투표 수 (미래 확장용)",
+    )
+
+
+    zero_frame_retry_enabled: bool = Field(
+        default=True,
+        description="Retry a sync ffmpeg decode when async extraction yields zero frames",
     )
 
 
@@ -308,6 +327,7 @@ class Settings(BaseSettings):
     api: APIModel = APIModel()
     vision: VisionModel = VisionModel()
     weight: WeightModel = WeightModel()
+    loadcell: LoadcellModel = LoadcellModel()
     buffer: BufferModel = BufferModel()
     door_session: DoorSessionModel = DoorSessionModel()
     trigger: TriggerModel = TriggerModel()  # v5.2

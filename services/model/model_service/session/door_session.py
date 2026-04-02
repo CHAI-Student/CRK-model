@@ -67,6 +67,7 @@ class TriggerResult:
     video_paths: Dict[str, str]
     is_return: bool = False
     processing_time_ms: float = 0.0
+    timing_metadata: Optional[Dict[str, str]] = None
 
     def to_dict(self) -> dict:
         """딕셔너리 변환."""
@@ -90,6 +91,7 @@ class TriggerResult:
             "video_paths": self.video_paths,
             "is_return": self.is_return,
             "processing_time_ms": self.processing_time_ms,
+            "timing_metadata": self.timing_metadata or {},
         }
 
     @classmethod
@@ -116,6 +118,7 @@ class TriggerResult:
             video_paths=data.get("video_paths", {}),
             is_return=data.get("is_return", False),
             processing_time_ms=data.get("processing_time_ms", 0.0),
+            timing_metadata=data.get("timing_metadata") or None,
         )
 
 

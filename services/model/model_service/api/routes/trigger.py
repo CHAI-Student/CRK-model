@@ -56,10 +56,23 @@ class VideosPaths(BaseModel):
     side: Optional[str] = Field(None, description="Side camera AVI path")
 
 
+class TriggerTimingMetadataModel(BaseModel):
+    capture_started_at: Optional[str] = None
+    capture_ended_at: Optional[str] = None
+    loadcell_started_at: Optional[str] = None
+    loadcell_ended_at: Optional[str] = None
+    trigger_started_at: Optional[str] = None
+    trigger_end_reason: Optional[str] = None
+
+
 class TriggerRequest(BaseModel):
     zone: int = Field(..., ge=0, description="Zone number")
     loadcells: List[LoadcellData] = Field(default_factory=list, description="Loadcell data")
     videos: VideosPaths = Field(..., description="Recorded AVI paths")
+    timing: Optional[TriggerTimingMetadataModel] = Field(
+        default=None,
+        description="Optional trigger timing metadata from the camera service",
+    )
 
 
 class TriggerResponse(BaseModel):
@@ -111,6 +124,10 @@ def _simple_delta_values(loadcells: List[LoadcellData]) -> Tuple[float, float, b
 
 def _calculate_weight_delta(loadcells: List[LoadcellData]) -> float:
     return loadcell_stats.calculate_weight_delta(loadcells)
+
+
+def _analyze_weight_delta(loadcells: List[LoadcellData]) -> loadcell_stats.LoadcellDeltaAnalysis:
+    return loadcell_stats.analyze_weight_delta(loadcells)
 
 
 def _vote_results_to_ensemble(vote_results: List[Any]) -> List[Any]:
@@ -175,7 +192,11 @@ async def trigger_judgment(
 
     try:
         if trigger_service is not None:
-            from model_service.service.trigger_service import LoadcellReading, TriggerInput
+            from model_service.service.trigger_service import (
+                LoadcellReading,
+                TriggerInput,
+                TriggerTimingMetadata,
+            )
 
             trigger_input = TriggerInput(
                 zone=request.zone,
@@ -190,10 +211,21 @@ async def trigger_judgment(
                 ],
                 top_video_path=request.videos.top,
                 side_video_path=request.videos.side,
+                timing=(
+                    TriggerTimingMetadata(**request.timing.model_dump(exclude_none=True))
+                    if request.timing is not None
+                    else None
+                ),
             )
             logger.info(
                 f"[TRIGGER][path=service] active_products_snapshot={len(active_products_snapshot)}"
             )
+            if request.timing is not None:
+                logger.info(
+                    f"[TRIGGER][timing] capture_started_at={request.timing.capture_started_at}, "
+                    f"capture_ended_at={request.timing.capture_ended_at}, "
+                    f"trigger_end_reason={request.timing.trigger_end_reason}"
+                )
 
             output = await trigger_service.enqueue_trigger(trigger_input)
 
@@ -281,8 +313,18 @@ async def trigger_judgment(
             processing_stage_detail=f"Derived {len(vote_results)} candidates, judging counts",
         )
 
-        delta_weight = _calculate_weight_delta(request.loadcells)
+        delta_analysis = _analyze_weight_delta(request.loadcells)
+        delta_weight = delta_analysis.delta
         logger.info(f"[TRIGGER] delta_weight={delta_weight:.1f}g")
+        logger.info(
+            f"[TRIGGER][loadcell] samples={delta_analysis.sample_count}, "
+            f"span_s={delta_analysis.sample_span_seconds:.3f}, "
+            f"stable_window={delta_analysis.window_size}, "
+            f"threshold={delta_analysis.stability_threshold:.1f}, "
+            f"start_idx={delta_analysis.start_stable_idx}, "
+            f"end_idx={delta_analysis.end_stable_idx}, "
+            f"fallback={delta_analysis.used_simple_fallback}"
+        )
 
         vision_candidates = _vote_results_to_ensemble(vote_results)
         vision_only = delta_weight == 0.0 and len(request.loadcells) == 0
@@ -328,6 +370,7 @@ async def trigger_judgment(
             side_frames=stats.side_frames,
             processing_time_ms=stats.processing_time_ms,
             vision_candidates=[candidate.to_dict() for candidate in vision_candidates],
+            trigger_timing=request.timing.model_dump(exclude_none=True) if request.timing else None,
         )
         session_store.save(session_id, session_data)
 
@@ -347,6 +390,7 @@ async def trigger_judgment(
                 },
                 is_return=delta_weight > 0,
                 processing_time_ms=elapsed_ms_for_trigger,
+                timing_metadata=request.timing.model_dump(exclude_none=True) if request.timing else None,
             )
             door_session = door_session_store.add_trigger_with_global(
                 zone=request.zone,

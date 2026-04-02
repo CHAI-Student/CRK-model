@@ -78,6 +78,7 @@ class SessionData:
     side_frames: int = 0
     processing_time_ms: float = 0.0
     vision_candidates: Optional[List[dict]] = None
+    trigger_timing: Optional[dict] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API response."""
@@ -111,6 +112,8 @@ class SessionData:
         # vision_candidates는 디버깅용으로만 포함 (있을 경우)
         if self.vision_candidates:
             result["vision_candidates_count"] = len(self.vision_candidates)
+        if self.trigger_timing:
+            result["trigger_timing"] = self.trigger_timing
         return result
 
 

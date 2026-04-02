@@ -28,6 +28,16 @@ If uv must be used:
 uv run --no-sync pytest services/model/tests -q
 ```
 
+Cross-repo regressions added for the April 2026 timing/capture fixes:
+
+```bash
+cd ../CRK-CAMERA
+uv run python -m unittest discover -s tests -p "test_*.py" -v
+
+cd ../Edge_Environment
+node --test server/test/payments-order.test.js
+```
+
 ## Important Notes
 
 - `services/model/tests/conftest.py` conditionally bootstraps `services/model` onto `sys.path`.
@@ -37,3 +47,7 @@ uv run --no-sync pytest services/model/tests -q
   be rerun whenever `main.py`, `runtime_env.py`, or the Jetson startup scripts
   change.
 - When touching trigger inference, rerun both `test_decision_engine.py` and the return-recovery suites (`test_product_aggregator.py`, `test_cross_zone_return.py`) because inference fallback and session repair interact.
+- When touching AVI decode or loadcell delta logic, rerun
+  `test_trigger_pipeline_regressions.py` in addition to the full suite. That
+  file covers partial stdout reads, zero-frame retry, and truncated-vs-stable
+  loadcell history.

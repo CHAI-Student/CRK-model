@@ -2,15 +2,45 @@ from __future__ import annotations
 
 """Stdlib-only helpers for loadcell parsing and weight delta calculation."""
 
+from dataclasses import dataclass
+from datetime import datetime
 from math import fsum
 from statistics import fmean, median, pstdev
 from typing import Protocol, Sequence
+
+from model_service.core.config import config
 
 
 class SupportsFilteredValue(Protocol):
     """Duck-typed protocol for trigger loadcell data."""
 
     filtered_value: Sequence[object] | None
+    timestamp: str
+
+
+def _read_field(loadcell: object, name: str) -> object:
+    if isinstance(loadcell, dict):
+        return loadcell.get(name)
+    return getattr(loadcell, name, None)
+
+
+@dataclass
+class LoadcellDeltaAnalysis:
+    """Detailed trigger-level loadcell delta analysis."""
+
+    delta: float = 0.0
+    sample_count: int = 0
+    parsed_sample_count: int = 0
+    working_sample_count: int = 0
+    sample_span_seconds: float = 0.0
+    window_size: int = 0
+    stability_threshold: float = 0.0
+    start_avg: float = 0.0
+    end_avg: float = 0.0
+    start_stable_idx: int | None = None
+    end_stable_idx: int | None = None
+    stable_region_valid: bool = False
+    used_simple_fallback: bool = False
 
 
 def parse_loadcell_value(value: object) -> float:
@@ -74,8 +104,8 @@ def simple_delta_values(loadcells: Sequence[SupportsFilteredValue]) -> tuple[flo
         return 0.0, 0.0, False
 
     try:
-        first_values = getattr(loadcells[0], "filtered_value", None) or []
-        last_values = getattr(loadcells[-1], "filtered_value", None) or []
+        first_values = _read_field(loadcells[0], "filtered_value") or []
+        last_values = _read_field(loadcells[-1], "filtered_value") or []
         start = avg_loadcell_channels(first_values)
         end = avg_loadcell_channels(last_values)
         return start, end, True
@@ -83,60 +113,133 @@ def simple_delta_values(loadcells: Sequence[SupportsFilteredValue]) -> tuple[flo
         return 0.0, 0.0, False
 
 
-def detect_stable_regions(
+def _parse_iso_timestamp(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _sample_span_seconds(loadcells: Sequence[SupportsFilteredValue]) -> float:
+    if len(loadcells) < 2:
+        return 0.0
+
+    first = _parse_iso_timestamp(_read_field(loadcells[0], "timestamp"))
+    last = _parse_iso_timestamp(_read_field(loadcells[-1], "timestamp"))
+    if first is None or last is None:
+        return 0.0
+    return max(0.0, last - first)
+
+
+def _resolve_window_size(window_size: int | None) -> int:
+    return max(1, window_size or config.loadcell.stable_window_size)
+
+
+def _resolve_stability_threshold(stability_threshold: float | None) -> float:
+    return max(0.0, stability_threshold or config.loadcell.stability_threshold_grams)
+
+
+def analyze_weight_delta(
     loadcells: Sequence[SupportsFilteredValue],
-    window_size: int = 5,
-    stability_threshold: float = 15.0,
-) -> tuple[float, float, bool]:
-    """Detect stable windows at the start and end of a loadcell sequence."""
-    if len(loadcells) < window_size * 2:
-        return simple_delta_values(loadcells)
+    window_size: int | None = None,
+    stability_threshold: float | None = None,
+) -> LoadcellDeltaAnalysis:
+    """Analyze trigger-level loadcell movement with stable-window diagnostics."""
+
+    resolved_window_size = _resolve_window_size(window_size)
+    resolved_threshold = _resolve_stability_threshold(stability_threshold)
+
+    analysis = LoadcellDeltaAnalysis(
+        sample_count=len(loadcells),
+        sample_span_seconds=_sample_span_seconds(loadcells),
+        window_size=resolved_window_size,
+        stability_threshold=resolved_threshold,
+    )
+
+    if len(loadcells) < 2:
+        return analysis
 
     values: list[float] = []
     for loadcell in loadcells:
-        filtered_value = getattr(loadcell, "filtered_value", None)
+        filtered_value = _read_field(loadcell, "filtered_value")
         if filtered_value:
             values.append(avg_loadcell_channels(filtered_value))
 
-    if len(values) < window_size * 2:
-        return simple_delta_values(loadcells)
+    analysis.parsed_sample_count = len(values)
+    if len(values) < resolved_window_size * 2:
+        start_avg, end_avg, is_valid = simple_delta_values(loadcells)
+        analysis.start_avg = start_avg
+        analysis.end_avg = end_avg
+        analysis.delta = end_avg - start_avg if is_valid else 0.0
+        analysis.used_simple_fallback = True
+        return analysis
 
     filtered_values = filter_peaks(values)
-    working_values = filtered_values if len(filtered_values) >= window_size * 2 else values
+    working_values = filtered_values if len(filtered_values) >= resolved_window_size * 2 else values
+    analysis.working_sample_count = len(working_values)
 
     start_stable_idx = 0
-    for index in range(len(working_values) - window_size):
-        window = working_values[index:index + window_size]
-        if pstdev(window) < stability_threshold:
+    for index in range(len(working_values) - resolved_window_size + 1):
+        window = working_values[index:index + resolved_window_size]
+        if pstdev(window) < resolved_threshold:
             start_stable_idx = index
             break
 
-    start_region = working_values[start_stable_idx:start_stable_idx + window_size]
+    start_region = working_values[start_stable_idx:start_stable_idx + resolved_window_size]
     start_avg = float(fmean(start_region))
 
-    end_stable_idx = len(working_values) - window_size
-    for index in range(len(working_values) - 1, window_size - 1, -1):
-        window = working_values[index - window_size + 1:index + 1]
-        if pstdev(window) < stability_threshold:
-            end_stable_idx = index - window_size + 1
+    end_stable_idx = len(working_values) - resolved_window_size
+    for index in range(len(working_values) - 1, resolved_window_size - 2, -1):
+        window = working_values[index - resolved_window_size + 1:index + 1]
+        if pstdev(window) < resolved_threshold:
+            end_stable_idx = index - resolved_window_size + 1
             break
 
-    end_region = working_values[end_stable_idx:end_stable_idx + window_size]
+    end_region = working_values[end_stable_idx:end_stable_idx + resolved_window_size]
     end_avg = float(fmean(end_region))
-    is_valid = end_stable_idx > start_stable_idx + window_size
+    stable_region_valid = end_stable_idx > start_stable_idx + resolved_window_size
 
-    return start_avg, end_avg, is_valid
+    analysis.start_stable_idx = start_stable_idx
+    analysis.end_stable_idx = end_stable_idx
+    analysis.start_avg = start_avg
+    analysis.end_avg = end_avg
+    analysis.stable_region_valid = stable_region_valid
+
+    if stable_region_valid:
+        analysis.delta = end_avg - start_avg
+        return analysis
+
+    fallback_start_avg, fallback_end_avg, is_valid = simple_delta_values(loadcells)
+    analysis.start_avg = fallback_start_avg
+    analysis.end_avg = fallback_end_avg
+    analysis.delta = fallback_end_avg - fallback_start_avg if is_valid else 0.0
+    analysis.used_simple_fallback = True
+    return analysis
+
+
+def detect_stable_regions(
+    loadcells: Sequence[SupportsFilteredValue],
+    window_size: int | None = None,
+    stability_threshold: float | None = None,
+) -> tuple[float, float, bool]:
+    """Detect stable windows at the start and end of a loadcell sequence."""
+
+    analysis = analyze_weight_delta(
+        loadcells,
+        window_size=window_size,
+        stability_threshold=stability_threshold,
+    )
+
+    if analysis.used_simple_fallback:
+        return simple_delta_values(loadcells)
+
+    return analysis.start_avg, analysis.end_avg, analysis.stable_region_valid
 
 
 def calculate_weight_delta(loadcells: Sequence[SupportsFilteredValue]) -> float:
     """Calculate the overall weight delta for a trigger."""
-    if not loadcells or len(loadcells) < 2:
-        return 0.0
 
-    start_avg, end_avg, is_valid = detect_stable_regions(loadcells)
-    if not is_valid:
-        start_avg, end_avg, is_valid = simple_delta_values(loadcells)
-        if not is_valid:
-            return 0.0
-
-    return end_avg - start_avg
+    return analyze_weight_delta(loadcells).delta

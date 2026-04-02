@@ -61,12 +61,39 @@ class LoadcellReading:
 
 
 @dataclass
+class TriggerTimingMetadata:
+    """Camera-side timing metadata attached to a trigger payload."""
+
+    capture_started_at: Optional[str] = None
+    capture_ended_at: Optional[str] = None
+    loadcell_started_at: Optional[str] = None
+    loadcell_ended_at: Optional[str] = None
+    trigger_started_at: Optional[str] = None
+    trigger_end_reason: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            key: value
+            for key, value in {
+                "capture_started_at": self.capture_started_at,
+                "capture_ended_at": self.capture_ended_at,
+                "loadcell_started_at": self.loadcell_started_at,
+                "loadcell_ended_at": self.loadcell_ended_at,
+                "trigger_started_at": self.trigger_started_at,
+                "trigger_end_reason": self.trigger_end_reason,
+            }.items()
+            if value is not None
+        }
+
+
+@dataclass
 class TriggerInput:
     """트리거 입력 데이터."""
     zone: int
     loadcells: List[LoadcellReading]
     top_video_path: Optional[str]
     side_video_path: Optional[str]
+    timing: Optional[TriggerTimingMetadata] = None
 
 
 @dataclass
@@ -369,7 +396,17 @@ class TriggerService:
                 logger.warning("[TRIGGER] No products available, YOLO will detect all classes")
 
         # 3. 무게 변화량 조기 계산
-        delta_weight = self._calculate_weight_delta(input_data.loadcells)
+        delta_analysis = self._analyze_weight_delta(input_data.loadcells)
+        delta_weight = delta_analysis.delta
+        logger.info(
+            f"[TRIGGER][loadcell] samples={delta_analysis.sample_count}, "
+            f"span_s={delta_analysis.sample_span_seconds:.3f}, "
+            f"window={delta_analysis.window_size}, "
+            f"threshold={delta_analysis.stability_threshold:.1f}, "
+            f"start_idx={delta_analysis.start_stable_idx}, "
+            f"end_idx={delta_analysis.end_stable_idx}, "
+            f"fallback={delta_analysis.used_simple_fallback}"
+        )
         logger.info(f"[TRIGGER] 조기 무게 계산: delta_weight={delta_weight:.1f}g")
 
         # 4. 무게 < 5g이면 YOLO 불필요 → 즉시 처리 (큐 거치지 않음)
@@ -496,6 +533,7 @@ class TriggerService:
             delta_weight=delta_weight,
             status="complete",
             processing_stage="skipped_low_weight",
+            trigger_timing=input_data.timing.to_dict() if input_data.timing else None,
             processing_stage_detail=f"무게 변화 미미 ({abs(delta_weight):.1f}g)",
         )
         self._session_store.save(session_id, session_data)
@@ -514,6 +552,7 @@ class TriggerService:
                     "side": str(input_data.side_video_path) if input_data.side_video_path else "",
                 },
                 is_return=(delta_weight > 0),
+                timing_metadata=input_data.timing.to_dict() if input_data.timing else None,
             )
             door_session = self._door_session_store.add_trigger_with_global(
                 zone=input_data.zone,
@@ -721,6 +760,7 @@ class TriggerService:
             side_frames=stats.side_frames,
             processing_time_ms=stats.processing_time_ms,
             vision_candidates=vision_candidates_dicts,
+            trigger_timing=input_data.timing.to_dict() if input_data.timing else None,
         )
         self._session_store.save(session_id, session_data)
 
@@ -741,6 +781,7 @@ class TriggerService:
                 },
                 is_return=delta_weight > 0,
                 processing_time_ms=elapsed_ms,
+                timing_metadata=input_data.timing.to_dict() if input_data.timing else None,
             )
             door_session = self._door_session_store.add_trigger_with_global(
                 zone=input_data.zone,
@@ -1288,10 +1329,21 @@ class TriggerService:
                 pass
         return sum(parsed) / len(parsed) if parsed else 0.0
 
+    def _analyze_weight_delta(
+        self, loadcells: List[LoadcellReading]
+    ) -> loadcell_stats.LoadcellDeltaAnalysis:
+        analysis = loadcell_stats.analyze_weight_delta(loadcells)
+        logger.info(
+            f"Weight delta calculated: {analysis.delta:.1f}g "
+            f"(samples={analysis.sample_count}, span_s={analysis.sample_span_seconds:.3f}, "
+            f"window={analysis.window_size}, threshold={analysis.stability_threshold:.1f}, "
+            f"start_idx={analysis.start_stable_idx}, end_idx={analysis.end_stable_idx}, "
+            f"fallback={analysis.used_simple_fallback})"
+        )
+        return analysis
+
     def _calculate_weight_delta(self, loadcells: List[LoadcellReading]) -> float:
-        delta = loadcell_stats.calculate_weight_delta(loadcells)
-        logger.info(f"Weight delta calculated: {delta:.1f}g")
-        return delta
+        return self._analyze_weight_delta(loadcells).delta
 
     @staticmethod
     def _filter_peaks(
