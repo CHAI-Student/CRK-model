@@ -2,12 +2,16 @@
 
 Last reviewed: 2026-03-31
 
-This repository contains the FastAPI-based model service for the AI smart vending machine stack. The runtime target is the real Jetson Orin Nano 4GB device on Ubuntu 22.04 with TensorRT `.engine` inference.
+This repository contains the legacy/reference FastAPI-based model service for the AI smart vending machine stack. The runtime target for this Python service remains the real Jetson Orin Nano 4GB device on Ubuntu 22.04 with TensorRT `.engine` inference.
+
+For new clone-based operation, use `CRK-model-go` as the primary model service. The Go service standardizes on ONNX Runtime CUDA with the `0204_morning.onnx` release asset, avoiding per-device TensorRT engine conversion during normal deployment.
 
 Operational checks should be run on the Jetson device, not on a developer PC. Local imports or unit tests can catch syntax-level regressions, but service startup, health, AVI decoding, TensorRT loading, and trigger behavior are only authoritative on the Jetson runtime.
 
 ## Current Runtime Status
 
+- This Python service is maintained as the TensorRT `.engine` legacy/reference path.
+- The primary operational path for fresh installs is `CRK-model-go` with ONNX.
 - FastAPI import/startup paths were decoupled from heavy YOLO and NumPy imports.
 - Runtime settings are now read from `app.state.settings`, and `.env` is loaded automatically by `Settings`.
 - The default engine path is now `models/siyeon_best.engine`.
