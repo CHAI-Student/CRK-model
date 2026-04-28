@@ -12,6 +12,8 @@ import argparse
 import logging
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import time
 from typing import Iterable
@@ -123,6 +125,140 @@ def _draw_overlay(frame, lines: Iterable[str]) -> None:
         y += 24
 
 
+def _opencv_gui_available() -> bool:
+    try:
+        build_info = cv2.getBuildInformation()
+    except Exception:
+        return False
+
+    for line in build_info.splitlines():
+        if line.strip().startswith("GUI:"):
+            return "NONE" not in line.upper()
+    return False
+
+
+def _resolve_display_backend(args: argparse.Namespace) -> str:
+    if args.no_display:
+        return "none"
+    if args.display_backend != "auto":
+        if args.display_backend == "ffplay" and not shutil.which("ffplay"):
+            LOGGER.error("ffplay was requested but was not found in PATH.")
+            return "none"
+        return args.display_backend
+    if _opencv_gui_available():
+        return "opencv"
+    if shutil.which("ffplay"):
+        LOGGER.warning("OpenCV GUI backend is unavailable; using ffplay display backend.")
+        return "ffplay"
+    LOGGER.warning("OpenCV GUI backend is unavailable and ffplay was not found; disabling live display.")
+    return "none"
+
+
+class PreviewDisplay:
+    def __init__(self, backend: str, window_name: str, fps: float):
+        self.backend = backend
+        self.window_name = window_name
+        self.fps = max(fps, 1.0)
+        self._ffplay: subprocess.Popen[bytes] | None = None
+        self._frame_shape: tuple[int, int, int] | None = None
+
+    def show(self, frame) -> bool:
+        if self.backend == "none":
+            return True
+        if self.backend == "opencv":
+            return self._show_opencv(frame)
+        if self.backend == "ffplay":
+            return self._show_ffplay(frame)
+        raise RuntimeError(f"Unsupported display backend: {self.backend}")
+
+    def close(self) -> None:
+        if self._ffplay is not None:
+            if self._ffplay.stdin is not None:
+                try:
+                    self._ffplay.stdin.close()
+                except OSError:
+                    pass
+            try:
+                self._ffplay.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._ffplay.terminate()
+            self._ffplay = None
+
+        if self.backend == "opencv":
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
+
+    def _show_opencv(self, frame) -> bool:
+        try:
+            cv2.imshow(self.window_name, frame)
+            key = cv2.waitKey(1) & 0xFF
+            return key not in (27, ord("q"))
+        except cv2.error as exc:
+            LOGGER.error("OpenCV display failed: %s", exc)
+            return False
+
+    def _show_ffplay(self, frame) -> bool:
+        if self._ffplay is None:
+            self._start_ffplay(frame.shape)
+
+        if self._frame_shape != frame.shape:
+            LOGGER.error("Frame size changed from %s to %s; ffplay rawvideo cannot resize mid-stream.", self._frame_shape, frame.shape)
+            return False
+
+        if self._ffplay is None or self._ffplay.stdin is None:
+            return False
+        if self._ffplay.poll() is not None:
+            LOGGER.info("ffplay window closed")
+            return False
+
+        try:
+            if not frame.flags["C_CONTIGUOUS"]:
+                frame = frame.copy()
+            self._ffplay.stdin.write(frame.tobytes())
+            self._ffplay.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError):
+            LOGGER.info("ffplay pipe closed")
+            return False
+
+    def _start_ffplay(self, frame_shape) -> None:
+        height, width = frame_shape[:2]
+        self._frame_shape = frame_shape
+        command = [
+            "ffplay",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-framedrop",
+            "-sync",
+            "ext",
+            "-window_title",
+            self.window_name,
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "bgr24",
+            "-video_size",
+            f"{width}x{height}",
+            "-framerate",
+            f"{self.fps:g}",
+            "-i",
+            "-",
+        ]
+        LOGGER.info("starting ffplay display width=%s height=%s fps=%s", width, height, self.fps)
+        try:
+            self._ffplay = subprocess.Popen(command, stdin=subprocess.PIPE)
+        except FileNotFoundError:
+            LOGGER.error("ffplay was not found in PATH.")
+            self._ffplay = None
+
+
 def _create_writer(path: str, fps: float, frame_shape) -> cv2.VideoWriter:
     height, width = frame_shape[:2]
     output = Path(path)
@@ -152,7 +288,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-width", type=int, default=480, help="Match service inference crop width; 0 disables crop.")
     parser.add_argument("--window-name", default="CRK TensorRT Preview")
     parser.add_argument("--record", default=None, help="Optional MP4 output path for annotated preview.")
-    parser.add_argument("--no-display", action="store_true", help="Run without cv2.imshow; useful with --record.")
+    parser.add_argument("--display-backend", choices=["auto", "opencv", "ffplay", "none"], default="auto")
+    parser.add_argument("--no-display", action="store_true", help="Alias for --display-backend none; useful with --record.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args()
 
@@ -182,6 +319,14 @@ def main() -> int:
 
     class_filter = _parse_classes(args.classes)
     writer = None
+    display_backend = _resolve_display_backend(args)
+    display = PreviewDisplay(display_backend, args.window_name, args.fps)
+    if display_backend == "opencv":
+        quit_hint = "press q or ESC to quit"
+    elif display_backend == "ffplay":
+        quit_hint = "close ffplay window or Ctrl+C to quit"
+    else:
+        quit_hint = "display disabled; Ctrl+C to quit"
     fps_ema = 0.0
     frame_count = 0
 
@@ -220,7 +365,7 @@ def main() -> int:
                 [
                     f"model={model_path.name}",
                     f"source={args.source} detections={detections} fps={fps_ema:.1f}",
-                    "press q or ESC to quit",
+                    quit_hint,
                 ],
             )
 
@@ -229,19 +374,15 @@ def main() -> int:
             if writer is not None:
                 writer.write(annotated)
 
-            if not args.no_display:
-                cv2.imshow(args.window_name, annotated)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord("q")):
-                    break
+            if not display.show(annotated):
+                break
 
             frame_count += 1
     finally:
         capture.release()
         if writer is not None:
             writer.release()
-        if not args.no_display:
-            cv2.destroyAllWindows()
+        display.close()
 
     LOGGER.info("preview stopped frames=%s", frame_count)
     return 0

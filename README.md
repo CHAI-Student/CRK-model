@@ -65,12 +65,13 @@ curl http://localhost:8002/api/health/detailed
 
 To visually verify camera input and TensorRT inference on the Jetson, use the
 standalone preview script. It loads a `.engine` file, opens a live camera source,
-and draws real-time bbox labels, confidence, and FPS in an OpenCV window.
+and draws real-time bbox labels, confidence, and FPS in an OpenCV or `ffplay`
+window.
 
 ```bash
 cd CRK-model
 source .venv/bin/activate
-python scripts/live_engine_preview.py --model models/siyeon_best.engine --source 0
+python scripts/live_engine_preview.py --model models/siyeon_best.engine --source 0 --display-backend ffplay
 ```
 
 Useful options:
@@ -82,8 +83,14 @@ python scripts/live_engine_preview.py \
   --width 640 \
   --height 480 \
   --imgsz 480 \
-  --conf 0.25
+  --conf 0.25 \
+  --display-backend ffplay
 ```
+
+`--display-backend auto` uses OpenCV HighGUI when it is available and falls
+back to `ffplay` when OpenCV was installed with `GUI: NONE`. The `ffplay` path
+pipes annotated BGR frames as rawvideo, so it works with headless OpenCV builds
+as long as `ffplay` itself can open a window on the Jetson desktop.
 
 The preview is a Jetson-only operational check. Do not use a developer PC run
 to judge TensorRT, camera, or CUDA readiness.
