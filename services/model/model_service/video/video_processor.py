@@ -193,12 +193,13 @@ class VideoProcessor:
         self,
         yolo: YOLOWrapper,
         min_vote_ratio: float = 0.05,
-        confidence_threshold: float = 0.4,
+        confidence_threshold: float = 0.25,
         use_hwaccel: bool = True,
         motion_filter_enabled: bool = True,
-        min_motion_displacement: float = 30.0,
-        side_roi_x_max: float = 240.0,
+        min_motion_displacement: float = 15.0,
+        side_roi_x_max: float = 360.0,
         hand_path_filter_enabled: bool = True,
+        min_vote_count: int = 2,
     ):
         """
         Initialize video processor.
@@ -206,11 +207,11 @@ class VideoProcessor:
         Args:
             yolo: YOLOWrapper instance for inference
             min_vote_ratio: Minimum vote ratio to include in results (default: 5%)
-            confidence_threshold: Minimum confidence for YOLO detection (default: 0.6)
+            confidence_threshold: Minimum confidence for YOLO detection (default: 0.25)
             use_hwaccel: Use hardware acceleration for video decoding (default: True)
             motion_filter_enabled: Enable motion-based filtering (default: True)
-            min_motion_displacement: Minimum bbox center displacement to consider as motion (default: 30 pixels)
-            side_roi_x_max: Side 카메라 ROI 최대 X 좌표 (기본 240px, 왼쪽 절반만 허용)
+            min_motion_displacement: Minimum bbox center displacement to consider as motion (default: 15 pixels)
+            side_roi_x_max: Side camera ROI max X coordinate (default: 360px)
             hand_path_filter_enabled: Enable hand path-based filtering (v4.6, default: True)
         """
         self.yolo = yolo
@@ -221,6 +222,41 @@ class VideoProcessor:
         self.min_motion_displacement = min_motion_displacement
         self.side_roi_x_max = side_roi_x_max
         self.hand_path_filter_enabled = hand_path_filter_enabled
+        self.min_vote_count = min_vote_count
+
+    def _inference_allowed_class_ids(
+        self,
+        allowed_class_ids: Optional[List[int]],
+        log_prefix: str,
+    ) -> Optional[List[int]]:
+        if allowed_class_ids is not None:
+            logger.info(
+                f"[{log_prefix}] hybrid_recall active_class_hints={len(allowed_class_ids)} "
+                "inference_classes=all"
+            )
+        return None
+
+    def _apply_hand_path_filter(
+        self,
+        results: List[VoteResult],
+        hand_path_tracker: HandPathTracker,
+        log_prefix: str,
+    ) -> Tuple[List[VoteResult], int]:
+        candidate_class_ids = [r.class_id for r in results]
+        valid_class_ids = hand_path_tracker.filter_products_by_path(candidate_class_ids)
+        valid_class_ids_set = set(valid_class_ids)
+
+        filtered_results = [r for r in results if r.class_id in valid_class_ids_set]
+        removed_count = len(results) - len(filtered_results)
+        if removed_count > 0:
+            logger.info(f"[{log_prefix}] hand_path_filtered={removed_count}")
+        if results and not filtered_results:
+            logger.warning(
+                f"[{log_prefix}] fallback=kept_candidates "
+                "reason=hand_path_removed_all"
+            )
+            return results, 0
+        return filtered_results, removed_count
 
     def process_videos(
         self,
@@ -250,8 +286,10 @@ class VideoProcessor:
         logger.info(f"[VIDEO] ========== 비디오 처리 시작 ==========")
         logger.info(f"[VIDEO] top_path={top_path}")
         logger.info(f"[VIDEO] side_path={side_path}")
-        if allowed_class_ids is not None:
-            logger.info(f"[VIDEO] allowed_class_ids={len(allowed_class_ids)} classes")
+        inference_allowed_class_ids = self._inference_allowed_class_ids(
+            allowed_class_ids,
+            "VIDEO",
+        )
 
         top_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
         side_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
@@ -265,7 +303,7 @@ class VideoProcessor:
         if top_path:
             logger.info(f"[VIDEO] Top 카메라 처리 시작...")
             top_stats = self._process_single_video(
-                top_path, top_ensemble, "top", allowed_class_ids,
+                top_path, top_ensemble, "top", inference_allowed_class_ids,
                 hand_path_tracker=top_hand_tracker,
                 trace_context=trace_context,
             )
@@ -281,7 +319,7 @@ class VideoProcessor:
         if side_path:
             logger.info(f"[VIDEO] Side 카메라 처리 시작...")
             side_stats = self._process_single_video(
-                side_path, side_ensemble, "side", allowed_class_ids,
+                side_path, side_ensemble, "side", inference_allowed_class_ids,
                 hand_path_tracker=None,  # Side 카메라에서는 손 경로 필터링 안 함
                 trace_context=trace_context,
             )
@@ -312,8 +350,17 @@ class VideoProcessor:
             valid_class_ids_set = set(valid_class_ids)
 
             before_count = len(combined_results)
-            combined_results = [r for r in combined_results if r.class_id in valid_class_ids_set]
-            stats.hand_path_filtered_classes = before_count - len(combined_results)
+            filtered_by_hand_path = [
+                r for r in combined_results if r.class_id in valid_class_ids_set
+            ]
+            if before_count > 0 and not filtered_by_hand_path:
+                logger.warning(
+                    "[VIDEO] fallback=kept_candidates reason=hand_path_removed_all"
+                )
+                stats.hand_path_filtered_classes = 0
+            else:
+                combined_results = filtered_by_hand_path
+                stats.hand_path_filtered_classes = before_count - len(combined_results)
 
             if stats.hand_path_filtered_classes > 0:
                 logger.info(
@@ -322,8 +369,8 @@ class VideoProcessor:
 
         # Filter by minimum vote ratio OR minimum vote count
         # 조건 1: vote_ratio >= 5% (기존)
-        # 조건 2: vote_count >= 3 (절대값 3프레임 이상이면 포함 - 짧은 비디오 대응)
-        min_vote_count = 3
+        # 조건 2: vote_count >= min_vote_count (짧은 비디오 대응)
+        min_vote_count = self.min_vote_count
         filtered_results = [
             r for r in combined_results
             if r.vote_ratio >= self.min_vote_ratio or r.vote_count >= min_vote_count
@@ -381,8 +428,10 @@ class VideoProcessor:
         logger.info(f"[VIDEO-ASYNC] ========== 비동기 스트리밍 처리 시작 ==========")
         logger.info(f"[VIDEO-ASYNC] top_path={top_path}")
         logger.info(f"[VIDEO-ASYNC] side_path={side_path}")
-        if allowed_class_ids is not None:
-            logger.info(f"[VIDEO-ASYNC] allowed_class_ids={len(allowed_class_ids)} classes")
+        inference_allowed_class_ids = self._inference_allowed_class_ids(
+            allowed_class_ids,
+            "VIDEO-ASYNC",
+        )
 
         top_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
         side_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
@@ -500,7 +549,7 @@ class VideoProcessor:
 
                 # YOLO 추론 (to_thread로 CPU 양보)
                 detections = await asyncio.to_thread(
-                    self.yolo.detect, frame, allowed_class_ids
+                    self.yolo.detect, frame, inference_allowed_class_ids
                 )
 
                 # 카메라별 처리
@@ -694,8 +743,17 @@ class VideoProcessor:
             valid_class_ids_set = set(valid_class_ids)
 
             before_count = len(combined_results)
-            combined_results = [r for r in combined_results if r.class_id in valid_class_ids_set]
-            stats.hand_path_filtered_classes = before_count - len(combined_results)
+            filtered_by_hand_path = [
+                r for r in combined_results if r.class_id in valid_class_ids_set
+            ]
+            if before_count > 0 and not filtered_by_hand_path:
+                logger.warning(
+                    "[VIDEO-ASYNC] fallback=kept_candidates reason=hand_path_removed_all"
+                )
+                stats.hand_path_filtered_classes = 0
+            else:
+                combined_results = filtered_by_hand_path
+                stats.hand_path_filtered_classes = before_count - len(combined_results)
 
             if stats.hand_path_filtered_classes > 0:
                 logger.info(
@@ -703,7 +761,7 @@ class VideoProcessor:
                 )
 
         # 최소 투표 필터링
-        min_vote_count = 3
+        min_vote_count = self.min_vote_count
         filtered_results = [
             r for r in combined_results
             if r.vote_ratio >= self.min_vote_ratio or r.vote_count >= min_vote_count
@@ -781,6 +839,20 @@ class VideoProcessor:
         logger.info(
             f"[MOTION-ASYNC] {camera_type} 필터링: 통과={motion_passed_count}, 제외={motion_filtered_count}"
         )
+
+        if pending_votes and motion_passed_count == 0 and motion_filtered_count > 0:
+            logger.warning(
+                f"[MOTION-ASYNC] {camera_type} fallback=kept_candidates "
+                "reason=motion_removed_all"
+            )
+            for class_id, votes in pending_votes.items():
+                for conf, class_name in votes:
+                    ensemble.add_vote(
+                        class_id=class_id,
+                        confidence=conf,
+                        class_name=class_name,
+                    )
+            return 0
 
         return motion_filtered_count
 
@@ -961,6 +1033,20 @@ class VideoProcessor:
         )
 
         # Side 카메라 ROI 필터링 결과 로그
+        if pending_votes and motion_passed_count == 0 and motion_filtered_count > 0:
+            logger.warning(
+                f"[MOTION] {camera_type} fallback=kept_candidates "
+                "reason=motion_removed_all"
+            )
+            for class_id, votes in pending_votes.items():
+                for conf, class_name in votes:
+                    ensemble.add_vote(
+                        class_id=class_id,
+                        confidence=conf,
+                        class_name=class_name,
+                    )
+            motion_filtered_count = 0
+
         if camera_type == "side" and roi_filtered_count > 0:
             logger.info(
                 f"[ROI] {camera_type} ROI 필터링: "

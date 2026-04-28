@@ -75,7 +75,7 @@ class VisionModel(BaseModel):
         description="Max distance in pixels for hand-product proximity",
     )
     top_k: int = Field(
-        default=1,
+        default=3,
         description="Top-K candidates to extract",
     )
 

@@ -389,7 +389,8 @@ class TriggerService:
                 allowed_class_ids = self._active_product_store.get_allowed_class_ids()
                 if allowed_class_ids is not None:
                     logger.info(
-                        f"[TRIGGER] YOLO filtering with {len(allowed_class_ids)} classes: "
+                        f"[TRIGGER] hybrid_recall active_class_hints={len(allowed_class_ids)} "
+                        "inference_classes=all ids="
                         f"{allowed_class_ids[:10]}{'...' if len(allowed_class_ids) > 10 else ''}"
                     )
             else:
@@ -717,7 +718,7 @@ class TriggerService:
             and self._active_product_store.has_products()
         ):
             allowed_ids = self._active_product_store.get_allowed_class_ids()
-            if allowed_ids:
+            if allowed_ids is not None:
                 allowed_ids_set = set(allowed_ids)
                 original_count = len(filtered_engine_products)
                 filtered_engine_products = [
@@ -893,7 +894,8 @@ class TriggerService:
                 allowed_class_ids = self._active_product_store.get_allowed_class_ids()
                 if allowed_class_ids is not None:
                     logger.info(
-                        f"[TRIGGER] YOLO filtering with {len(allowed_class_ids)} classes: "
+                        f"[TRIGGER] hybrid_recall active_class_hints={len(allowed_class_ids)} "
+                        "inference_classes=all ids="
                         f"{allowed_class_ids[:10]}{'...' if len(allowed_class_ids) > 10 else ''}"
                     )
             else:
@@ -1055,7 +1057,7 @@ class TriggerService:
             and self._active_product_store.has_products()
         ):
             allowed_ids = self._active_product_store.get_allowed_class_ids()
-            if allowed_ids:
+            if allowed_ids is not None:
                 allowed_ids_set = set(allowed_ids)
                 original_count = len(filtered_engine_products)
                 filtered_engine_products = [

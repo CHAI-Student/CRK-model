@@ -140,6 +140,90 @@ def test_trigger_trace_context_exports_selected_samples_and_writes_jsonl(tmp_pat
         assert Path(exported).exists()
 
 
+def test_video_processor_hybrid_recall_does_not_pass_allowed_ids(monkeypatch):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.video import VideoProcessor
+
+    class FakeExtractor:
+        total_frames = 1
+
+        def __iter__(self):
+            return iter([sample_frame(1)])
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    fake_yolo = MagicMock()
+    fake_yolo.detect.return_value = []
+    processor = VideoProcessor(
+        yolo=fake_yolo,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+    )
+
+    processor.process_videos(top_path="/tmp/top.avi", allowed_class_ids=[1, 7, 9])
+
+    assert fake_yolo.detect.call_count == 1
+    assert fake_yolo.detect.call_args.kwargs["allowed_class_ids"] is None
+
+
+def test_video_processor_motion_filter_fail_open_keeps_candidates():
+    from model_service.video import VideoProcessor
+    from model_service.video.voting_ensemble import VotingEnsemble
+
+    class NoMotionTracker:
+        dynamic_threshold = 15.0
+        total_displacement = 0.0
+
+        def has_motion(self, threshold):
+            return False
+
+    processor = VideoProcessor(yolo=MagicMock())
+    ensemble = VotingEnsemble()
+
+    filtered = processor._apply_motion_filter_and_votes(
+        "top",
+        {42: [(0.8, "PRODUCT_42")]},
+        {42: NoMotionTracker()},
+        ensemble,
+    )
+
+    assert filtered == 0
+    assert ensemble.votes[42].count == 1
+
+
+def test_video_processor_hand_path_fail_open_keeps_candidates():
+    from model_service.video import VideoProcessor
+    from model_service.video.voting_ensemble import VoteResult
+
+    class RejectingHandPath:
+        def filter_products_by_path(self, candidate_class_ids):
+            return []
+
+    processor = VideoProcessor(yolo=MagicMock())
+    results = [
+        VoteResult(
+            class_id=42,
+            class_name="PRODUCT_42",
+            vote_count=2,
+            max_confidence=0.8,
+            avg_confidence=0.75,
+        )
+    ]
+
+    kept, removed = processor._apply_hand_path_filter(
+        results,
+        RejectingHandPath(),
+        "TEST",
+    )
+
+    assert kept == results
+    assert removed == 0
+
+
 def test_video_processor_process_videos_records_trace_samples(monkeypatch, tmp_path):
     import model_service.video.video_processor as video_processor_module
     from model_service.video import VideoProcessor
