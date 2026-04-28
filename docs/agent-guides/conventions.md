@@ -2,6 +2,10 @@
 
 ## Runtime Entry Points
 
+Runtime verification is Jetson-only. The production target is the real Jetson
+Orin Nano on Ubuntu 22.04, so do not treat local PC service startup, health
+checks, AVI decoding, or TensorRT behavior as authoritative.
+
 Preferred after activating `.venv`:
 
 ```bash

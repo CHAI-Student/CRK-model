@@ -97,7 +97,11 @@ async def test_async_frame_extractor_reassembles_partial_reads(monkeypatch):
     ]
 
     monkeypatch.setattr(extractor, "_probe_video", lambda: True)
-    monkeypatch.setattr(extractor, "_build_ffmpeg_cmd", lambda: ["ffmpeg", "-i", "partial.avi"])
+    monkeypatch.setattr(
+        extractor,
+        "_build_ffmpeg_cmd",
+        lambda decoder="auto": ["ffmpeg", "-i", "partial.avi", decoder],
+    )
     async def fake_create_subprocess_exec(*args, **kwargs):
         return _FakeAsyncProcess(chunks)
 
@@ -147,7 +151,11 @@ async def test_async_frame_extractor_retries_sync_when_async_returns_zero(monkey
 
     monkeypatch.setattr(config.async_streaming, "zero_frame_retry_enabled", True)
     monkeypatch.setattr(extractor, "_probe_video", lambda: True)
-    monkeypatch.setattr(extractor, "_build_ffmpeg_cmd", lambda: ["ffmpeg", "-i", "retry.avi"])
+    monkeypatch.setattr(
+        extractor,
+        "_build_ffmpeg_cmd",
+        lambda decoder="auto": ["ffmpeg", "-i", "retry.avi", decoder],
+    )
     monkeypatch.setattr(extractor, "_read_exact_frame_async", lambda process, diagnostics: fake_async_attempt())
     monkeypatch.setattr(extractor, "_iter_sync_frames", fake_sync_frames)
     monkeypatch.setattr(
@@ -166,7 +174,44 @@ async def test_async_frame_extractor_retries_sync_when_async_returns_zero(monkey
     assert extractor.last_diagnostics.final_branch == "sync_retry"
 
 
-def test_loadcell_analysis_exposes_truncated_window_that_halves_delta():
+def test_ffmpeg_primary_decode_uses_auto_codec_then_mjpeg_fallback():
+    from model_service.video.frame_extractor import StreamingFrameExtractor
+
+    extractor = StreamingFrameExtractor("sample.avi", use_hwaccel=False)
+
+    primary = extractor._build_ffmpeg_cmd()
+    fallback = extractor._build_ffmpeg_cmd(decoder="mjpeg")
+
+    assert "-i" in primary
+    assert "-c:v" not in primary
+    assert fallback[fallback.index("-c:v") + 1] == "mjpeg"
+
+
+def test_ffmpeg_zero_frame_diagnostics_include_decoder_and_counts(caplog):
+    from model_service.video.frame_extractor import FrameExtractionDiagnostics, StreamingFrameExtractor
+
+    diagnostics = FrameExtractionDiagnostics(
+        method="sync",
+        expected_frames=4,
+        decoded_frames=0,
+        bytes_read=17,
+        partial_reads=1,
+        stderr_tail="Invalid data found",
+        final_branch="sync",
+        decoder="auto",
+    )
+
+    StreamingFrameExtractor._log_diagnostics("[FFMPEG]", diagnostics)
+
+    assert "expected_frames=4" in caplog.text
+    assert "decoded_frames=0" in caplog.text
+    assert "bytes_read=17" in caplog.text
+    assert "partial_reads=1" in caplog.text
+    assert "decoder=auto" in caplog.text
+    assert "stderr_tail='Invalid data found'" in caplog.text
+
+
+def test_loadcell_analysis_requires_confirmed_stable_tail():
     from model_service.core import loadcell_stats
 
     full_series = _make_weight_series(
@@ -189,6 +234,8 @@ def test_loadcell_analysis_exposes_truncated_window_that_halves_delta():
 
     assert full.delta == pytest.approx(-600.0)
     assert full.used_simple_fallback is False
-    assert truncated.delta == pytest.approx(-300.0)
-    assert truncated.used_simple_fallback is True
+    assert full.reason == "stable_regions"
+    assert truncated.delta == 0.0
+    assert truncated.used_simple_fallback is False
+    assert truncated.reason == "unstable_or_truncated_loadcell"
     assert truncated.sample_count < full.sample_count

@@ -323,7 +323,8 @@ async def trigger_judgment(
             f"threshold={delta_analysis.stability_threshold:.1f}, "
             f"start_idx={delta_analysis.start_stable_idx}, "
             f"end_idx={delta_analysis.end_stable_idx}, "
-            f"fallback={delta_analysis.used_simple_fallback}"
+            f"fallback={delta_analysis.used_simple_fallback}, "
+            f"reason={delta_analysis.reason}"
         )
 
         vision_candidates = _vote_results_to_ensemble(vote_results)

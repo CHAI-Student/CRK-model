@@ -41,6 +41,7 @@ class LoadcellDeltaAnalysis:
     end_stable_idx: int | None = None
     stable_region_valid: bool = False
     used_simple_fallback: bool = False
+    reason: str = ""
 
 
 def parse_loadcell_value(value: object) -> float:
@@ -160,6 +161,7 @@ def analyze_weight_delta(
     )
 
     if len(loadcells) < 2:
+        analysis.reason = "insufficient_samples"
         return analysis
 
     values: list[float] = []
@@ -173,30 +175,46 @@ def analyze_weight_delta(
         start_avg, end_avg, is_valid = simple_delta_values(loadcells)
         analysis.start_avg = start_avg
         analysis.end_avg = end_avg
-        analysis.delta = end_avg - start_avg if is_valid else 0.0
-        analysis.used_simple_fallback = True
+        analysis.reason = (
+            "insufficient_stable_samples" if is_valid else "invalid_loadcell_samples"
+        )
         return analysis
 
     filtered_values = filter_peaks(values)
     working_values = filtered_values if len(filtered_values) >= resolved_window_size * 2 else values
     analysis.working_sample_count = len(working_values)
 
-    start_stable_idx = 0
+    start_stable_idx: int | None = None
     for index in range(len(working_values) - resolved_window_size + 1):
         window = working_values[index:index + resolved_window_size]
         if pstdev(window) < resolved_threshold:
             start_stable_idx = index
             break
 
+    if start_stable_idx is None:
+        fallback_start_avg, fallback_end_avg, _ = simple_delta_values(loadcells)
+        analysis.start_avg = fallback_start_avg
+        analysis.end_avg = fallback_end_avg
+        analysis.reason = "unstable_or_truncated_loadcell"
+        return analysis
+
     start_region = working_values[start_stable_idx:start_stable_idx + resolved_window_size]
     start_avg = float(fmean(start_region))
 
-    end_stable_idx = len(working_values) - resolved_window_size
+    end_stable_idx: int | None = None
     for index in range(len(working_values) - 1, resolved_window_size - 2, -1):
         window = working_values[index - resolved_window_size + 1:index + 1]
         if pstdev(window) < resolved_threshold:
             end_stable_idx = index - resolved_window_size + 1
             break
+
+    if end_stable_idx is None:
+        fallback_start_avg, fallback_end_avg, _ = simple_delta_values(loadcells)
+        analysis.start_stable_idx = start_stable_idx
+        analysis.start_avg = fallback_start_avg
+        analysis.end_avg = fallback_end_avg
+        analysis.reason = "unstable_or_truncated_loadcell"
+        return analysis
 
     end_region = working_values[end_stable_idx:end_stable_idx + resolved_window_size]
     end_avg = float(fmean(end_region))
@@ -210,13 +228,13 @@ def analyze_weight_delta(
 
     if stable_region_valid:
         analysis.delta = end_avg - start_avg
+        analysis.reason = "stable_regions"
         return analysis
 
-    fallback_start_avg, fallback_end_avg, is_valid = simple_delta_values(loadcells)
+    fallback_start_avg, fallback_end_avg, _ = simple_delta_values(loadcells)
     analysis.start_avg = fallback_start_avg
     analysis.end_avg = fallback_end_avg
-    analysis.delta = fallback_end_avg - fallback_start_avg if is_valid else 0.0
-    analysis.used_simple_fallback = True
+    analysis.reason = "unstable_or_truncated_loadcell"
     return analysis
 
 
@@ -232,9 +250,6 @@ def detect_stable_regions(
         window_size=window_size,
         stability_threshold=stability_threshold,
     )
-
-    if analysis.used_simple_fallback:
-        return simple_delta_values(loadcells)
 
     return analysis.start_avg, analysis.end_avg, analysis.stable_region_valid
 

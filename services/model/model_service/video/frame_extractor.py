@@ -32,6 +32,7 @@ class FrameExtractionDiagnostics:
     stderr_tail: str = ""
     retry_used: bool = False
     final_branch: str = ""
+    decoder: str = "auto"
 
 
 def _next_iterator_item(iterator: Iterator[np.ndarray]) -> tuple[bool, Optional[np.ndarray]]:
@@ -214,12 +215,15 @@ class StreamingFrameExtractor:
     def frame_size(self) -> int:
         return self._width * self._height * 3
 
-    def _build_ffmpeg_cmd(self) -> list[str]:
+    def _build_ffmpeg_cmd(self, decoder: str = "auto") -> list[str]:
         cmd = ["ffmpeg"]
         if self.use_hwaccel and self._check_hwaccel():
             cmd.extend(["-hwaccel", "cuda"])
 
-        cmd.extend(["-c:v", "mjpeg", "-i", self.video_path])
+        if decoder == "mjpeg":
+            cmd.extend(["-c:v", "mjpeg"])
+
+        cmd.extend(["-i", self.video_path])
 
         if self.camera_type == "side":
             gamma = config.vision.ffmpeg_side_gamma
@@ -244,11 +248,17 @@ class StreamingFrameExtractor:
         )
         return cmd
 
-    def _new_diagnostics(self, method: str, final_branch: str) -> FrameExtractionDiagnostics:
+    def _new_diagnostics(
+        self,
+        method: str,
+        final_branch: str,
+        decoder: str = "auto",
+    ) -> FrameExtractionDiagnostics:
         return FrameExtractionDiagnostics(
             method=method,
             expected_frames=self._total_frames,
             final_branch=final_branch,
+            decoder=decoder,
         )
 
     @staticmethod
@@ -265,7 +275,8 @@ class StreamingFrameExtractor:
             f"expected_frames={diagnostics.expected_frames} "
             f"decoded_frames={diagnostics.decoded_frames} "
             f"bytes_read={diagnostics.bytes_read} "
-            f"partial_reads={diagnostics.partial_reads}"
+            f"partial_reads={diagnostics.partial_reads} "
+            f"decoder={diagnostics.decoder}"
         )
         if diagnostics.stderr_tail:
             message += f" stderr_tail={diagnostics.stderr_tail!r}"
@@ -322,7 +333,7 @@ class StreamingFrameExtractor:
         process: subprocess.Popen | None = None
         try:
             process = subprocess.Popen(
-                self._build_ffmpeg_cmd(),
+                self._build_ffmpeg_cmd(diagnostics.decoder),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=self.frame_size,
@@ -390,9 +401,24 @@ class StreamingFrameExtractor:
         self.last_diagnostics = diagnostics
         try:
             yield from self._iter_sync_frames(diagnostics)
+            if diagnostics.decoded_frames == 0 and diagnostics.expected_frames > 0:
+                self._log_diagnostics("[FFMPEG]", diagnostics)
+                retry_diagnostics = self._new_diagnostics(
+                    method="sync_mjpeg_retry",
+                    final_branch="sync_mjpeg_retry",
+                    decoder="mjpeg",
+                )
+                retry_diagnostics.retry_used = True
+                self.last_diagnostics = retry_diagnostics
+                logger.warning(
+                    "[FFMPEG] Zero frames decoded with auto decoder; retrying mjpeg decoder"
+                )
+                yield from self._iter_sync_frames(retry_diagnostics)
+                diagnostics = retry_diagnostics
         except Exception as exc:
             logger.error(f"[FFMPEG] Frame extraction failed: {exc}")
         finally:
+            self.last_diagnostics = diagnostics
             self._log_diagnostics("[FFMPEG]", diagnostics)
 
     async def __aiter__(self) -> AsyncIterator[np.ndarray]:
@@ -415,7 +441,7 @@ class StreamingFrameExtractor:
         process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
-                *self._build_ffmpeg_cmd(),
+                *self._build_ffmpeg_cmd(diagnostics.decoder),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -447,6 +473,7 @@ class StreamingFrameExtractor:
             and diagnostics.expected_frames > 0
             and config.async_streaming.zero_frame_retry_enabled
         ):
+            self._log_diagnostics("[FFMPEG-ASYNC]", diagnostics)
             diagnostics.retry_used = True
             logger.warning(
                 "[FFMPEG-ASYNC] Zero frames decoded despite ffprobe metadata; retrying sync decode"
@@ -468,6 +495,29 @@ class StreamingFrameExtractor:
                 yield frame
 
             diagnostics = retry_diagnostics
+
+            if diagnostics.decoded_frames == 0:
+                self._log_diagnostics("[FFMPEG-ASYNC]", diagnostics)
+                mjpeg_diagnostics = self._new_diagnostics(
+                    method="sync_mjpeg_retry",
+                    final_branch="sync_mjpeg_retry",
+                    decoder="mjpeg",
+                )
+                mjpeg_diagnostics.retry_used = True
+                self.last_diagnostics = mjpeg_diagnostics
+                logger.warning(
+                    "[FFMPEG-ASYNC] Sync retry decoded zero frames; retrying mjpeg decoder"
+                )
+
+                iterator = self._iter_sync_frames(mjpeg_diagnostics)
+                while True:
+                    done, frame = await asyncio.to_thread(_next_iterator_item, iterator)
+                    if done:
+                        break
+                    assert frame is not None
+                    yield frame
+
+                diagnostics = mjpeg_diagnostics
 
         self.last_diagnostics = diagnostics
         self._log_diagnostics("[FFMPEG-ASYNC]", diagnostics)

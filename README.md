@@ -2,7 +2,9 @@
 
 Last reviewed: 2026-03-31
 
-This repository contains the FastAPI-based model service for the AI smart vending machine stack. The primary runtime target is Jetson Orin Nano 4GB with TensorRT `.engine` inference.
+This repository contains the FastAPI-based model service for the AI smart vending machine stack. The runtime target is the real Jetson Orin Nano 4GB device on Ubuntu 22.04 with TensorRT `.engine` inference.
+
+Operational checks should be run on the Jetson device, not on a developer PC. Local imports or unit tests can catch syntax-level regressions, but service startup, health, AVI decoding, TensorRT loading, and trigger behavior are only authoritative on the Jetson runtime.
 
 ## Current Runtime Status
 
@@ -50,6 +52,8 @@ Health checks:
 curl http://localhost:8002/api/health
 curl http://localhost:8002/api/health/detailed
 ```
+
+`/api/health` is ready only when `model` is `HEALTHY`, `yolo_loaded` is `true`, and `status` is `ok`.
 
 ## Manual Setup
 

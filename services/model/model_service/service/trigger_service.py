@@ -405,7 +405,8 @@ class TriggerService:
             f"threshold={delta_analysis.stability_threshold:.1f}, "
             f"start_idx={delta_analysis.start_stable_idx}, "
             f"end_idx={delta_analysis.end_stable_idx}, "
-            f"fallback={delta_analysis.used_simple_fallback}"
+            f"fallback={delta_analysis.used_simple_fallback}, "
+            f"reason={delta_analysis.reason}"
         )
         logger.info(f"[TRIGGER] 조기 무게 계산: delta_weight={delta_weight:.1f}g")
 
@@ -1338,7 +1339,7 @@ class TriggerService:
             f"(samples={analysis.sample_count}, span_s={analysis.sample_span_seconds:.3f}, "
             f"window={analysis.window_size}, threshold={analysis.stability_threshold:.1f}, "
             f"start_idx={analysis.start_stable_idx}, end_idx={analysis.end_stable_idx}, "
-            f"fallback={analysis.used_simple_fallback})"
+            f"fallback={analysis.used_simple_fallback}, reason={analysis.reason})"
         )
         return analysis
 
