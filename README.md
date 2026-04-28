@@ -4,7 +4,7 @@ Last reviewed: 2026-03-31
 
 This repository contains the legacy/reference FastAPI-based model service for the AI smart vending machine stack. The runtime target for this Python service remains the real Jetson Orin Nano 4GB device on Ubuntu 22.04 with TensorRT `.engine` inference.
 
-For new clone-based operation, use `CRK-model-go` as the primary model service. The Go service standardizes on ONNX Runtime CUDA with the `0204_morning.onnx` release asset, avoiding per-device TensorRT engine conversion during normal deployment.
+For new clone-based operation, use `CRK-model-go` as the primary model service. The Go service standardizes on ONNX Runtime CUDA with `0204_morning.onnx`; if only `0204_morning.pt` is available, the Go repo's Jetson run script can export FP16 ONNX before starting the Go binary. This avoids per-device TensorRT engine conversion during normal deployment.
 
 Operational checks should be run on the Jetson device, not on a developer PC. Local imports or unit tests can catch syntax-level regressions, but service startup, health, AVI decoding, TensorRT loading, and trigger behavior are only authoritative on the Jetson runtime.
 
@@ -12,6 +12,7 @@ Operational checks should be run on the Jetson device, not on a developer PC. Lo
 
 - This Python service is maintained as the TensorRT `.engine` legacy/reference path.
 - The primary operational path for fresh installs is `CRK-model-go` with ONNX.
+- This repo may still provide the Jetson Python/Ultralytics environment used by `CRK-model-go/scripts/run-jetson-native.sh` to export `models/0204_morning.pt` into FP16 `models/0204_morning.onnx`.
 - FastAPI import/startup paths were decoupled from heavy YOLO and NumPy imports.
 - Runtime settings are now read from `app.state.settings`, and `.env` is loaded automatically by `Settings`.
 - The default engine path is now `models/siyeon_best.engine`.
@@ -127,6 +128,22 @@ MODEL__TRACE__SAMPLE_EXPORT_DIR=logs/frame_samples
 - If `import torch` fails with `libcudss.so`, install `nvidia-cudss-cu12` after the Jetson torch wheel is in place.
 - Avoid plain `uv run ...` for day-to-day execution if the environment is already installed. A sync step can unexpectedly reinstall or shadow packages in `.venv`.
 - Avoid `uv sync` unless you intentionally want uv to reconcile the environment against the lock file.
+
+## PT to ONNX Export Role
+
+`CRK-model-go` does not load `.pt` directly. When `models/0204_morning.onnx`
+is missing but `models/0204_morning.pt` exists, the Go repo's Jetson run script
+can call this Python environment to run Ultralytics export with:
+
+```bash
+format=onnx
+imgsz=480
+half=True
+```
+
+CUDA is required and FP32 fallback is intentionally disabled. The output remains
+owned by `CRK-model-go` as `models/0204_morning.onnx`; this Python repo remains
+the legacy TensorRT `.engine` service for direct Python runtime use.
 
 ## Important Files
 

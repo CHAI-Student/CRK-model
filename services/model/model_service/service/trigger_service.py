@@ -399,7 +399,7 @@ class TriggerService:
         delta_analysis = self._analyze_weight_delta(input_data.loadcells)
         delta_weight = delta_analysis.delta
         logger.info(
-            f"[TRIGGER][loadcell] samples={delta_analysis.sample_count}, "
+            f"[TRIGGER][loadcell] sample_count={delta_analysis.sample_count}, "
             f"span_s={delta_analysis.sample_span_seconds:.3f}, "
             f"window={delta_analysis.window_size}, "
             f"threshold={delta_analysis.stability_threshold:.1f}, "
@@ -1336,7 +1336,7 @@ class TriggerService:
         analysis = loadcell_stats.analyze_weight_delta(loadcells)
         logger.info(
             f"Weight delta calculated: {analysis.delta:.1f}g "
-            f"(samples={analysis.sample_count}, span_s={analysis.sample_span_seconds:.3f}, "
+            f"(sample_count={analysis.sample_count}, span_s={analysis.sample_span_seconds:.3f}, "
             f"window={analysis.window_size}, threshold={analysis.stability_threshold:.1f}, "
             f"start_idx={analysis.start_stable_idx}, end_idx={analysis.end_stable_idx}, "
             f"fallback={analysis.used_simple_fallback}, reason={analysis.reason})"

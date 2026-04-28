@@ -317,7 +317,7 @@ async def trigger_judgment(
         delta_weight = delta_analysis.delta
         logger.info(f"[TRIGGER] delta_weight={delta_weight:.1f}g")
         logger.info(
-            f"[TRIGGER][loadcell] samples={delta_analysis.sample_count}, "
+            f"[TRIGGER][loadcell] sample_count={delta_analysis.sample_count}, "
             f"span_s={delta_analysis.sample_span_seconds:.3f}, "
             f"stable_window={delta_analysis.window_size}, "
             f"threshold={delta_analysis.stability_threshold:.1f}, "
