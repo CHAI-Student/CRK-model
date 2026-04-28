@@ -13,6 +13,7 @@ Operational checks should be run on the Jetson device, not on a developer PC. Lo
 - This Python service is maintained as the TensorRT `.engine` legacy/reference path.
 - The primary operational path for fresh installs is `CRK-model-go` with ONNX.
 - This repo may still provide the Jetson Python/Ultralytics environment used by `CRK-model-go/scripts/run-jetson-native.sh` to export `models/0204_morning.pt` into FP16 `models/0204_morning.onnx`.
+- Camera sends two physical loadcell channels per vending zone; the model service sums those channels into the zone total and does not average them.
 - FastAPI import/startup paths were decoupled from heavy YOLO and NumPy imports.
 - Runtime settings are now read from `app.state.settings`, and `.env` is loaded automatically by `Settings`.
 - The default engine path is now `models/siyeon_best.engine`.
@@ -59,6 +60,33 @@ curl http://localhost:8002/api/health/detailed
 ```
 
 `/api/health` is ready only when `model` is `HEALTHY`, `yolo_loaded` is `true`, and `status` is `ok`.
+
+## Live Engine Preview
+
+To visually verify camera input and TensorRT inference on the Jetson, use the
+standalone preview script. It loads a `.engine` file, opens a live camera source,
+and draws real-time bbox labels, confidence, and FPS in an OpenCV window.
+
+```bash
+cd CRK-model
+source .venv/bin/activate
+python scripts/live_engine_preview.py --model models/siyeon_best.engine --source 0
+```
+
+Useful options:
+
+```bash
+python scripts/live_engine_preview.py \
+  --model models/siyeon_best.engine \
+  --source 0 \
+  --width 640 \
+  --height 480 \
+  --imgsz 480 \
+  --conf 0.25
+```
+
+The preview is a Jetson-only operational check. Do not use a developer PC run
+to judge TensorRT, camera, or CUDA readiness.
 
 ## Manual Setup
 

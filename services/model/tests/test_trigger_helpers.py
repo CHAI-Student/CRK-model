@@ -71,9 +71,9 @@ class TestCalculateWeightDelta:
         loadcells = [LoadcellData(**lc) for lc in sample_loadcells]
         delta = _calculate_weight_delta(loadcells)
 
-        # 5000g -> 4500g = -500g
+        # Two physical channels per zone are summed: 10000g -> 9000g = -1000g
         assert delta < 0
-        assert -600 < delta < -400  # 약 -500g 근처
+        assert -1100 < delta < -900
 
     def test_calculate_weight_delta_empty(self):
         """빈 로드셀 데이터 테스트."""
@@ -121,7 +121,7 @@ class TestCalculateWeightDelta:
 
         loadcells = []
 
-        # Start: 3000g
+        # Start: 6000g total across two zone channels
         for i in range(10):
             loadcells.append(
                 LoadcellData(
@@ -132,7 +132,7 @@ class TestCalculateWeightDelta:
                 )
             )
 
-        # End: 3500g (500g 추가)
+        # End: 7000g total across two zone channels
         for i in range(10):
             loadcells.append(
                 LoadcellData(
@@ -145,7 +145,7 @@ class TestCalculateWeightDelta:
 
         delta = _calculate_weight_delta(loadcells)
         assert delta > 0
-        assert 400 < delta < 600  # 약 +500g 근처
+        assert 900 < delta < 1100
 
 
 class TestDetectStableRegions:
@@ -159,8 +159,8 @@ class TestDetectStableRegions:
         start_avg, end_avg, is_valid = _detect_stable_regions(loadcells)
 
         assert is_valid is True
-        assert 4900 < start_avg < 5100  # 시작: ~5000g
-        assert 4400 < end_avg < 4600    # 종료: ~4500g
+        assert 9900 < start_avg < 10100
+        assert 8900 < end_avg < 9100
 
     def test_detect_stable_regions_short_data(self):
         """짧은 데이터에서 안정 구간 감지 테스트."""
@@ -194,7 +194,7 @@ class TestAvgLoadcellChannels:
     def test_avg_loadcell_channels_multi(self):
         """다중 채널 평균 계산 검증."""
         from model_service.api.routes.trigger import _avg_loadcell_channels
-        assert _avg_loadcell_channels(["+1000", "+2000"]) == 1500.0
+        assert _avg_loadcell_channels(["+1000", "+2000"]) == 3000.0
 
     def test_avg_loadcell_channels_single(self):
         from model_service.api.routes.trigger import _avg_loadcell_channels
@@ -206,12 +206,12 @@ class TestAvgLoadcellChannels:
 
     def test_avg_loadcell_channels_with_plus_sign(self):
         from model_service.api.routes.trigger import _avg_loadcell_channels
-        assert _avg_loadcell_channels(["+3000", "+3000", "+3000"]) == 3000.0
+        assert _avg_loadcell_channels(["+3000", "+3000", "+3000"]) == 9000.0
 
     def test_avg_loadcell_channels_invalid_skipped(self):
         from model_service.api.routes.trigger import _avg_loadcell_channels
         # 유효하지 않은 값은 무시
-        assert _avg_loadcell_channels(["+1000", "abc", "+3000"]) == 2000.0
+        assert _avg_loadcell_channels(["+1000", "abc", "+3000"]) == 4000.0
 
 
 class TestVoteResultsToEnsemble:

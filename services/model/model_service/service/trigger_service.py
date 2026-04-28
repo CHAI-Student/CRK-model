@@ -1328,7 +1328,7 @@ class TriggerService:
                 parsed.append(self._parse_loadcell_value(str(v)))
             except Exception:
                 pass
-        return sum(parsed) / len(parsed) if parsed else 0.0
+        return sum(parsed) if parsed else 0.0
 
     def _analyze_weight_delta(
         self, loadcells: List[LoadcellReading]

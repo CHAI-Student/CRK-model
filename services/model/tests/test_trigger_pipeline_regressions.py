@@ -6,7 +6,7 @@ import pytest
 
 
 def _make_loadcell(timestamp: str, value: float) -> dict:
-    formatted = f"{value:+.1f}"
+    formatted = f"{value / 2:+.1f}"
     return {
         "timestamp": timestamp,
         "raw_value": [formatted, formatted],
@@ -209,6 +209,12 @@ def test_ffmpeg_zero_frame_diagnostics_include_decoder_and_counts(caplog):
     assert "partial_reads=1" in caplog.text
     assert "decoder=auto" in caplog.text
     assert "stderr_tail='Invalid data found'" in caplog.text
+
+
+def test_loadcell_channel_values_are_summed_for_zone_total():
+    from model_service.core import loadcell_stats
+
+    assert loadcell_stats.avg_loadcell_channels(["+1500", "+1500", "bad"]) == 3000.0
 
 
 def test_loadcell_analysis_requires_confirmed_stable_tail():

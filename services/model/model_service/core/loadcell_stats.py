@@ -56,7 +56,12 @@ def parse_loadcell_value(value: object) -> float:
 
 
 def avg_loadcell_channels(values: Sequence[object]) -> float:
-    """Average parsed loadcell channels, ignoring invalid values."""
+    """Sum parsed loadcell channels for one zone, ignoring invalid values.
+
+    Camera sends two physical loadcell channels for a vending zone. The service
+    must use their combined zone load; averaging the pair reports exactly half
+    of the real weight.
+    """
     parsed: list[float] = []
     for value in values:
         try:
@@ -66,7 +71,7 @@ def avg_loadcell_channels(values: Sequence[object]) -> float:
             parsed.append(float(cleaned))
         except (ValueError, TypeError):
             continue
-    return fsum(parsed) / len(parsed) if parsed else 0.0
+    return fsum(parsed) if parsed else 0.0
 
 
 def filter_peaks(
