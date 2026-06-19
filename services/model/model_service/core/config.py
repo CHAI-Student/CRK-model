@@ -144,6 +144,10 @@ class VisionModel(BaseModel):
         default=240.0,
         description="Freezer dual-top lower-half bbox center y threshold",
     )
+    freezer_min_exit_path_votes: int = Field(
+        default=3,
+        description="Minimum freezer ROI-filtered votes treated as handled exit-path evidence",
+    )
     side_roi_x_max: float = Field(
         default=400.0,
         description="Maximum side-camera bbox center x accepted before ROI filtering",

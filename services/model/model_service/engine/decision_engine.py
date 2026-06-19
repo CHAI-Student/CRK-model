@@ -570,6 +570,10 @@ class ProductDecisionEngine:
                 "source": getattr(candidate, "source", "vision"),
                 "confidence": round(confidence, 4),
                 "raw_vote_count": int(getattr(candidate, "raw_vote_count", 0) or 0),
+                "freezerExitPathVotes": self._freezer_exit_path_votes(
+                    candidate,
+                    trace_context,
+                ),
                 "instance_count_hint": max(
                     1,
                     int(getattr(candidate, "instance_count_hint", 1) or 1),
@@ -631,6 +635,7 @@ class ProductDecisionEngine:
                 "unit_weight": unit_weight,
                 "expected_weight": expected_weight,
                 "residual": residual,
+                "freezer_exit_path_votes": int(diag["freezerExitPathVotes"]),
                 "diagnostics": diag,
             }
             options.append(option)
@@ -668,6 +673,115 @@ class ProductDecisionEngine:
                 reason=reason,
             )
 
+        selected, reason = self._select_freezer_single_handled_option(options)
+        return self._create_freezer_vision_result(
+            selected_options=[selected],
+            delta_weight=delta_weight,
+            target_weight=target_weight,
+            timestamp=timestamp,
+            trace_context=trace_context,
+            considered=considered,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _freezer_stage_entry(
+        trace_context: Optional[object],
+        class_id: int,
+    ) -> dict[str, Any]:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        if not isinstance(stage_counts, dict):
+            return {}
+        entry = stage_counts.get(str(class_id)) or stage_counts.get(class_id)
+        return entry if isinstance(entry, dict) else {}
+
+    def _freezer_exit_path_votes(
+        self,
+        candidate: EnsembleResult,
+        trace_context: Optional[object],
+    ) -> int:
+        values: list[int] = []
+        for value in (
+            getattr(candidate, "freezer_exit_path_votes", 0),
+            getattr(candidate, "freezerExitPathVotes", 0),
+        ):
+            try:
+                values.append(int(value or 0))
+            except (TypeError, ValueError):
+                pass
+
+        entry = self._freezer_stage_entry(trace_context, int(candidate.class_id))
+        for key in ("freezerExitPathVotes", "freezer_exit_path_votes", "freezer_roi_filtered"):
+            try:
+                values.append(int(entry.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                pass
+        return max(values or [0])
+
+    @staticmethod
+    def _freezer_handled_tier(
+        option: dict[str, Any],
+        *,
+        min_exit_path_votes: int,
+        strict_residual_limit: float,
+        near_residual_limit: float,
+    ) -> tuple[int, str]:
+        residual = float(option["residual"])
+        exit_path_votes = int(option.get("freezer_exit_path_votes", 0) or 0)
+        if residual <= strict_residual_limit and exit_path_votes >= min_exit_path_votes:
+            return 0, "freezer_single_weight_gate_exit_path"
+        if residual <= near_residual_limit and exit_path_votes >= min_exit_path_votes:
+            return 1, "freezer_single_near_weight_exit_path"
+        return 2, "freezer_single_confidence_weight_tiebreak"
+
+    def _select_freezer_single_handled_option(
+        self,
+        options: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], str]:
+        min_exit_path_votes = max(
+            0,
+            int(getattr(config.vision, "freezer_min_exit_path_votes", 3)),
+        )
+        strict_residual_limit = max(
+            0.0,
+            float(config.weight.detected_single_fallback_tolerance_grams),
+        )
+        near_residual_limit = strict_residual_limit + max(
+            0.0,
+            float(config.weight.same_product_count_tolerance_grams),
+        )
+        scored: list[tuple[int, str, dict[str, Any]]] = []
+        for option in options:
+            tier, reason = self._freezer_handled_tier(
+                option,
+                min_exit_path_votes=min_exit_path_votes,
+                strict_residual_limit=strict_residual_limit,
+                near_residual_limit=near_residual_limit,
+            )
+            option["selection_tier"] = reason
+            option["freezer_min_exit_path_votes"] = min_exit_path_votes
+            option["freezer_strict_residual_limit"] = strict_residual_limit
+            option["freezer_near_residual_limit"] = near_residual_limit
+            option["diagnostics"]["selectionTier"] = reason
+            option["diagnostics"]["freezerMinExitPathVotes"] = min_exit_path_votes
+            option["diagnostics"]["strictResidualLimit"] = round(strict_residual_limit, 1)
+            option["diagnostics"]["nearResidualLimit"] = round(near_residual_limit, 1)
+            scored.append((tier, reason, option))
+
+        handled = [item for item in scored if item[0] < 2]
+        if handled:
+            tier, reason, selected = min(
+                handled,
+                key=lambda item: (
+                    item[0],
+                    -int(item[2].get("freezer_exit_path_votes", 0) or 0),
+                    float(item[2]["residual"]),
+                    -float(item[2]["confidence"]),
+                    int(item[2]["rank"]),
+                ),
+            )
+            return selected, reason
+
         best_confidence = max(option["confidence"] for option in options)
         confidence_band = max(0.0, float(config.weight.freezer_confidence_tie_band))
         tie_pool = [
@@ -683,15 +797,7 @@ class ProductDecisionEngine:
                 -float(option["confidence"]),
             ),
         )
-        return self._create_freezer_vision_result(
-            selected_options=[selected],
-            delta_weight=delta_weight,
-            target_weight=target_weight,
-            timestamp=timestamp,
-            trace_context=trace_context,
-            considered=considered,
-            reason="freezer_single_confidence_weight_tiebreak",
-        )
+        return selected, "freezer_single_confidence_weight_tiebreak"
 
     def _freezer_supported_count(
         self,

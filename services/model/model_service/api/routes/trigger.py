@@ -444,6 +444,11 @@ def _vote_results_to_ensemble(vote_results: List[Any]) -> List[Any]:
                     None,
                 ),
                 instance_count_hint=getattr(vote, "instance_count_hint", 1),
+                freezer_exit_path_votes=getattr(
+                    vote,
+                    "freezer_exit_path_votes",
+                    0,
+                ),
             )
         )
     return ensemble_results

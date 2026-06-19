@@ -7,13 +7,17 @@
   `[OPS][CANDIDATES]`, engine input, and DoorSession close snapshots use only
   handled candidates.
 - Recorded that single-removal freezer events default to one handled product.
-  Within the top confidence band, loadcell weight is a tie-breaker for choosing
-  that product, and `instance_count_hint` becomes count evidence only when the
+  `freezerExitPathVotes` plus weight residual can rescue handled products ahead
+  of static shelf false positives; top confidence-band weight residual remains
+  the fallback. `instance_count_hint` becomes count evidence only when the
   target weight supports the hinted count.
 - Tightened freezer multi-kind behavior: multiple visible products no longer
   create a basket by confidence alone. Multi-kind output requires segment or
   compound loadcell evidence, or a combined candidate weight that fits the
   existing count-scaled tolerance.
+- Updated freezer CLOSE behavior: unresolved final-weight mismatches preserve
+  detected Edge-facing `products`/`totalPrice` and expose
+  `finalWeightValidation.outputPolicy=products_as_detected`.
 - Updated the Jetson stride-2 env template for freezer field operation:
   `MODEL__MACHINE__CABINET_TYPE=freezer` with
   `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`.

@@ -726,6 +726,41 @@ class VideoProcessor:
                 best_residual = residual
         return best_count
 
+    @staticmethod
+    def _freezer_stage_entry(
+        trace_context: Optional[TriggerTraceContext],
+        class_id: int,
+    ) -> dict[str, Any]:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        if not isinstance(stage_counts, dict):
+            return {}
+        entry = stage_counts.get(str(class_id)) or stage_counts.get(class_id)
+        return entry if isinstance(entry, dict) else {}
+
+    @classmethod
+    def _freezer_exit_path_votes(
+        cls,
+        vote: VoteResult,
+        trace_context: Optional[TriggerTraceContext],
+    ) -> int:
+        values: list[int] = []
+        for value in (
+            getattr(vote, "freezer_exit_path_votes", 0),
+            getattr(vote, "freezerExitPathVotes", 0),
+        ):
+            try:
+                values.append(int(value or 0))
+            except (TypeError, ValueError):
+                pass
+
+        entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
+        for key in ("freezerExitPathVotes", "freezer_exit_path_votes", "freezer_roi_filtered"):
+            try:
+                values.append(int(entry.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                pass
+        return max(values or [0])
+
     @classmethod
     def filter_freezer_handled_candidates(
         cls,
@@ -762,15 +797,21 @@ class VideoProcessor:
             for vote in ranked_votes
         )
         confidence_band = max(0.0, float(config.weight.freezer_confidence_tie_band))
-        tie_pool = [
-            (index, vote)
-            for index, vote in enumerate(ranked_votes)
-            if float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
-            >= best_confidence - confidence_band
-        ]
+        min_exit_path_votes = max(
+            0,
+            int(getattr(config.vision, "freezer_min_exit_path_votes", 3)),
+        )
+        strict_residual_limit = max(
+            0.0,
+            float(config.weight.detected_single_fallback_tolerance_grams),
+        )
+        near_residual_limit = strict_residual_limit + max(
+            0.0,
+            float(config.weight.same_product_count_tolerance_grams),
+        )
 
-        def sort_key(item: tuple[int, VoteResult]) -> tuple[bool, float, int, float]:
-            index, vote = item
+        scored: list[dict[str, Any]] = []
+        for index, vote in enumerate(ranked_votes):
             unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
             residual = (
                 abs(target_weight - unit_weight)
@@ -778,15 +819,95 @@ class VideoProcessor:
                 else target_weight
             )
             confidence = float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
-            return (unit_weight is None, residual, index, -confidence)
+            exit_path_votes = cls._freezer_exit_path_votes(vote, trace_context)
+            if (
+                unit_weight is not None
+                and residual <= strict_residual_limit
+                and exit_path_votes >= min_exit_path_votes
+            ):
+                tier = 0
+                reason = "weight_gate_exit_path"
+            elif (
+                unit_weight is not None
+                and residual <= near_residual_limit
+                and exit_path_votes >= min_exit_path_votes
+            ):
+                tier = 1
+                reason = "near_weight_exit_path"
+            else:
+                tier = 2
+                reason = "confidence_weight_tiebreak"
+            scored.append(
+                {
+                    "index": index,
+                    "vote": vote,
+                    "unit_weight": unit_weight,
+                    "residual": residual,
+                    "confidence": confidence,
+                    "freezer_exit_path_votes": exit_path_votes,
+                    "tier": tier,
+                    "reason": reason,
+                }
+            )
 
-        selected_index, selected_vote = min(tie_pool, key=sort_key)
+        handled_pool = [item for item in scored if int(item["tier"]) < 2]
+        if handled_pool:
+            selected_item = min(
+                handled_pool,
+                key=lambda item: (
+                    int(item["tier"]),
+                    -int(item["freezer_exit_path_votes"]),
+                    float(item["residual"]),
+                    -float(item["confidence"]),
+                    int(item["index"]),
+                ),
+            )
+            reason = str(selected_item["reason"])
+        else:
+            tie_pool = [
+                item
+                for item in scored
+                if float(item["confidence"]) >= best_confidence - confidence_band
+            ]
+            selected_item = min(
+                tie_pool,
+                key=lambda item: (
+                    item["unit_weight"] is None,
+                    float(item["residual"]),
+                    int(item["index"]),
+                    -float(item["confidence"]),
+                ),
+            )
+            reason = "single_removal_weight_tiebreak"
+
+        def considered_entry(item: dict[str, Any]) -> dict[str, Any]:
+            unit_weight = item["unit_weight"]
+            return {
+                "rank": int(item["index"]) + 1,
+                "class_id": int(item["vote"].class_id),
+                "name": item["vote"].class_name,
+                "confidence": round(float(item["confidence"]), 4),
+                "unitWeight": round(float(unit_weight), 1)
+                if unit_weight is not None
+                else None,
+                "weightResidual": round(float(item["residual"]), 1),
+                "freezerExitPathVotes": int(item["freezer_exit_path_votes"]),
+                "selectionTier": str(item["reason"]),
+            }
+
+        selected_index = int(selected_item["index"])
+        selected_vote = selected_item["vote"]
+
         supported_count = cls._freezer_supported_instance_count(
             selected_vote,
             target_weight=target_weight,
             product_weights=product_weights,
         )
-        selected = replace(selected_vote, instance_count_hint=supported_count)
+        selected = replace(
+            selected_vote,
+            instance_count_hint=supported_count,
+            freezer_exit_path_votes=int(selected_item["freezer_exit_path_votes"]),
+        )
         unit_weight = cls._freezer_candidate_unit_weight(selected_vote, product_weights)
         residual = (
             abs(target_weight - unit_weight)
@@ -795,11 +916,14 @@ class VideoProcessor:
         )
         diagnostics = {
             "accepted": True,
-            "reason": "single_removal_weight_tiebreak",
+            "reason": reason,
             "raw_candidate_count": len(votes),
             "handled_candidate_count": 1,
             "target_weight": round(target_weight, 1),
             "confidence_band": round(confidence_band, 4),
+            "minFreezerExitPathVotes": min_exit_path_votes,
+            "strictResidualLimit": round(strict_residual_limit, 1),
+            "nearResidualLimit": round(near_residual_limit, 1),
             "selected": {
                 "rank": selected_index + 1,
                 "class_id": int(selected.class_id),
@@ -811,7 +935,10 @@ class VideoProcessor:
                 "unit_weight": round(unit_weight, 1) if unit_weight is not None else None,
                 "weight_residual": round(residual, 1),
                 "instance_count_hint": supported_count,
+                "freezerExitPathVotes": int(selected.freezer_exit_path_votes),
+                "selectionTier": reason,
             },
+            "considered": [considered_entry(item) for item in scored],
         }
         cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
         logger.info(

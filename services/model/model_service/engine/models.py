@@ -55,6 +55,7 @@ class EnsembleResult:
     rescue_tolerance_g: Optional[float] = None
     rescue_weight_residual_g: Optional[float] = None
     instance_count_hint: int = 1
+    freezer_exit_path_votes: int = 0
 
     @property
     def is_consensus(self) -> bool:
@@ -80,6 +81,7 @@ class EnsembleResult:
             "rescue_tolerance_g": self.rescue_tolerance_g,
             "rescue_weight_residual_g": self.rescue_weight_residual_g,
             "instance_count_hint": int(self.instance_count_hint),
+            "freezer_exit_path_votes": int(self.freezer_exit_path_votes),
         }
 
 

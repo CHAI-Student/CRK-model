@@ -1515,17 +1515,26 @@ class DoorSessionStore:
         previous["currentResidual"] = round(float(current_residual), 1)
         previous["allowedResidual"] = round(float(tolerance), 1)
         previous["currentProductCount"] = current_product_count
-        previous["rejectedProducts"] = [
+        product_payload = [
             {
                 "productId": int(product.product_id),
                 "name": product.name,
                 "count": int(product.count),
                 "unitWeight": round(float(product.weight), 1),
+                "unitPrice": int(product.unit_price),
+                "totalPrice": int(product.total_price),
             }
             for product in active_products
         ]
+        preserve_products = str(config.machine.cabinet_type).lower() == "freezer"
+        if preserve_products:
+            previous["outputPolicy"] = "products_as_detected"
+            previous["unresolvedProducts"] = product_payload
+        else:
+            previous["rejectedProducts"] = product_payload
         session.final_weight_validation = previous
-        session.aggregated_products = {}
+        if not preserve_products:
+            session.aggregated_products = {}
         logger.warning(
             "[CLOSE][FINAL_WEIGHT] unresolved mismatch zone=%s target=%.1fg "
             "current=%.1fg residual=%.1fg allowed=%.1fg",

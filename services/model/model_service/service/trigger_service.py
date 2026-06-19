@@ -3444,6 +3444,11 @@ class TriggerService:
                     None,
                 ),
                 instance_count_hint=getattr(vote, "instance_count_hint", 1),
+                freezer_exit_path_votes=getattr(
+                    vote,
+                    "freezer_exit_path_votes",
+                    0,
+                ),
             )
             ensemble_results.append(ensemble)
         return ensemble_results

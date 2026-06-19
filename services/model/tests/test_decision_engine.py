@@ -449,6 +449,116 @@ def test_freezer_vision_first_prefers_single_handled_item_by_weight_tiebreak(
     assert diagnostics["selected"][0]["instance_count_hint"] == 1
 
 
+def test_freezer_vision_first_prefers_melona_exit_path_over_static_lala(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "46": {
+            "class_id": 46,
+            "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            "freezer_roi_filtered": 1,
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "freezer_roi_filtered": 19,
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=46,
+                name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                confidence=1.0,
+                instance_count_hint=4,
+            ),
+            make_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                confidence=1.0,
+                instance_count_hint=2,
+            ),
+        ],
+        delta_weight=-81.0,
+        active_products=[
+            make_active_product(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", weight=71.0),
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=93.0),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (44, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_single_near_weight_exit_path"
+    assert diagnostics["selected"][0]["freezerExitPathVotes"] == 19
+
+
+def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "top_k", 6)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "46": {
+            "class_id": 46,
+            "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            "freezer_roi_filtered": 0,
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "freezer_roi_filtered": 4,
+        },
+        "42": {
+            "class_id": 42,
+            "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+            "freezer_roi_filtered": 13,
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", confidence=1.0),
+            make_candidate(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", confidence=1.0),
+            make_candidate(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", confidence=1.0),
+            make_candidate(44, "STICK_BINGGRAE_MELONA_75ML", confidence=0.5242),
+            make_candidate(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", confidence=0.4311),
+            make_candidate(
+                42,
+                "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+                confidence=0.4011,
+            ),
+        ],
+        delta_weight=-97.9,
+        active_products=[
+            make_active_product(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", weight=71.0),
+            make_active_product(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", weight=307.0),
+            make_active_product(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", weight=185.0),
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=93.0),
+            make_active_product(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", weight=154.0),
+            make_active_product(
+                42,
+                "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+                weight=93.0,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (42, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
+    assert diagnostics["selected"][0]["freezerExitPathVotes"] == 13
+
+
 def test_freezer_vision_first_uses_instance_hint_for_same_class_count(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     trace = FakeLoadcellTrace({})

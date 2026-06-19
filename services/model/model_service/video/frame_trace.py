@@ -229,8 +229,14 @@ class TriggerTraceContext:
         if class_name and not entry.get("name"):
             entry["name"] = class_name
         entry[stage] = int(entry.get(stage, 0)) + int(amount)
+        if stage == "freezer_roi_filtered":
+            entry["freezerExitPathVotes"] = int(entry.get("freezerExitPathVotes", 0)) + int(amount)
         camera_counts = entry["cameras"].setdefault(camera, {})
         camera_counts[stage] = int(camera_counts.get(stage, 0)) + int(amount)
+        if stage == "freezer_roi_filtered":
+            camera_counts["freezerExitPathVotes"] = (
+                int(camera_counts.get("freezerExitPathVotes", 0)) + int(amount)
+            )
         if confidence is not None:
             confidence_key = f"{stage}_max_confidence"
             rounded_confidence = round(float(confidence), 4)
@@ -828,6 +834,10 @@ class TriggerTraceContext:
             "weight_gate_passed": raw.get("weight_gate_passed", raw.get("weightGatePassed")),
             "motion_gate_passed": raw.get("motion_gate_passed", raw.get("motionGatePassed")),
             "motion_gate_reason": raw.get("motion_gate_reason", raw.get("motionGateReason")),
+            "freezerExitPathVotes": raw.get(
+                "freezer_exit_path_votes",
+                raw.get("freezerExitPathVotes"),
+            ),
             "instance_count_hint": raw.get(
                 "instance_count_hint",
                 raw.get("instanceCountHint"),
@@ -869,6 +879,7 @@ class TriggerTraceContext:
             "camera_roles": camera_roles_payload(config.vision.camera_layout),
             "top_confidence_threshold": config.vision.top_confidence_threshold,
             "side_confidence_threshold": config.vision.side_confidence_threshold,
+            "freezer_min_exit_path_votes": config.vision.freezer_min_exit_path_votes,
             "regular_threshold": {
                 "top": config.vision.top_confidence_threshold,
                 "side": config.vision.side_confidence_threshold,

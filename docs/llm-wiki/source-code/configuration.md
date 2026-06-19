@@ -78,8 +78,8 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   vision-first decision branch where weight is only a tie-break/diagnostic
   signal.
 - `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND=0.08` controls how close
-  freezer single-item candidates must be in confidence before weight residual
-  can break the tie.
+  freezer single-item fallback candidates must be in confidence before weight
+  residual can break the tie.
 - `MODEL__WEIGHT__FREEZER_MULTI_MIN_CONFIDENCE=0.45` is the freezer
   multi-kind vision evidence floor.
 - `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` is the per-item confidence
@@ -134,6 +134,9 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   `MODEL__VISION__FREEZER_MIN_VOTE_COUNT=3` tighten freezer candidate voting.
 - `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT=240.0` keeps freezer dual-top
   detections only when their 480x480 bbox center is in the lower half.
+- `MODEL__VISION__FREEZER_MIN_EXIT_PATH_VOTES=3` is the minimum
+  `freezer_roi_filtered`/`freezerExitPathVotes` evidence required for
+  freezer handled-candidate weight-gate and near-weight rescue tiers.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both
   keep the lower region.

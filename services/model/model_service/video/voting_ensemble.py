@@ -113,6 +113,7 @@ class VoteResult:
     rescue_tolerance_g: Optional[float] = None
     rescue_weight_residual_g: Optional[float] = None
     instance_count_hint: int = 1
+    freezer_exit_path_votes: int = 0
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -152,6 +153,7 @@ class VoteResult:
                 else None
             ),
             "instance_count_hint": int(self.instance_count_hint),
+            "freezer_exit_path_votes": int(self.freezer_exit_path_votes),
         }
         if self.roi_x_min is not None:
             payload.update(

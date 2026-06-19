@@ -863,6 +863,133 @@ def test_video_processor_freezer_handled_filter_keeps_weight_tiebreak_candidate(
     assert trace_context.weight_diagnostics["freezer_candidate_filter"]["selected"][
         "class_id"
     ] == 44
+    assert (
+        trace_context.weight_diagnostics["freezer_candidate_filter"]["reason"]
+        == "single_removal_weight_tiebreak"
+    )
+
+
+def test_video_processor_freezer_exit_path_prefers_melona_over_static_lala(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-melona-exit-path",
+        zone=2,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_filtered": 1},
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "freezer_roi_filtered": 19,
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                class_id=46,
+                class_name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                vote_count=153,
+                max_confidence=0.928,
+                avg_confidence=0.82,
+                weighted_confidence=1.0,
+                top_detected=True,
+                side_detected=True,
+                instance_count_hint=4,
+            ),
+            VoteResult(
+                class_id=44,
+                class_name="STICK_BINGGRAE_MELONA_75ML",
+                vote_count=20,
+                max_confidence=0.9164,
+                avg_confidence=0.88,
+                weighted_confidence=1.0,
+                top_detected=True,
+                side_detected=True,
+                instance_count_hint=2,
+            ),
+        ],
+        delta_weight=-81.0,
+        product_weights={46: 71.0, 44: 93.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [44]
+    assert handled[0].instance_count_hint == 1
+    assert diagnostics["reason"] == "near_weight_exit_path"
+    assert diagnostics["selected"]["freezerExitPathVotes"] == 19
+
+
+def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_k", 6)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-cup-exit-path",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_filtered": 0},
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "freezer_roi_filtered": 4,
+        },
+        "42": {
+            "class_id": 42,
+            "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+            "freezer_roi_filtered": 13,
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", 137, 0.8803, 0.74, weighted_confidence=1.0),
+            VoteResult(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", 82, 0.8601, 0.7, weighted_confidence=1.0),
+            VoteResult(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", 36, 0.878, 0.72, weighted_confidence=1.0),
+            VoteResult(44, "STICK_BINGGRAE_MELONA_75ML", 4, 0.8736, 0.52, weighted_confidence=0.5242),
+            VoteResult(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", 44, 0.7839, 0.45, weighted_confidence=0.4311),
+            VoteResult(42, "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G", 3, 0.8253, 0.4, weighted_confidence=0.4011),
+        ],
+        delta_weight=-97.9,
+        product_weights={46: 71.0, 37: 307.0, 13: 185.0, 44: 93.0, 24: 154.0, 42: 93.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [42]
+    assert diagnostics["reason"] == "weight_gate_exit_path"
+    assert diagnostics["selected"]["freezerExitPathVotes"] == 13
 
 
 @pytest.mark.asyncio

@@ -242,6 +242,13 @@ def build_trigger_candidate_snapshot(
                 "raw_vote_count": _coerce_int(
                     _candidate_value(candidate, "raw_vote_count", 0)
                 ),
+                "freezer_exit_path_votes": _coerce_int(
+                    _candidate_value(
+                        candidate,
+                        "freezer_exit_path_votes",
+                        _candidate_value(candidate, "freezerExitPathVotes", 0),
+                    )
+                ),
                 "weight_gate_passed": _candidate_value(
                     candidate,
                     "weight_gate_passed",

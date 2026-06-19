@@ -98,13 +98,15 @@ Important inputs:
   `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND` of the best confidence use
   weight residual as a tie-break.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
-  `weight_used_as=tiebreaker`, `weight_reliable`, `weight_residual`, and the
-  full considered/selected candidate list. A large residual becomes `partial`,
-  not an automatic identity rejection.
+  `weight_used_as=tiebreaker`, `weight_reliable`, `weight_residual`,
+  `selectionTier`, `freezerExitPathVotes`, and the full considered/selected
+  candidate list. A large residual becomes `partial`, not an automatic
+  identity rejection.
 - Single freezer removal segments now use a handled-candidate narrowing step:
   raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
   engine input, and DoorSession snapshots receive the one handled product
-  selected from the top confidence band by weight residual.
+  selected by freezer exit-path evidence and weight residual before falling
+  back to top confidence-band weight residual.
 - Multi-kind freezer results are created only when segment/compound loadcell
   evidence indicates multiple handled items, or when the combined freezer
   candidate weights fit the target inside the existing count-scaled tolerance.
@@ -525,11 +527,14 @@ Important inputs:
   residual repeated candidate with a different product id is recorded as
   `clean_supported_basket_preferred` with `identitySwapBlocked=true`; a
   same-product repeat can still update the supported product count.
-- After CLOSE correction, DoorSession applies the same matched-only policy to
-  the effective negative net delta. If the aggregated basket still cannot
-  explain the final removal weight inside close tolerance, the basket is
-  excluded from payment, `aggregated_products` is cleared, and
+- After CLOSE correction, DoorSession applies a matched-only guard to the
+  effective negative net delta. If the aggregated basket still cannot explain
+  the final removal weight inside close tolerance,
   `finalWeightValidation.reason` becomes `unresolved_final_weight_mismatch`.
+  Non-freezer cabinets clear `aggregated_products`; freezer cabinets preserve
+  the detected `products`/`totalPrice` for Edge output and record
+  `finalWeightValidation.outputPolicy=products_as_detected` plus
+  `unresolvedProducts` diagnostics.
 
 ## Related Wiki Pages
 

@@ -93,11 +93,11 @@ vision-supported product identity.
   `no_detection` or `uncertain`.
 - Freezer mode narrows this further: final freezer candidates are the only
   chargeable identity source. The normal gram tolerance is not used to reject a
-  strong freezer candidate; confidence ranks first and weight residual only
-  breaks close confidence ties. Raw vision top-K is preserved in diagnostics,
-  but the handled candidate list sent to OPS, the engine, and DoorSession is
+  strong freezer candidate. Raw vision top-K is preserved in diagnostics, but
+  the handled candidate list sent to OPS, the engine, and DoorSession is
   narrowed for single freezer removal segments. In that case one product is
-  selected from the top confidence band by weight residual. Multi-kind or
+  selected by freezer exit-path evidence and weight residual, with top
+  confidence-band weight residual used only as fallback. Multi-kind or
   same-class multi-count freezer results require segment/compound evidence or a
   combined weight/count fit; visible products are not summed by confidence
   alone.

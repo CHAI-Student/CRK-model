@@ -80,8 +80,8 @@ start writing sample images during inference.
   metadata such as `roi_y_limit=240` and `roi_direction` for top-camera
   removal/return filtering. Freezer dual-top filtering records
   `freezer_roi_filtered` style stage evidence, lower-half ROI metadata,
-  freezer motion/vote outcomes, and `instance_count_hint` for multi-bbox
-  same-class evidence.
+  `freezerExitPathVotes` handled-exit evidence, freezer motion/vote outcomes,
+  and `instance_count_hint` for multi-bbox same-class evidence.
 - runtime vision config such as `yolo_model_path`,
   `yolo_internal_conf_threshold`, and the top/side `regular_threshold`
 - extractor diagnostics

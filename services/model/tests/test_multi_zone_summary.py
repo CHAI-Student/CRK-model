@@ -477,6 +477,82 @@ def test_close_final_weight_validation_rejects_repeat_count_over_segment_cap(tmp
     assert diagnostics["rejectedCandidates"][0]["closeRepeatCountCap"] == 3
 
 
+def test_freezer_close_mismatch_preserves_detected_products_for_edge(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session.door_session import TriggerResult
+    from model_service.session.door_session_store import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    caplog.set_level(logging.INFO)
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: {44: 93.0}.get(product_id, 0.0),
+    )
+    store.get_or_start_global_session()
+    store.add_trigger_with_global(
+        2,
+        TriggerResult(
+            trigger_id="",
+            session_id="melona-mismatch",
+            timestamp=10.0,
+            products=[
+                _product(
+                    44,
+                    "STICK_BINGGRAE_MELONA_75ML",
+                    1,
+                    price=1000,
+                    confidence=1.0,
+                ),
+            ],
+            delta_weight=-81.0,
+            confidence=1.0,
+            video_paths={},
+        ),
+    )
+
+    global_session = store.finalize_global_session()
+    zone_session = global_session.zone_sessions[2]
+    active = zone_session.get_active_products()
+    assert [(product.product_id, product.count) for product in active] == [(44, 1)]
+    validation = zone_session.final_weight_validation
+    assert validation["accepted"] is False
+    assert validation["reason"] == "unresolved_final_weight_mismatch"
+    assert validation["outputPolicy"] == "products_as_detected"
+    assert validation["unresolvedProducts"] == [
+        {
+            "productId": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "count": 1,
+            "unitWeight": 93.0,
+            "unitPrice": 1000,
+            "totalPrice": 1000,
+        }
+    ]
+
+    response = _handle_door_close(FakeCloseReadyStore(global_session))
+    zone_2 = next(zone for zone in response["zones"] if zone["zone"] == 2)
+    assert zone_2["products"] == [
+        {
+            "productIdx": "P44",
+            "productId": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "count": 1,
+            "price": 1000,
+            "confidence": 1.0,
+        }
+    ]
+    assert zone_2["totalPrice"] == 1000
+    assert "STICK_BINGGRAE_MELONA_75MLx1" in response["decisionSummaryText"]
+    assert "[OPS][CLOSE]" in caplog.text
+    assert "products=STICK_BINGGRAE_MELONA_75MLx1" in caplog.text
+
+
 def test_close_final_weight_validation_keeps_clean_supported_mix(tmp_path):
     from model_service.session.door_session import TriggerResult
     from model_service.session.door_session_store import DoorSessionStore
