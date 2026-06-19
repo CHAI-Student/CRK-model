@@ -642,6 +642,229 @@ def test_video_processor_top_roi_skips_zero_delta(monkeypatch: pytest.MonkeyPatc
     assert result.roi_rescue_candidates == []
 
 
+def test_video_processor_freezer_dual_top_side_uses_lower_y_roi(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    class FakeExtractor:
+        last_diagnostics = None
+        total_frames = 2
+
+        def __iter__(self) -> Iterator[int]:
+            return iter([0, 1])
+
+    class FreezerRoiYolo:
+        last_preprocess: dict[str, object] = {}
+
+        def detect(
+            self,
+            frame: object,
+            allowed_class_ids: list[int] | None = None,
+            camera_type: str | None = None,
+        ) -> list[YOLODetection]:
+            offset = float(frame) * 12.0
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 100.0, 40.0, 140.0),
+                    cls=52,
+                    conf=0.91,
+                    name="PRODUCT_UPPER_HALF",
+                ),
+                YOLODetection(
+                    xyxy=(10.0 + offset, 220.0, 40.0 + offset, 260.0),
+                    cls=53,
+                    conf=0.92,
+                    name="PRODUCT_LOWER_HALF",
+                ),
+            ]
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 1)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.0)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FreezerRoiYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+    trace_context = TriggerTraceContext(
+        session_id="freezer-dual-top-side-roi",
+        zone=1,
+        top_path=None,
+        side_path="/tmp/top-side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+
+    result = processor.process_videos(
+        side_path="/tmp/top-side.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=0.0,
+        trace_context=trace_context,
+    )
+    trace_context.finalize(status="complete")
+
+    assert [candidate.class_id for candidate in result.vote_results] == [53]
+    assert result.stats.roi_filtered_detections == 2
+    assert result.stats.side_roi_soft_filtered_detections == 0
+    assert result.roi_rescue_candidates == []
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["stage_counts_by_class"]["52"]["freezer_roi_filtered"] == 2
+    assert detail["stage_counts_by_class"]["52"]["roi_y_limit"] == 240.0
+    assert detail["stage_counts_by_class"]["52"]["roi_direction"] == (
+        "freezer_lower_half"
+    )
+
+
+def test_video_processor_records_same_frame_instance_count_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+
+    class MultiBoxYolo:
+        last_preprocess: dict[str, object] = {}
+
+        def detect(
+            self,
+            frame: object,
+            allowed_class_ids: list[int] | None = None,
+            camera_type: str | None = None,
+        ) -> list[YOLODetection]:
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 250.0, 40.0, 290.0),
+                    cls=53,
+                    conf=0.92,
+                    name="PRODUCT_LOWER_HALF",
+                ),
+                YOLODetection(
+                    xyxy=(60.0, 250.0, 90.0, 290.0),
+                    cls=53,
+                    conf=0.91,
+                    name="PRODUCT_LOWER_HALF",
+                ),
+            ]
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 1)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.0)
+    _patch_single_frame_extractor(monkeypatch)
+
+    processor = VideoProcessor(
+        yolo=MultiBoxYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[53],
+        delta_weight=-50.0,
+    )
+
+    assert len(result.vote_results) == 1
+    assert result.vote_results[0].class_id == 53
+    assert result.vote_results[0].instance_count_hint == 2
+
+
+def test_video_processor_freezer_handled_filter_keeps_weight_tiebreak_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-handled-filter",
+        zone=2,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    vote_results = [
+        VoteResult(
+            class_id=13,
+            class_name="BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+            vote_count=79,
+            max_confidence=0.9251,
+            avg_confidence=0.9,
+            weighted_confidence=1.0,
+            top_detected=True,
+            side_detected=True,
+            top_vote_count=39,
+            side_vote_count=40,
+            instance_count_hint=3,
+        ),
+        VoteResult(
+            class_id=44,
+            class_name="STICK_BINGGRAE_MELONA_75ML",
+            vote_count=12,
+            max_confidence=0.8891,
+            avg_confidence=0.86,
+            weighted_confidence=1.0,
+            top_detected=True,
+            side_detected=True,
+            top_vote_count=8,
+            side_vote_count=4,
+            instance_count_hint=2,
+        ),
+        VoteResult(
+            class_id=37,
+            class_name="BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+            vote_count=68,
+            max_confidence=0.8851,
+            avg_confidence=0.48,
+            weighted_confidence=0.4868,
+            top_detected=True,
+            top_vote_count=68,
+            instance_count_hint=3,
+        ),
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-84.2,
+        product_weights={13: 185.0, 44: 93.0, 37: 307.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    assert [candidate.class_id for candidate in handled] == [44]
+    assert handled[0].instance_count_hint == 1
+    assert trace_context.weight_diagnostics["freezer_candidate_filter"][
+        "raw_candidate_count"
+    ] == 3
+    assert trace_context.weight_diagnostics["freezer_candidate_filter"]["selected"][
+        "class_id"
+    ] == 44
+
+
 @pytest.mark.asyncio
 async def test_async_video_processor_top_roi_return_keeps_lower_region(
     monkeypatch: pytest.MonkeyPatch,

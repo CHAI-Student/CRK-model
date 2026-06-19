@@ -116,7 +116,15 @@ while the door is open.
 ## ActiveProductStore
 
 - Node product snapshots are normalized into model-side product records.
-- The store maps YOLO class ids/names to product metadata and weights.
+- The store maps current YOLO engine class names to product metadata and
+  weights through Edge class-name keys.
+- In node-first mode, class-id resolution ignores
+  `trainingidx`/`training_idx`/`trainingIdx`/`yolo_class_id` aliases and
+  `yolo_class_name`; those fields can drift from the deployed engine. Official
+  input is `product_eng_name` and successful matches record
+  `class_id_source=product_eng_name_engine`. During Edge migration,
+  engine-matching `name` records `name_engine_compat` and legacy
+  `product_name` records `product_name_engine_legacy`.
 - It is the source of product weights for strict/loadcell-only matching.
 - Product weight input accepts `product_weight`, `productWeight`,
   `product_weight_g`, `unit_weight_g`, and `weight` aliases. Alias repairs are

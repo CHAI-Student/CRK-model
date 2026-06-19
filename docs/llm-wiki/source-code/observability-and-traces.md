@@ -28,7 +28,8 @@ Important patterns include:
 
 - `[OPS][TRIGGER]`: zone, delta, loadcell payload state, filtered channel
   counts, first/last filtered totals, analysis reason, and top/side video
-  paths.
+  paths. Cabinet runs also log `cabinet_type`, `loadcell_scope=zone`,
+  `loadcell_source=loadcells`, `requested_zone`, and effective channel count.
 - `[OPS][FRAMES]`: zone and video paths for frame processing.
 - `[OPS][CANDIDATES]`: ranked candidates, weights, confidence, camera flags,
   source.
@@ -77,7 +78,10 @@ start writing sample images during inference.
 - preprocessing metadata
 - stage counts by class, including ROI-filtered counts and ROI center/limit
   metadata such as `roi_y_limit=240` and `roi_direction` for top-camera
-  removal/return filtering
+  removal/return filtering. Freezer dual-top filtering records
+  `freezer_roi_filtered` style stage evidence, lower-half ROI metadata,
+  freezer motion/vote outcomes, and `instance_count_hint` for multi-bbox
+  same-class evidence.
 - runtime vision config such as `yolo_model_path`,
   `yolo_internal_conf_threshold`, and the top/side `regular_threshold`
 - extractor diagnostics
@@ -92,7 +96,10 @@ start writing sample images during inference.
   `mixed_return_segments` when a negative trigger carries internal return
   hints for DoorSession replay, `effective_count_guard` when return hints can
   reduce a raw repeated-count result, and `same_weight_candidate_collision`
-  when regular candidate identity beats a same-weight active/rescue collision
+  when regular candidate identity beats a same-weight active/rescue collision.
+  Freezer decisions add `decision_branch=freezer_vision_first` with
+  `weight_used_as=tiebreaker`, `weight_reliable`, `weight_residual`, and
+  selected/considered candidate diagnostics.
 - final result and storage result
 
 Trace JSONL/detail files are raw operational evidence. The current wiki policy

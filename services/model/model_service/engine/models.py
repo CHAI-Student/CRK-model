@@ -54,6 +54,7 @@ class EnsembleResult:
     weight_gate_passed: Optional[bool] = None
     rescue_tolerance_g: Optional[float] = None
     rescue_weight_residual_g: Optional[float] = None
+    instance_count_hint: int = 1
 
     @property
     def is_consensus(self) -> bool:
@@ -78,6 +79,7 @@ class EnsembleResult:
             "weight_gate_passed": self.weight_gate_passed,
             "rescue_tolerance_g": self.rescue_tolerance_g,
             "rescue_weight_residual_g": self.rescue_weight_residual_g,
+            "instance_count_hint": int(self.instance_count_hint),
         }
 
 

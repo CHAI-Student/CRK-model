@@ -39,7 +39,7 @@ from model_service.session import (
 from model_service.session.active_product_store import ActiveProductStore
 from model_service.session.session_store import generate_session_id
 from model_service.video.frame_trace import TriggerTraceContext
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 logger = logging.getLogger(__name__)
 ops_logger = get_ops_logger()
@@ -71,6 +71,11 @@ class TriggerTimingMetadataModel(BaseModel):
 class TriggerRequest(BaseModel):
     zone: int = Field(..., ge=0, description="Zone number")
     loadcells: List[LoadcellData] = Field(default_factory=list, description="Loadcell data")
+    global_loadcells: List[LoadcellData] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("global_loadcells", "globalLoadcells"),
+        description="Deprecated compatibility field; model uses zone loadcells",
+    )
     videos: VideosPaths = Field(..., description="Recorded AVI paths")
     timing: Optional[TriggerTimingMetadataModel] = Field(
         default=None,
@@ -131,6 +136,37 @@ def _calculate_weight_delta(loadcells: List[LoadcellData]) -> float:
 
 def _analyze_weight_delta(loadcells: List[LoadcellData]) -> loadcell_stats.LoadcellDeltaAnalysis:
     return loadcell_stats.analyze_weight_delta(loadcells)
+
+
+def _loadcell_channel_count(loadcells: Sequence[Any]) -> int:
+    max_count = 0
+    for loadcell in loadcells:
+        raw_value = getattr(loadcell, "raw_value", None)
+        filtered_value = getattr(loadcell, "filtered_value", None)
+        if isinstance(loadcell, dict):
+            raw_value = loadcell.get("raw_value")
+            filtered_value = loadcell.get("filtered_value")
+        for values in (raw_value, filtered_value):
+            if isinstance(values, (list, tuple)):
+                max_count = max(max_count, len(values))
+    return max_count
+
+
+def _select_effective_loadcells(request: TriggerRequest) -> tuple[List[LoadcellData], dict]:
+    cabinet_type = config.machine.cabinet_type
+    requested_channel_count = _loadcell_channel_count(request.loadcells)
+    global_channel_count = _loadcell_channel_count(request.global_loadcells)
+
+    return request.loadcells, {
+        "cabinet_type": cabinet_type,
+        "loadcell_scope": "zone",
+        "loadcell_source": "loadcells",
+        "requested_zone": request.zone,
+        "effective_channel_count": requested_channel_count,
+        "requested_channel_count": requested_channel_count,
+        "global_channel_count": global_channel_count,
+        "loadcell_validation_reason": None,
+    }
 
 
 def _has_video_path(videos: VideosPaths) -> bool:
@@ -221,8 +257,11 @@ def _record_effective_count_guard_diagnostics(
 def _loadcell_trace_metadata(
     loadcells: List[LoadcellData],
     delta_analysis: loadcell_stats.LoadcellDeltaAnalysis,
+    loadcell_metadata: Optional[dict] = None,
 ) -> dict:
     metadata = loadcell_stats.summarize_loadcell_payload(loadcells)
+    if loadcell_metadata:
+        metadata.update(loadcell_metadata)
     segments = list(delta_analysis.segments)
     positive_segments = [segment for segment in segments if segment.sign > 0]
     negative_segments = [segment for segment in segments if segment.sign < 0]
@@ -404,9 +443,34 @@ def _vote_results_to_ensemble(vote_results: List[Any]) -> List[Any]:
                     "rescue_weight_residual_g",
                     None,
                 ),
+                instance_count_hint=getattr(vote, "instance_count_hint", 1),
             )
         )
     return ensemble_results
+
+
+def _record_raw_and_filter_handled_candidates(
+    *,
+    vote_results: List[Any],
+    delta_weight: Optional[float],
+    product_weights: Optional[dict[int, float]],
+    trace_context: Optional[TriggerTraceContext],
+    log_prefix: str,
+) -> List[Any]:
+    from model_service.video import VideoProcessor
+
+    if trace_context is not None:
+        trace_context.record_raw_vision_candidates(
+            vote_results,
+            product_weights or {},
+        )
+    return VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=delta_weight,
+        product_weights=product_weights or {},
+        trace_context=trace_context,
+        log_prefix=log_prefix,
+    )
 
 
 def _validate_video_paths(videos: VideosPaths) -> None:
@@ -453,11 +517,18 @@ async def trigger_judgment(
             product_weights[int(class_id)] = float(product_weight)
         except (TypeError, ValueError):
             continue
+    effective_loadcells, loadcell_metadata = _select_effective_loadcells(request)
 
     logger.info("[TRIGGER] ========== inference start ==========")
     logger.info(f"[TRIGGER] zone={request.zone}, session_id={session_id}")
     logger.info(f"[TRIGGER] videos: top={request.videos.top}, side={request.videos.side}")
-    logger.info(f"[TRIGGER] loadcells: {len(request.loadcells)}")
+    logger.info(
+        f"[TRIGGER] loadcells: {len(effective_loadcells)} "
+        f"cabinet_type={loadcell_metadata['cabinet_type']} "
+        f"scope={loadcell_metadata['loadcell_scope']} "
+        f"source={loadcell_metadata['loadcell_source']} "
+        f"channels={loadcell_metadata['effective_channel_count']}"
+    )
 
     trace_context = None
 
@@ -478,7 +549,7 @@ async def trigger_judgment(
                         filtered_value=loadcell.filtered_value,
                         filter_method=loadcell.filter_method,
                     )
-                    for loadcell in request.loadcells
+                    for loadcell in effective_loadcells
                 ],
                 top_video_path=request.videos.top,
                 side_video_path=request.videos.side,
@@ -487,6 +558,14 @@ async def trigger_judgment(
                     if request.timing is not None
                     else None
                 ),
+                cabinet_type=loadcell_metadata["cabinet_type"],
+                loadcell_scope=loadcell_metadata["loadcell_scope"],
+                loadcell_source=loadcell_metadata["loadcell_source"],
+                requested_zone=loadcell_metadata["requested_zone"],
+                effective_channel_count=loadcell_metadata["effective_channel_count"],
+                loadcell_validation_reason=loadcell_metadata[
+                    "loadcell_validation_reason"
+                ],
             )
             logger.info(
                 f"[TRIGGER][path=service] active_products_snapshot={len(active_products_snapshot)}"
@@ -542,9 +621,13 @@ async def trigger_judgment(
 
         _validate_video_paths(request.videos)
 
-        delta_analysis = _analyze_weight_delta(request.loadcells)
+        delta_analysis = _analyze_weight_delta(effective_loadcells)
         delta_weight = delta_analysis.decision_delta
-        payload_diagnostics = _loadcell_trace_metadata(request.loadcells, delta_analysis)
+        payload_diagnostics = _loadcell_trace_metadata(
+            effective_loadcells,
+            delta_analysis,
+            loadcell_metadata,
+        )
         trace_context.record_loadcell_delta(
             delta_weight=delta_weight,
             **payload_diagnostics,
@@ -569,6 +652,10 @@ async def trigger_judgment(
             f"first_filtered_total={payload_diagnostics['first_filtered_total']} "
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
             f"analysis_reason={delta_analysis.reason} "
+            f"cabinet_type={payload_diagnostics['cabinet_type']} "
+            f"loadcell_scope={payload_diagnostics['loadcell_scope']} "
+            f"loadcell_source={payload_diagnostics['loadcell_source']} "
+            f"effective_channels={payload_diagnostics['effective_channel_count']} "
             f"top_video={request.videos.top or 'none'} "
             f"side_video={request.videos.side or 'none'}"
         )
@@ -631,6 +718,13 @@ async def trigger_judgment(
                 elapsed_ms = (time.perf_counter() - processing_started) * 1000
                 vote_results = list(
                     getattr(processing_result, "vote_results", []) or []
+                )
+                vote_results = _record_raw_and_filter_handled_candidates(
+                    vote_results=vote_results,
+                    delta_weight=delta_weight,
+                    product_weights=product_weights,
+                    trace_context=trace_context,
+                    log_prefix="TRIGGER-LOW-WEIGHT",
                 )
                 stats = getattr(processing_result, "stats", None)
                 if stats is not None:
@@ -826,6 +920,13 @@ async def trigger_judgment(
                 vote_results,
                 all_rescue_votes,
             )
+        vote_results = _record_raw_and_filter_handled_candidates(
+            vote_results=vote_results,
+            delta_weight=delta_weight,
+            product_weights=product_weights,
+            trace_context=trace_context,
+            log_prefix="TRIGGER",
+        )
         stats = processing_result.stats
         trace_context.record_video_stats(stats)
         trace_context.record_active_product_snapshot(
@@ -875,7 +976,7 @@ async def trigger_judgment(
             processing_stage_detail=f"Derived {len(vote_results)} candidates, judging counts",
         )
 
-        delta_analysis = _analyze_weight_delta(request.loadcells)
+        delta_analysis = _analyze_weight_delta(effective_loadcells)
         delta_weight = delta_analysis.decision_delta
         logger.info(f"[TRIGGER] delta_weight={delta_weight:.1f}g")
         logger.info(
@@ -897,7 +998,7 @@ async def trigger_judgment(
         vision_candidates = _vote_results_to_ensemble(vote_results)
         vision_only = (
             _should_force_vision_only(request.videos, delta_analysis)
-            or (delta_weight == 0.0 and len(request.loadcells) == 0)
+            or (delta_weight == 0.0 and len(effective_loadcells) == 0)
         )
 
         result = engine.judge(

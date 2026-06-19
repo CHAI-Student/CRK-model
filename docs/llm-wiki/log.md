@@ -1,5 +1,92 @@
 # LLM Wiki Log
 
+## [2026-06-19] maintenance | freezer handled-candidate narrowing
+
+- Documented the freezer dual-top handled-candidate split: raw top-K vision
+  candidates remain in trace diagnostics, while `trace.candidates`,
+  `[OPS][CANDIDATES]`, engine input, and DoorSession close snapshots use only
+  handled candidates.
+- Recorded that single-removal freezer events default to one handled product.
+  Within the top confidence band, loadcell weight is a tie-breaker for choosing
+  that product, and `instance_count_hint` becomes count evidence only when the
+  target weight supports the hinted count.
+- Tightened freezer multi-kind behavior: multiple visible products no longer
+  create a basket by confidence alone. Multi-kind output requires segment or
+  compound loadcell evidence, or a combined candidate weight that fits the
+  existing count-scaled tolerance.
+- Updated the Jetson stride-2 env template for freezer field operation:
+  `MODEL__MACHINE__CABINET_TYPE=freezer` with
+  `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`.
+
+## [2026-06-18] maintenance | freezer vision-first zone loadcell policy
+
+- Removed the whole-cabinet loadcell decision contract from the docs: all
+  cabinet types now use zone-sliced `/trigger.loadcells`.
+  `global_loadcells` remains only a deprecated compatibility field.
+- Documented freezer `dual_top_proxy` behavior: public `videos.top/side`
+  remain unchanged, but the streams are treated as top-middle/top-side and
+  freezer candidates must pass lower-half ROI, stronger motion, and stronger
+  vote filters. Threshold/ROI rescue is disabled for freezer candidates.
+- Documented the freezer decision branch: final vision candidates are the only
+  chargeable identity source, confidence ranks first, and loadcell weight is
+  recorded as a tie-break/diagnostic instead of a hard reject gate.
+- Updated product class-key notes: `product_eng_name` remains official, while
+  engine-matching `name` and legacy `product_name` are temporary compatibility
+  keys. `trainingidx`, `yolo_class_id`, `yolo_class_name`, and stale
+  `yolo_product_mapping.json` data are still ignored for runtime identity.
+- Clarified that YOLO engine startup log output `name=` is an engine class
+  label, not an Edge payload field name.
+
+## [2026-06-17] maintenance | historical product_eng_name runtime class key
+
+- Historical note superseded by the 2026-06-18 compatibility bridge:
+  `product_eng_name` remains official, but engine-matching `name` and legacy
+  `product_name` are accepted during Edge migration.
+- At that point, active product class resolution was narrowed to Edge
+  `product_eng_name` matched against the loaded YOLO engine class name. The
+  later 2026-06-18 bridge adds engine-matching `name` and legacy
+  `product_name` compatibility.
+- Recorded that `trainingidx`, `yolo_class_id`, `yolo_class_name`, `product_idx`,
+  and stale `services/config/yolo_product_mapping.json` ids are ignored for
+  active-product runtime class identity.
+- Updated diagnostics language around empty allowlists to focus on unmapped or
+  missing `product_eng_name` instead of invalid direct class ids.
+- Tightened the field-name contract so camelCase and shortened aliases are not
+  accepted for runtime class identity.
+- Added `MODEL__VISION__LOG_ENGINE_CLASSES=off` as a startup debug toggle; set
+  it to `on` to print every loaded YOLO engine class id/name.
+
+## [2026-06-17] maintenance | historical Korean product_name display-only
+
+- Removed the remaining class-id fallback that compared display `product_name`
+  against engine/static class names.
+- Recorded the official contract that `product_name` is Korean display
+  metadata. The later 2026-06-18 bridge accepts legacy `product_name` only when
+  it already matches a loaded engine class name.
+
+## [2026-06-17] maintenance | product_eng_name class-key contract
+
+- Recorded that Edge sends `product_name` as the Korean display name and
+  `product_eng_name` as the YOLO engine class name.
+- Updated the model-side catalog contract so `product_eng_name` is resolved as
+  the stable class key, while `product_idx` remains an external product
+  identifier.
+- Clarified that engine-loaded class names win over stale static
+  `yolo_product_mapping.json` rows with the same class name.
+
+## [2026-06-17] maintenance | Node-first product-name fallback bridge
+
+- Historical note superseded by the later class-key changes.
+  `MODEL__CATALOG__PRODUCT_NAME_FALLBACK_ENABLED` remains as a legacy
+  deployment flag; current runtime compatibility is controlled by engine-name
+  matching, not static name fallback.
+- Runtime active-product class identity now ignores direct class-id fields and
+  `yolo_class_name`; current allowlists come from engine-matching
+  `product_eng_name`, `name`, or legacy `product_name`.
+- Recorded sibling-repo follow-up risks that remain outside this CRK-model-only
+  change: Edge/Camera/IO hardcoded URLs, missing Camera retry for
+  `waiting_for=stable_loadcell`, and stale IO Board protocol docs.
+
 ## [2026-06-16] maintenance | Waiting loadcell plus active snapshot diagnostics
 
 - Documented that `removal_waiting_for_stable_loadcell` can now preserve the
@@ -12,12 +99,13 @@
 
 ## [2026-06-15] maintenance | Node-first catalog and zero-weight vision path
 
-- Documented `MODEL__CATALOG__SOURCE_POLICY=node_first` as the default runtime
-  catalog mode, with Node `trainingidx`/`yolo_class_id` aliases as direct YOLO
-  class ids.
+- Historical note: `MODEL__CATALOG__SOURCE_POLICY=node_first` remains the
+  default runtime catalog mode, but direct `trainingidx`/`yolo_class_id`
+  class-id aliases have been superseded by engine-name class-key matching.
 - Recorded that static `dataset.yaml` and `yolo_product_mapping.json`
   validation is opt-in through
-  `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=true`.
+  `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=true`; those static files do not
+  populate runtime active-product allowlists.
 - Updated startup, configuration, video/vision, decision/weight, and pipeline
   pages for zero-weight active products: they stay in the vision allowlist but
   are marked unavailable for loadcell count/validation.
@@ -50,7 +138,8 @@
   `videos.top/side` contract.
 - Recorded camera layout and logical-to-physical role mapping in frame trace
   summary/detail JSON so operators can distinguish a physical Side stream from
-  the new `top_left_proxy` stream.
+  the dual-top proxy stream. The current freezer mapping names those physical
+  streams `top_middle` and `top_side`.
 
 ## [2026-06-04] maintenance | Documentation command sync
 

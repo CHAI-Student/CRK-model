@@ -67,6 +67,12 @@ so queue wait is a real latency dimension.
   from delta calculation: empty payloads, invalid-only filtered channels,
   all-zero filtered channels, and nonzero payloads are distinguishable in
   traces and OPS logs.
+- Cabinet type does not change the effective loadcell payload. Refrigerated
+  and freezer modes both use zone-sliced `/trigger.loadcells`; the deprecated
+  `/trigger.global_loadcells` field is ignored for decision input. OPS/trace
+  metadata still records `cabinet_type`, `loadcell_scope=zone`,
+  `requested_zone`, `effective_channel_count`, and any received
+  `global_channel_count` for diagnostics.
 - `calculate_weight_delta()` is the shared route/service helper.
 - `api/routes/trigger.py` and `TriggerService` keep compatibility wrapper
   helpers, but the implementation delegates to `core/loadcell_stats.py` so

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import FastAPI
 from model_service.core.config import Settings
-from model_service.core.logging_config import get_logger
+from model_service.core.logging_config import get_logger, get_ops_logger
 from uvicorn import Config as UvicornConfig
 from uvicorn import Server
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from model_service.session import DoorSessionStore, SessionStore
 
 logger = get_logger(__name__)
+ops_logger = get_ops_logger()
 
 
 def maybe_validate_static_catalog(
@@ -31,6 +32,8 @@ def maybe_validate_static_catalog(
         "YOLO catalog startup: "
         f"source_policy={settings.catalog.source_policy}, "
         f"static_validation_enabled={settings.catalog.static_validation_enabled}, "
+        f"product_name_fallback_enabled="
+        f"{settings.catalog.product_name_fallback_enabled}, "
         f"engine_classes={len(engine_class_names or {})}"
     )
 
@@ -53,6 +56,27 @@ def maybe_validate_static_catalog(
         dataset_path=dataset_path,
         mapping_path=mapping_path,
     )
+
+
+def maybe_log_yolo_engine_classes(
+    *,
+    settings: Settings,
+    engine_class_names: dict[Any, Any],
+) -> None:
+    """Log loaded YOLO engine class ids/names only when explicitly enabled."""
+    if not settings.vision.log_engine_classes:
+        return
+
+    class_items = sorted(
+        (engine_class_names or {}).items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else str(item[0]),
+    )
+    ops_logger.info(
+        "[OPS][YOLO-ENGINE] "
+        f"model_path={settings.yolo_model_path} class_count={len(class_items)}"
+    )
+    for class_id, class_name in class_items:
+        ops_logger.info("[OPS][YOLO-ENGINE-CLASS] id=%s name=%s", class_id, class_name)
 
 
 async def session_cleanup_task(
@@ -130,6 +154,10 @@ def create_lifespan(settings: Settings):
                 f"YOLO model load failed: {settings.yolo_model_path}. "
                 f"Check that the TensorRT engine exists and is readable.{detail_suffix}"
             )
+        maybe_log_yolo_engine_classes(
+            settings=settings,
+            engine_class_names=yolo.class_names or {},
+        )
 
         yolo_name_to_id = {}
         for class_id, class_name in (yolo.class_names or {}).items():
@@ -139,6 +167,9 @@ def create_lifespan(settings: Settings):
         active_product_store = ActiveProductStore(
             yolo_name_to_id=yolo_name_to_id,
             source_policy=settings.catalog.source_policy,
+            product_name_fallback_enabled=(
+                settings.catalog.product_name_fallback_enabled
+            ),
         )
 
         base_dir = Path(__file__).parent.parent.parent.parent
@@ -149,8 +180,12 @@ def create_lifespan(settings: Settings):
             try:
                 with open(mapping_path, "r", encoding="utf-8") as handle:
                     mapping_data = json.load(handle)
-                loaded = active_product_store.load_yolo_mapping(mapping_data)
-                logger.info(f"ActiveProductStore: loaded {loaded} YOLO mappings")
+                ignored = active_product_store.load_yolo_mapping(mapping_data)
+                logger.info(
+                    "ActiveProductStore: ignored %s legacy YOLO mappings for "
+                    "runtime product catalog",
+                    ignored,
+                )
             except Exception as exc:
                 logger.error(f"Failed to load YOLO mapping for ActiveProductStore: {exc}")
 

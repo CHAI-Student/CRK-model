@@ -44,9 +44,14 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - Diagnostic all-class trace can collect limited evidence outside normal
   active-class filtering.
 - YOLO inference normally receives `allowed_class_ids` from the active product
-  snapshot. Under the default Node-first catalog policy, those ids come from
-  Node `trainingidx`/`yolo_class_id` aliases rather than static
-  `yolo_product_mapping.json`.
+  snapshot. Under the default Node-first catalog policy, those ids come only
+  from Edge class-name keys matched against the current YOLO engine class
+  names. Official input is `product_eng_name` and successful matches are
+  tagged as `product_eng_name_engine`; during Edge migration,
+  engine-matching `name` is tagged `name_engine_compat` and legacy
+  `product_name` is tagged `product_name_engine_legacy`. Direct
+  `trainingidx`/`yolo_class_id` fields and stale static mappings are ignored
+  for active-product class identity.
 - A stock-positive product with missing or `0g` weight still remains in the
   active-class allowlist; weight availability only affects loadcell
   validation/count paths.
@@ -65,12 +70,22 @@ selected frames, accumulates per-camera evidence, and returns ranked
   operating templates now align ROI coordinates to the 480x480 TensorRT input.
 - The logical Top/Side processing profiles are now separated from physical
   camera placement. The default `legacy_top_side` layout preserves current
-  behavior; `dual_top_proxy` records `videos.top` as physical `top_center` and
-  `videos.side` as `top_left_proxy` while still applying Side thresholds, ROI,
-  crop, and voting weights to the proxy stream.
+  behavior; `dual_top_proxy` records `videos.top` as physical `top_middle` and
+  `videos.side` as `top_side` while applying the Top processing profile to
+  both public streams.
 - Top ROI filtering keeps the lower region for both removals
   (`delta_weight < 0`) and returns (`delta_weight > 0`): detections pass when
   `center_y >= 240`. Zero or missing delta skips top ROI.
+- In freezer mode with `dual_top_proxy`, both public streams are treated as
+  top cameras. Freezer candidates must pass the lower-half ROI
+  (`center_y >= MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT`, default `240`),
+  the freezer motion floor, and freezer vote thresholds. Threshold rescue and
+  ROI rescue are disabled for freezer candidates so only strong moving
+  lower-half evidence reaches the decision engine.
+- After video processing, freezer dual-top removals split raw vision top-K from
+  handled candidates. The raw list is kept for trace review, while the handled
+  list is narrowed to the likely picked item for single removal segments before
+  OPS logging and engine judgment.
 - Side ROI filtering protects against side-camera noise outside the useful
   left-side region with hard `center_x <= side_roi_x_max`.
 - The side ROI default is hard `center_x <= 400` plus a conditional

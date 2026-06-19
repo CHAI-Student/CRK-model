@@ -38,14 +38,6 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 CATALOG_SOURCE_POLICIES = {"node_first", "static_mapping_compat"}
-DIRECT_CLASS_ID_FIELDS = (
-    "yolo_class_id",
-    "yoloClassId",
-    "trainingidx",
-    "training_idx",
-    "trainingIdx",
-)
-
 YOLO_NAME_ALIASES: Dict[str, str] = {
     "BAG_JAYEONRU_MOIST_SWEET_CHESTNUT_80G": "BAG_JAYEONLU_MOIST_SWEET_CHESTNUT_80G",
     "BAG_JAYEONLU_MOIST_SWEET_CHESTNUT_80G": "BAG_JAYEONRU_MOIST_SWEET_CHESTNUT_80G",
@@ -59,6 +51,19 @@ PRODUCT_WEIGHT_FIELD_ALIASES = (
     "unit_weight_g",
     "unitWeightG",
     "weight",
+)
+
+PRODUCT_DISPLAY_NAME_FIELDS = (
+    "product_name",
+    "productName",
+)
+
+PRODUCT_ENG_NAME_FIELDS = (
+    "product_eng_name",
+)
+
+PRODUCT_COMPAT_CLASS_NAME_FIELDS = (
+    "name",
 )
 
 KNOWN_PRODUCT_WEIGHT_FALLBACKS: Dict[int, float] = {
@@ -75,6 +80,7 @@ class ProductInfo:
     sale_price: int
     product_weight: float
     stock_qty: int
+    product_eng_name: str = ""
     yolo_class_id: Optional[int] = None  # 매핑된 YOLO 클래스 ID
     has_loadcell: str = "true"  # v4.8: 추가
     class_id_source: str = "unknown"
@@ -174,8 +180,11 @@ class ActiveProductStore:
     Node.js에서 받은 활성 상품 정보를 전역(global)으로 관리 (v4.5).
 
     YOLO classes 파라미터를 통한 사전 필터링 지원.
-    yolo_product_mapping.json에서 로드된 매핑 정보를 사용하여
-    product_name → yolo_class_id 변환.
+    Runtime class identity is resolved from Edge product_eng_name matched
+    against loaded YOLO engine class names. During Edge migration, legacy
+    name/product_name payloads may also act as class keys when they match the
+    loaded engine names. Static yolo_product_mapping.json data is ignored for
+    active-product allowlists.
 
     Thread-safe: 내부 Lock 사용.
     """
@@ -185,19 +194,25 @@ class ActiveProductStore:
         yolo_name_to_id: Optional[Dict[str, int]] = None,
         last_valid_ttl_seconds: float = 300.0,
         source_policy: str = "node_first",
+        product_name_fallback_enabled: bool = True,
     ):
         """
         Initialize ActiveProductStore.
 
         Args:
-            yolo_name_to_id: {yolo_class_name: yolo_class_id} 매핑
-                             yolo_product_mapping.json에서 로드
+            yolo_name_to_id: {yolo_class_name: yolo_class_id} mapping loaded
+                             from the current YOLO engine.
         """
         normalized_policy = str(source_policy).strip().lower()
         if normalized_policy not in CATALOG_SOURCE_POLICIES:
             raise ValueError(f"Invalid catalog source policy: {source_policy}")
         self.source_policy = normalized_policy
+        self.product_name_fallback_enabled = bool(product_name_fallback_enabled)
         self._engine_name_to_id: Dict[str, int] = dict(yolo_name_to_id or {})
+        self._engine_name_normalized: Dict[str, int] = {
+            self._normalize_name(name): class_id
+            for name, class_id in self._engine_name_to_id.items()
+        }
         self._yolo_name_to_id: Dict[str, int] = dict(self._engine_name_to_id)
         self._yolo_name_normalized: Dict[str, int] = {}  # 정규화된 이름 매핑
         self._known_class_ids: set[int] = set(self._engine_name_to_id.values())
@@ -212,7 +227,8 @@ class ActiveProductStore:
         logger.info(
             f"ActiveProductStore initialized: "
             f"{len(self._engine_name_to_id)} YOLO classes, "
-            f"source_policy={self.source_policy}"
+            f"source_policy={self.source_policy}, "
+            f"product_name_fallback_enabled={self.product_name_fallback_enabled}"
         )
 
     def _build_normalized_mapping(self) -> None:
@@ -261,39 +277,76 @@ class ActiveProductStore:
         normalized = re.sub(r'[_\-\.\s\/\\]', '', name)
         return normalized.upper()
 
+    @staticmethod
+    def _extract_first_present(product: dict, field_names: tuple[str, ...]) -> str:
+        for field_name in field_names:
+            value = product.get(field_name)
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    @classmethod
+    def _extract_product_eng_name(cls, product: dict) -> str:
+        return cls._extract_first_present(product, PRODUCT_ENG_NAME_FIELDS)
+
+    @classmethod
+    def _extract_compat_class_name(cls, product: dict) -> str:
+        return cls._extract_first_present(product, PRODUCT_COMPAT_CLASS_NAME_FIELDS)
+
+    @classmethod
+    def _extract_product_name(cls, product: dict) -> str:
+        return cls._extract_first_present(
+            product,
+            PRODUCT_DISPLAY_NAME_FIELDS,
+        ) or cls._extract_product_eng_name(product)
+
     def load_yolo_mapping(self, mapping_data: dict) -> int:
         """
-        yolo_product_mapping.json 데이터 로드.
+        Legacy yolo_product_mapping.json hook.
 
-        Args:
-            mapping_data: {"mappings": [{"yolo_class_id": 1, "yolo_class_name": "..."}, ...]}
-
-        Returns:
-            로드된 매핑 수
+        Runtime active-product identity is intentionally resolved from
+        Edge product_eng_name/name/product_name values matched against the
+        loaded YOLO engine names.
+        The static file may be stale after engine swaps, so it is not loaded
+        into the runtime name map.
         """
-        if self.source_policy != "static_mapping_compat":
-            logger.info(
-                "[ActiveProductStore] skipped static YOLO mapping: "
-                f"source_policy={self.source_policy}"
-            )
-            return 0
-
         mappings = mapping_data.get("mappings", [])
-        count = 0
+        if mappings:
+            logger.info(
+                "[ActiveProductStore] ignored legacy static YOLO mappings for "
+                "runtime catalog: rows=%s, source_policy=%s, "
+                "product_name_fallback_enabled=%s",
+                len(mappings),
+                self.source_policy,
+                self.product_name_fallback_enabled,
+            )
+        return len(mappings)
 
-        for m in mappings:
-            yolo_class_id = m.get("yolo_class_id")
-            yolo_class_name = m.get("yolo_class_name")
+    @classmethod
+    def _extract_product_class_key(cls, product: dict) -> tuple[str, str]:
+        product_eng_name = cls._extract_product_eng_name(product)
+        if product_eng_name:
+            return product_eng_name, "product_eng_name"
 
-            if yolo_class_id is None or not yolo_class_name:
-                continue
+        compat_name = cls._extract_compat_class_name(product)
+        if compat_name:
+            return compat_name, "name"
 
-            self._register_yolo_name(yolo_class_name, int(yolo_class_id))
-            count += 1
+        product_name = cls._extract_first_present(product, PRODUCT_DISPLAY_NAME_FIELDS)
+        if product_name:
+            return product_name, "product_name"
 
-        self._register_aliases()
-        logger.info(f"Loaded {count} YOLO class mappings")
-        return count
+        return "", "missing_product_class_key"
+
+    @staticmethod
+    def _class_id_source_for_key_source(class_key_source: str) -> str:
+        if class_key_source == "product_eng_name":
+            return "product_eng_name_engine"
+        if class_key_source == "name":
+            return "name_engine_compat"
+        if class_key_source == "product_name":
+            return "product_name_engine_legacy"
+        return "unknown"
 
     def _find_yolo_class_id(self, product_name: str) -> Optional[int]:
         """
@@ -339,45 +392,30 @@ class ActiveProductStore:
         self,
         product: dict,
     ) -> tuple[Optional[int], str, Optional[dict]]:
-        for field_name in DIRECT_CLASS_ID_FIELDS:
-            if field_name not in product:
-                continue
-            raw_value = product.get(field_name)
-            direct_id = self._coerce_yolo_class_id(raw_value)
-            if direct_id is not None:
-                return direct_id, field_name, None
-            if raw_value not in (None, ""):
-                return None, field_name, {
-                    "source": field_name,
-                    "value": raw_value,
-                }
+        class_key, class_key_source = self._extract_product_class_key(product)
+        if not class_key:
+            return None, "missing_product_class_key", {
+                "source": class_key_source,
+                "reason": "missing_product_class_key",
+            }
 
-        class_name = product.get("yolo_class_name", product.get("yoloClassName"))
-        if class_name:
-            class_id = self._find_yolo_class_id(str(class_name))
-            if class_id is not None:
-                resolved = self._coerce_yolo_class_id(class_id)
-                if resolved is not None:
-                    return resolved, "yolo_class_name", None
-                return None, "yolo_class_name", {
-                    "source": "yolo_class_name",
-                    "value": class_name,
-                    "resolved_class_id": class_id,
-                }
+        class_id = self._find_yolo_class_id(class_key)
+        if class_id is None:
+            return None, class_key_source, {
+                "source": class_key_source,
+                "value": class_key,
+                "reason": "not_found_in_engine_classes",
+            }
 
-        if self.source_policy == "static_mapping_compat":
-            class_id = self._find_yolo_class_id(product.get("product_name", ""))
-            if class_id is not None:
-                resolved = self._coerce_yolo_class_id(class_id)
-                if resolved is not None:
-                    return resolved, "product_name_static_mapping", None
-                return None, "product_name_static_mapping", {
-                    "source": "product_name_static_mapping",
-                    "value": product.get("product_name", ""),
-                    "resolved_class_id": class_id,
-                }
-
-        return None, "unmapped", None
+        resolved = self._coerce_yolo_class_id(class_id)
+        if resolved is None:
+            return None, class_key_source, {
+                "source": class_key_source,
+                "value": class_key,
+                "resolved_class_id": class_id,
+                "reason": "resolved_class_id_not_in_engine_classes",
+            }
+        return resolved, self._class_id_source_for_key_source(class_key_source), None
 
     @staticmethod
     def _is_stock_positive_weight_product(product: ProductInfo) -> bool:
@@ -520,8 +558,8 @@ class ActiveProductStore:
         """
         전역 상품 리스트 저장 (v4.5).
 
-        product_name → yolo_class_id 매핑 수행.
-        stock_qty > 0인 상품만 allowed_class_ids에 추가.
+        Resolve product_eng_name/name/product_name to the current YOLO engine class id.
+        Only stock_qty > 0 products are added to allowed_class_ids.
 
         Args:
             products: Node.js에서 받은 상품 리스트
@@ -557,7 +595,9 @@ class ActiveProductStore:
             last_valid_by_idx = self._product_maps_by_idx(last_valid_by_class)
 
         for p in products:
-            product_name = p.get("product_name", "")
+            product_name = self._extract_product_name(p)
+            product_eng_name = self._extract_product_eng_name(p)
+            product_class_key, product_class_key_source = self._extract_product_class_key(p)
             product_idx = p.get("product_idx", "")
             sale_price = int(p.get("sale_price", 0))
             stock_raw = p.get("stock_qty", 0)
@@ -569,19 +609,24 @@ class ActiveProductStore:
             product_weight, weight_repair = self._extract_product_weight(p)
 
             # YOLO class_id 찾기
-            yolo_class_id, class_id_source, invalid_class_id = (
+            yolo_class_id, class_id_source, class_id_diagnostic = (
                 self._resolve_yolo_class_id(p)
             )
 
             if yolo_class_id is None:
-                unmapped_names.append(product_name)
-                if invalid_class_id is not None:
-                    invalid_class_ids.append(
-                        {
-                            "product_idx": product_idx,
-                            "product_name": product_name,
-                            **invalid_class_id,
-                        }
+                unmapped_name = (
+                    product_class_key
+                    or f"missing_product_class_key:{product_name or product_idx}"
+                )
+                unmapped_names.append(unmapped_name)
+                if class_id_diagnostic is not None:
+                    logger.warning(
+                        "[ActiveProductStore] product class-key mapping failed: "
+                        f"product_idx={product_idx}, product_name={product_name}, "
+                        f"product_eng_name={product_eng_name}, "
+                        f"class_key_source={product_class_key_source}, "
+                        f"class_key={product_class_key}, "
+                        f"diagnostic={class_id_diagnostic}"
                     )
                 continue
 
@@ -603,6 +648,7 @@ class ActiveProductStore:
                     {
                         "product_idx": product_idx,
                         "product_name": product_name,
+                        "product_eng_name": product_eng_name,
                         "class_id": yolo_class_id,
                     }
                 )
@@ -616,6 +662,7 @@ class ActiveProductStore:
                 sale_price=sale_price,
                 product_weight=product_weight,
                 stock_qty=stock_qty,
+                product_eng_name=product_eng_name,
                 yolo_class_id=yolo_class_id,
                 has_loadcell=has_loadcell,  # v4.8: 추가
                 class_id_source=class_id_source,
@@ -714,7 +761,8 @@ class ActiveProductStore:
         if unmapped_names:
             logger.warning(
                 f"[ActiveProductStore] global: "
-                f"{len(unmapped_names)} unmapped products: {unmapped_names[:5]}"
+                f"{len(unmapped_names)} unmapped product class keys: "
+                f"{unmapped_names[:5]}"
             )
 
         if repaired_weight_diagnostics:
@@ -950,6 +998,7 @@ class ActiveProductStore:
             stats = {
                 "total_yolo_classes": len(self._engine_name_to_id),
                 "catalog_source_policy": self.source_policy,
+                "product_name_fallback_enabled": self.product_name_fallback_enabled,
                 "has_products": self._global_data is not None,
                 "has_last_valid_snapshot": self._last_valid_data is not None,
             }

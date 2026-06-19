@@ -135,6 +135,47 @@ def loadcells_for_delta(delta: float) -> list:
     ]
 
 
+def whole_machine_loadcells_for_zone_delta(delta: float, zone: int = 5) -> list:
+    start_channels = [1000.0] * 10
+    end_channels = list(start_channels)
+    zone_start = (zone - 1) * 2
+    end_channels[zone_start] += delta / 2.0
+    end_channels[zone_start + 1] += delta / 2.0
+    mid_channels = [
+        start + ((end - start) * 0.5)
+        for start, end in zip(start_channels, end_channels)
+    ]
+    samples = [start_channels] * 5 + [mid_channels] * 2 + [end_channels] * 5
+    return [
+        {
+            "timestamp": f"2026-03-20T10:00:{index:02d}.000Z",
+            "raw_value": [f"{value:+.1f}" for value in values],
+            "filtered_value": [f"{value:+.1f}" for value in values],
+            "filter_method": "none",
+        }
+        for index, values in enumerate(samples)
+    ]
+
+
+def two_channel_loadcells_for_delta(delta: float) -> list:
+    start_channels = [1000.0, 1000.0]
+    end_channels = [1000.0 + delta / 2.0, 1000.0 + delta / 2.0]
+    mid_channels = [
+        start + ((end - start) * 0.5)
+        for start, end in zip(start_channels, end_channels)
+    ]
+    samples = [start_channels] * 5 + [mid_channels] * 2 + [end_channels] * 5
+    return [
+        {
+            "timestamp": f"2026-03-20T10:00:{index:02d}.000Z",
+            "raw_value": [f"{value:+.1f}" for value in values],
+            "filtered_value": [f"{value:+.1f}" for value in values],
+            "filter_method": "none",
+        }
+        for index, values in enumerate(samples)
+    ]
+
+
 def unstable_removal_loadcells() -> list:
     values = [1000.0] * 5 + [900.0, 800.0, 700.0, 620.0, 540.0]
     return [
@@ -502,6 +543,27 @@ def test_trigger_trace_context_writes_per_trigger_detail_json_on_finalize(tmp_pa
             "processing_time_ms": 42.5,
         }
     )
+    context.record_raw_vision_candidates(
+        [
+            {
+                "rank": 1,
+                "class_id": 26,
+                "name": "Chicken Mayo",
+                "confidence": 0.91,
+                "top": True,
+                "side": False,
+            },
+            {
+                "rank": 2,
+                "class_id": 27,
+                "name": "Raw Only",
+                "confidence": 0.89,
+                "top": True,
+                "side": True,
+            },
+        ],
+        {26: 365.0, 27: 120.0},
+    )
     context.record_candidates(
         [
             {
@@ -539,6 +601,10 @@ def test_trigger_trace_context_writes_per_trigger_detail_json_on_finalize(tmp_pa
     assert detail["zone"] == 3
     assert detail["loadcell"]["delta_weight"] == -113.5
     assert detail["video_stats"]["top_raw_detections"] == 6
+    assert [candidate["name"] for candidate in detail["raw_vision_candidates"]] == [
+        "Chicken Mayo",
+        "Raw Only",
+    ]
     assert detail["candidates"][0]["name"] == "Chicken Mayo"
     assert detail["candidates"][0]["unit_weight_g"] == 365.0
     assert detail["final_result"]["products"][0]["name"] == "Chicken Mayo"
@@ -571,13 +637,13 @@ def test_trigger_trace_records_dual_top_proxy_camera_roles(monkeypatch, tmp_path
     assert entry["camera_layout"] == "dual_top_proxy"
     assert entry["camera_roles"]["top"] == {
         "logical_role": "top",
-        "physical_role": "top_center",
+        "physical_role": "top_middle",
         "processing_profile": "top",
     }
     assert entry["camera_roles"]["side"] == {
         "logical_role": "side",
-        "physical_role": "top_left_proxy",
-        "processing_profile": "side",
+        "physical_role": "top_side",
+        "processing_profile": "top",
     }
     assert detail["camera_layout"] == "dual_top_proxy"
     assert detail["camera_roles"] == entry["camera_roles"]
@@ -1818,12 +1884,13 @@ async def test_trigger_service_uses_last_valid_active_product_snapshot_after_clo
                 stats=SimpleNamespace(top_frames=1, side_frames=0, processing_time_ms=5.0),
             )
 
-    active_product_store = ActiveProductStore()
+    active_product_store = ActiveProductStore({"BOWL_CHICKEN_MAYO": 26})
     active_product_store.set_products(
         [
             {
                 "product_idx": "P26",
                 "product_name": "Chicken Mayo",
+                "product_eng_name": "BOWL_CHICKEN_MAYO",
                 "yolo_class_id": 26,
                 "sale_price": 3500,
                 "product_weight": "365",
@@ -2262,6 +2329,71 @@ def test_trigger_trace_marks_visually_seen_weight_rejected_class(tmp_path):
     assert stage_entry["rescue_tolerance_g"] == 5.0
 
 
+def _fallback_trigger_client(
+    monkeypatch,
+    tmp_path,
+    session_store,
+    engine,
+    video_processor,
+    *,
+    session_id: str,
+    active_products: list | None = None,
+):
+    import model_service.api.routes.trigger as trigger_route_module
+    from model_service.api.routes.trigger import (
+        get_active_product_store_optional,
+        get_decision_engine,
+        get_door_session_store_optional,
+        get_session_store,
+        get_trigger_service_optional,
+        get_video_processor,
+        router,
+    )
+
+    trace_factory = make_trace_factory(tmp_path)
+    monkeypatch.setattr(trigger_route_module, "TriggerTraceContext", trace_factory)
+    monkeypatch.setattr(
+        trigger_route_module,
+        "generate_session_id",
+        lambda zone: session_id,
+    )
+
+    if active_products is None:
+        active_products = [
+            SimpleNamespace(
+                product_name="Chicken Mayo",
+                product_idx="P26",
+                stock_qty=5,
+                yolo_class_id=26,
+                product_weight=365.0,
+                sale_price=3500,
+                has_loadcell="true",
+            )
+        ]
+
+    class FakeActiveProductStore:
+        def get_all_products(self):
+            return active_products
+
+        def get_by_yolo_class_id(self, product_id):
+            for product in active_products:
+                if getattr(product, "yolo_class_id", None) == product_id:
+                    return product
+            return None
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_video_processor] = lambda: video_processor
+    app.dependency_overrides[get_decision_engine] = lambda: engine
+    app.dependency_overrides[get_session_store] = lambda: session_store
+    app.dependency_overrides[get_active_product_store_optional] = (
+        lambda: FakeActiveProductStore()
+    )
+    app.dependency_overrides[get_door_session_store_optional] = lambda: None
+    app.dependency_overrides[get_trigger_service_optional] = lambda: None
+    return TestClient(app)
+
+
 def test_trigger_route_fallback_writes_trace_entry(monkeypatch, tmp_path, session_store):
     import model_service.api.routes.trigger as trigger_route_module
     from model_service.api.routes.trigger import (
@@ -2328,3 +2460,210 @@ def test_trigger_route_fallback_writes_trace_entry(monkeypatch, tmp_path, sessio
     assert len(entries) == 1
     assert entries[0]["status"] == "complete"
     assert entries[0]["session_id"] == "fallback-session"
+
+
+def test_trigger_route_refrigerated_ignores_global_loadcells(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    from model_service.core.config import config
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "refrigerated")
+
+    class FakeVideoProcessor:
+        def process_videos(self, **kwargs):
+            return SimpleNamespace(
+                vote_results=[],
+                stats=SimpleNamespace(
+                    top_frames=1,
+                    side_frames=0,
+                    processing_time_ms=1.0,
+                ),
+            )
+
+    engine = MagicMock()
+    engine.judge.return_value = complete_judgment_result()
+    client = _fallback_trigger_client(
+        monkeypatch,
+        tmp_path,
+        session_store,
+        engine,
+        FakeVideoProcessor(),
+        session_id="refrigerated-session",
+    )
+    video_path = tmp_path / "refrigerated.avi"
+    video_path.write_bytes(b"avi")
+
+    response = client.post(
+        "/trigger",
+        json={
+            "zone": 1,
+            "loadcells": loadcells_for_delta(-365.0),
+            "global_loadcells": whole_machine_loadcells_for_zone_delta(-500.0),
+            "videos": {"top": str(video_path), "side": None},
+        },
+    )
+
+    assert response.status_code == 200
+    assert engine.judge.call_args.kwargs["delta_weight"] == -365.0
+    entries = read_trace_entries(tmp_path / "logs")
+    assert entries[0]["loadcell"]["cabinet_type"] == "refrigerated"
+    assert entries[0]["loadcell"]["loadcell_scope"] == "zone"
+
+
+def test_trigger_route_freezer_prefers_zone_loadcells_when_compat_payload_present(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    from model_service.core.config import config
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+
+    class FakeVideoProcessor:
+        def process_videos(self, **kwargs):
+            return SimpleNamespace(
+                vote_results=[],
+                stats=SimpleNamespace(
+                    top_frames=1,
+                    side_frames=0,
+                    processing_time_ms=1.0,
+                ),
+            )
+
+    engine = MagicMock()
+    engine.judge.return_value = complete_judgment_result()
+    client = _fallback_trigger_client(
+        monkeypatch,
+        tmp_path,
+        session_store,
+        engine,
+        FakeVideoProcessor(),
+        session_id="freezer-zone-session",
+    )
+    video_path = tmp_path / "freezer-zone.avi"
+    video_path.write_bytes(b"avi")
+
+    response = client.post(
+        "/trigger",
+        json={
+            "zone": 1,
+            "loadcells": two_channel_loadcells_for_delta(-365.0),
+            "global_loadcells": whole_machine_loadcells_for_zone_delta(-500.0),
+            "videos": {"top": str(video_path), "side": None},
+        },
+    )
+
+    assert response.status_code == 200
+    assert engine.judge.call_args.kwargs["delta_weight"] == -365.0
+    loadcell = read_trace_entries(tmp_path / "logs")[0]["loadcell"]
+    assert loadcell["cabinet_type"] == "freezer"
+    assert loadcell["loadcell_scope"] == "zone"
+    assert loadcell["loadcell_source"] == "loadcells"
+    assert loadcell["requested_zone"] == 1
+    assert loadcell["effective_channel_count"] == 2
+
+
+def test_trigger_route_freezer_keeps_full_channel_loadcells_as_zone_scope(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    from model_service.core.config import config
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+
+    class FakeVideoProcessor:
+        def process_videos(self, **kwargs):
+            return SimpleNamespace(
+                vote_results=[],
+                stats=SimpleNamespace(
+                    top_frames=1,
+                    side_frames=0,
+                    processing_time_ms=1.0,
+                ),
+            )
+
+    engine = MagicMock()
+    engine.judge.return_value = complete_judgment_result()
+    client = _fallback_trigger_client(
+        monkeypatch,
+        tmp_path,
+        session_store,
+        engine,
+        FakeVideoProcessor(),
+        session_id="freezer-full-loadcells-session",
+    )
+    video_path = tmp_path / "freezer-full.avi"
+    video_path.write_bytes(b"avi")
+
+    response = client.post(
+        "/trigger",
+        json={
+            "zone": 1,
+            "loadcells": whole_machine_loadcells_for_zone_delta(-500.0),
+            "videos": {"top": str(video_path), "side": None},
+        },
+    )
+
+    assert response.status_code == 200
+    assert engine.judge.call_args.kwargs["delta_weight"] == -500.0
+    loadcell = read_trace_entries(tmp_path / "logs")[0]["loadcell"]
+    assert loadcell["loadcell_scope"] == "zone"
+    assert loadcell["loadcell_source"] == "loadcells"
+    assert loadcell["effective_channel_count"] == 10
+
+
+def test_trigger_route_freezer_processes_zone_loadcells_without_compat_payload(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    from model_service.core.config import config
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    video_processor = MagicMock()
+    video_processor.process_videos.return_value = SimpleNamespace(
+        vote_results=[],
+        threshold_rescue_candidates=[],
+        roi_rescue_candidates=[],
+        stats=SimpleNamespace(
+            top_frames=1,
+            side_frames=0,
+            processing_time_ms=1.0,
+        ),
+    )
+    engine = MagicMock()
+    engine.judge.return_value = complete_judgment_result()
+    client = _fallback_trigger_client(
+        monkeypatch,
+        tmp_path,
+        session_store,
+        engine,
+        video_processor,
+        session_id="freezer-zone-loadcells-session",
+    )
+    video_path = tmp_path / "freezer-zone-loadcells.avi"
+    video_path.write_bytes(b"avi")
+
+    response = client.post(
+        "/trigger",
+        json={
+            "zone": 1,
+            "loadcells": two_channel_loadcells_for_delta(-365.0),
+            "videos": {"top": str(video_path), "side": None},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "complete"
+    engine.judge.assert_called_once()
+    video_processor.process_videos.assert_called_once()
+    saved = session_store.get("freezer-zone-loadcells-session")
+    assert saved.processing_stage == "complete"
+    entry = read_trace_entries(tmp_path / "logs")[0]
+    assert entry["status"] == "complete"
+    assert entry["loadcell"]["cabinet_type"] == "freezer"
+    assert entry["loadcell"]["loadcell_scope"] == "zone"
+    assert entry["loadcell"]["loadcell_validation_reason"] is None

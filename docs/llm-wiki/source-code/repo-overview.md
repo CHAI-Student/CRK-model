@@ -42,8 +42,9 @@ vending stack. The README now frames it as the legacy/reference TensorRT
 - `dataset.yaml` declares `nc: 133`.
 - Class `0` is `hand`.
 - Product classes run from `1` through `132`.
-- Model class validation compares engine names, `dataset.yaml`, and optional
-  `config/yolo_product_mapping.json` when the mapping file exists.
+- Optional static validation can compare engine names, `dataset.yaml`, and
+  `config/yolo_product_mapping.json` when explicitly enabled. Runtime
+  active-product class identity does not use the static mapping file.
 
 ## Environment Defaults
 
@@ -53,6 +54,9 @@ Important groups:
 - API: `MODEL__API__HOST`, `MODEL__API__PORT`, `MODEL__API__LOG_LEVEL`.
 - Vision: model path, Top/Side thresholds, crop policies, motion thresholds,
   rescue settings, voting weights.
+- Catalog: node-first product snapshots, engine-backed class-name matching
+  with official `product_eng_name` plus migration-compatible `name` and legacy
+  `product_name`, and optional legacy static validation.
 - Async streaming: enabled flag, queue size, `MODEL__ASYNC_STREAMING__FRAME_STRIDE`.
 - Weight: strict mode, fallback, tolerances, rescue tolerance, combination
   limits.

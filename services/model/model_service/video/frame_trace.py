@@ -90,6 +90,7 @@ class TriggerTraceContext:
         self.loadcell: dict[str, Any] = {}
         self.video_stats: dict[str, Any] = {}
         self.candidates: list[dict[str, Any]] = []
+        self.raw_vision_candidates: list[dict[str, Any]] = []
         self.preprocess: dict[str, Any] = {}
         self.stage_counts_by_class: dict[str, dict[str, Any]] = {}
         self.extractor_diagnostics: dict[str, Any] = {}
@@ -184,6 +185,17 @@ class TriggerTraceContext:
     ) -> None:
         candidate_limit = max(1, int(config.vision.top_k))
         self.candidates = [
+            self._candidate_to_dict(candidate, rank, product_weights)
+            for rank, candidate in enumerate(candidates[:candidate_limit], start=1)
+        ]
+
+    def record_raw_vision_candidates(
+        self,
+        candidates: list[Any],
+        product_weights: Optional[dict[int, float]] = None,
+    ) -> None:
+        candidate_limit = max(1, int(config.vision.top_k))
+        self.raw_vision_candidates = [
             self._candidate_to_dict(candidate, rank, product_weights)
             for rank, candidate in enumerate(candidates[:candidate_limit], start=1)
         ]
@@ -582,6 +594,8 @@ class TriggerTraceContext:
             entry["loadcell"] = dict(self.loadcell)
         if self.weight_diagnostics:
             entry["weight_diagnostics"] = dict(self.weight_diagnostics)
+        if self.raw_vision_candidates:
+            entry["raw_vision_candidates"] = list(self.raw_vision_candidates)
         if self.candidates:
             entry["candidates"] = list(self.candidates)
         if self.active_product_diagnostics:
@@ -648,6 +662,7 @@ class TriggerTraceContext:
             },
             "video_stats": dict(self.video_stats),
             "vision_config": self._vision_config_snapshot(),
+            "raw_vision_candidates": list(self.raw_vision_candidates),
             "candidates": list(self.candidates),
             "preprocess": dict(self.preprocess),
             "stage_counts_by_class": dict(self.stage_counts_by_class),
@@ -813,6 +828,10 @@ class TriggerTraceContext:
             "weight_gate_passed": raw.get("weight_gate_passed", raw.get("weightGatePassed")),
             "motion_gate_passed": raw.get("motion_gate_passed", raw.get("motionGatePassed")),
             "motion_gate_reason": raw.get("motion_gate_reason", raw.get("motionGateReason")),
+            "instance_count_hint": raw.get(
+                "instance_count_hint",
+                raw.get("instanceCountHint"),
+            ),
             "sample_frames": raw.get("sample_frames", raw.get("sampleFrames")),
             "roi_conflict": raw.get("roi_conflict", raw.get("roiConflict")),
             "roi_conflict_reason": raw.get(

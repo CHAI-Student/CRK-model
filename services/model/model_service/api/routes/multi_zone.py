@@ -67,7 +67,7 @@ from model_service.session.door_session import (
     trigger_effective_delta_weight,
     unmatched_return_delta_weight,
 )
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 ops_logger = get_ops_logger()
@@ -126,8 +126,21 @@ class ProductInfo(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     product_idx: str = Field(..., description="상품 ID (IF11)")
-    product_name: str = Field(..., description="상품명")
+    product_name: str = Field(
+        default="",
+        validation_alias=AliasChoices("product_name", "productName"),
+        description="상품명",
+    )
     sale_price: int = Field(..., description="판매가격")
+    product_eng_name: Optional[str] = Field(
+        default=None,
+        description="YOLO engine class name from Edge",
+    )
+    legacy_name: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("name"),
+        description="Legacy Edge class-name field during product_eng_name migration",
+    )
     product_weight: Optional[str | float | int] = Field(
         default="0",
         validation_alias=AliasChoices(
@@ -159,6 +172,14 @@ class ProductInfo(BaseModel):
         validation_alias=AliasChoices("yolo_class_name", "yoloClassName"),
         description="YOLO class name override",
     )
+
+    @model_validator(mode="after")
+    def populate_display_name(self) -> "ProductInfo":
+        if not self.product_name and self.product_eng_name:
+            self.product_name = self.product_eng_name
+        elif not self.product_name and self.legacy_name:
+            self.product_name = self.legacy_name
+        return self
 
 
 class MultiZoneRequest(BaseModel):
@@ -339,7 +360,17 @@ def _has_stock_positive_weight_request_products(products: List[ProductInfo]) -> 
 def _has_stock_positive_class_request_products(products: List[ProductInfo]) -> bool:
     for product in products:
         stock = product.stock_qty if product.stock_qty is not None else 999
-        if stock > 0 and product.yolo_class_id is not None:
+        if stock <= 0:
+            continue
+        if product.product_eng_name or product.legacy_name or product.product_name:
+            return True
+    return False
+
+
+def _has_stock_positive_products(products: List[ProductInfo]) -> bool:
+    for product in products:
+        stock = product.stock_qty if product.stock_qty is not None else 999
+        if stock > 0:
             return True
     return False
 
@@ -351,6 +382,8 @@ def _products_to_store_payload(products: List[ProductInfo]) -> List[dict]:
         payload.append({
             "product_idx": product.product_idx,
             "product_name": product.product_name,
+            "product_eng_name": product.product_eng_name,
+            "name": product.legacy_name,
             "sale_price": product.sale_price,
             "product_weight": product.product_weight or "0",
             "stock_qty": stock,
@@ -366,16 +399,25 @@ def _products_to_store_payload(products: List[ProductInfo]) -> List[dict]:
 
 
 def _summarize_product_payload(products: List[ProductInfo], limit: int = 5) -> List[dict]:
-    return [
-        {
-            "product_idx": product.product_idx,
-            "name": product.product_name,
-            "stock": product.stock_qty,
-            "weight": product.product_weight,
-            "yolo_class_id": product.yolo_class_id,
-        }
-        for product in products[:limit]
-    ]
+    summary = []
+    for product in products[:limit]:
+        fields_set = getattr(product, "model_fields_set", set())
+        summary.append(
+            {
+                "product_idx": product.product_idx,
+                "name": product.product_name,
+                "product_eng_name": product.product_eng_name,
+                "has_product_eng_name_key": "product_eng_name" in fields_set,
+                "raw_name": product.legacy_name,
+                "has_name_key": "legacy_name" in fields_set,
+                "raw_product_name": product.product_name,
+                "raw_product_eng_name": product.product_eng_name,
+                "stock": product.stock_qty,
+                "weight": product.product_weight,
+                "yolo_class_id": product.yolo_class_id,
+            }
+        )
+    return summary
 
 
 def _maybe_update_active_product_snapshot(
@@ -406,7 +448,11 @@ def _maybe_update_active_product_snapshot(
     )
 
     if not has_candidate_inventory:
-        reason = "zero_stock_positive_class_products"
+        reason = (
+            "missing_product_class_key"
+            if _has_stock_positive_products(request.products)
+            else "zero_stock_positive_class_products"
+        )
         logger.warning(
             "[MULTI-ZONE] ignored products payload for active snapshot: "
             f"reason={reason}, products={len(request.products)}, "
@@ -464,6 +510,8 @@ def _log_request_to_file_sync(request: MultiZoneRequest, response: dict) -> None
                     {
                         "product_idx": p.product_idx,
                         "product_name": p.product_name,
+                        "product_eng_name": p.product_eng_name,
+                        "name": p.legacy_name,
                         "sale_price": p.sale_price,
                         "product_weight": p.product_weight,
                         "stock_qty": p.stock_qty,

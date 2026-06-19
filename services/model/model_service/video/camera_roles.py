@@ -38,13 +38,13 @@ def camera_roles_for_layout(layout: str | None = None) -> dict[str, CameraRole]:
         return {
             "top": CameraRole(
                 logical_role="top",
-                physical_role="top_center",
+                physical_role="top_middle",
                 processing_profile="top",
             ),
             "side": CameraRole(
                 logical_role="side",
-                physical_role="top_left_proxy",
-                processing_profile="side",
+                physical_role="top_side",
+                processing_profile="top",
             ),
         }
 

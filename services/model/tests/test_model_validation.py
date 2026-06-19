@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,3 +117,41 @@ def test_static_catalog_validation_runs_when_enabled(tmp_path):
             "mapping_path": tmp_path / "config" / "yolo_product_mapping.json",
         }
     ]
+
+
+def test_yolo_engine_class_logging_is_disabled_by_default(caplog):
+    from model_service.api.manager import maybe_log_yolo_engine_classes
+    from model_service.core.config import Settings
+
+    caplog.set_level(logging.INFO)
+    maybe_log_yolo_engine_classes(
+        settings=Settings(),
+        engine_class_names={0: "hand", 76: "BOX_ORION_DIGET_SSIN_84G"},
+    )
+
+    assert "[OPS][YOLO-ENGINE]" not in caplog.text
+    assert "[OPS][YOLO-ENGINE-CLASS]" not in caplog.text
+
+
+def test_yolo_engine_class_logging_prints_loaded_classes_when_enabled(caplog):
+    from model_service.api.manager import maybe_log_yolo_engine_classes
+    from model_service.core.config import Settings
+
+    caplog.set_level(logging.INFO)
+    maybe_log_yolo_engine_classes(
+        settings=Settings(vision={"log_engine_classes": "on"}),
+        engine_class_names={76: "BOX_ORION_DIGET_SSIN_84G", 0: "hand"},
+    )
+
+    assert "[OPS][YOLO-ENGINE]" in caplog.text
+    assert "class_count=2" in caplog.text
+    assert "[OPS][YOLO-ENGINE-CLASS] id=0 name=hand" in caplog.text
+    assert "[OPS][YOLO-ENGINE-CLASS] id=76 name=BOX_ORION_DIGET_SSIN_84G" in caplog.text
+
+
+def test_yolo_engine_class_logging_accepts_off_string():
+    from model_service.core.config import Settings
+
+    settings = Settings(vision={"log_engine_classes": "off"})
+
+    assert settings.vision.log_engine_classes is False

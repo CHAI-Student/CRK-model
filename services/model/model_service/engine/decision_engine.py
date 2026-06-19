@@ -268,6 +268,17 @@ class ProductDecisionEngine:
             self._log_final_branch("vision_only", result)
             return result
 
+        freezer_result = self._try_freezer_vision_first(
+            vision_candidates=vision_candidates,
+            delta_weight=delta_weight,
+            timestamp=timestamp,
+            active_products=active_products,
+            trace_context=trace_context,
+        )
+        if freezer_result is not None:
+            self._log_final_branch("freezer_vision_first", freezer_result)
+            return freezer_result
+
         vision_candidates = self._augment_stage_weight_gate_candidates(
             vision_candidates=vision_candidates,
             delta_weight=delta_weight,
@@ -514,6 +525,346 @@ class ProductDecisionEngine:
         )
         self._log_final_branch(branch, result)
         return result
+
+    def _try_freezer_vision_first(
+        self,
+        *,
+        vision_candidates: List[EnsembleResult],
+        delta_weight: float,
+        timestamp: float,
+        active_products: Optional[List],
+        trace_context: Optional[object],
+    ) -> Optional[JudgmentResult]:
+        """Use freezer-filtered vision candidates as identity and weight as a tie-breaker."""
+        if not self._is_freezer_mode() or delta_weight >= 0:
+            return None
+
+        target_weight = abs(float(delta_weight))
+        if not vision_candidates:
+            self._record_weight_diagnostics(
+                trace_context,
+                {
+                    "decision_branch": "freezer_vision_first",
+                    "freezer_vision_first": {
+                        "accepted": False,
+                        "reason": "no_vision_candidates",
+                        "target_weight": round(target_weight, 1),
+                    },
+                },
+            )
+            return self._create_no_detection_result(delta_weight, timestamp)
+
+        active_map = self._active_products_by_class(active_products)
+        considered: list[dict[str, Any]] = []
+        options: list[dict[str, Any]] = []
+        top_k = max(1, int(config.vision.top_k))
+
+        for rank, candidate in enumerate(vision_candidates[:top_k], start=1):
+            class_id = int(candidate.class_id)
+            confidence = float(candidate.combined_confidence)
+            product = active_map.get(class_id)
+            diag: dict[str, Any] = {
+                "rank": rank,
+                "class_id": class_id,
+                "name": candidate.class_name,
+                "source": getattr(candidate, "source", "vision"),
+                "confidence": round(confidence, 4),
+                "raw_vote_count": int(getattr(candidate, "raw_vote_count", 0) or 0),
+                "instance_count_hint": max(
+                    1,
+                    int(getattr(candidate, "instance_count_hint", 1) or 1),
+                ),
+                "motion_gate_passed": bool(
+                    getattr(candidate, "motion_gate_passed", True)
+                ),
+            }
+            if product is None:
+                diag["reason"] = "not_in_active_products"
+                considered.append(diag)
+                continue
+            if not self._candidate_has_vision_identity_evidence(candidate):
+                diag["reason"] = "insufficient_vision_identity_evidence"
+                considered.append(diag)
+                continue
+            stock = self._coerce_int(getattr(product, "stock_qty", 0))
+            if stock <= 0:
+                diag["reason"] = "invalid_stock"
+                considered.append(diag)
+                continue
+
+            unit_weight = self._coerce_float(getattr(product, "product_weight", 0.0))
+            instance_count_hint = max(1, int(diag["instance_count_hint"]))
+            count = self._freezer_supported_count(
+                unit_weight=unit_weight,
+                target_weight=target_weight,
+                instance_count_hint=instance_count_hint,
+                stock=stock,
+            )
+            expected_weight = max(0.0, unit_weight) * count
+            residual = (
+                abs(target_weight - expected_weight)
+                if expected_weight > 0
+                else target_weight
+            )
+            diag.update(
+                {
+                    "product_name": getattr(product, "product_name", candidate.class_name),
+                    "product_eng_name": getattr(product, "product_eng_name", ""),
+                    "stock": stock,
+                    "unit_weight": round(unit_weight, 1),
+                    "raw_instance_count_hint": instance_count_hint,
+                    "instance_count_hint": count,
+                    "count": count,
+                    "expected_weight": round(expected_weight, 1),
+                    "weight_residual": round(residual, 1),
+                    "weight_used_as": "tiebreaker",
+                    "weight_reliable": residual <= float(config.weight.tolerance_grams),
+                    "reason": "candidate",
+                }
+            )
+            option = {
+                "rank": rank,
+                "candidate": candidate,
+                "product": product,
+                "confidence": confidence,
+                "count": count,
+                "unit_weight": unit_weight,
+                "expected_weight": expected_weight,
+                "residual": residual,
+                "diagnostics": diag,
+            }
+            options.append(option)
+            considered.append(diag)
+
+        if not options:
+            self._record_weight_diagnostics(
+                trace_context,
+                {
+                    "decision_branch": "freezer_vision_first",
+                    "freezer_vision_first": {
+                        "accepted": False,
+                        "reason": "no_supported_vision_candidates",
+                        "target_weight": round(target_weight, 1),
+                        "considered": considered,
+                    },
+                },
+            )
+            return self._create_no_detection_result(delta_weight, timestamp)
+
+        multi_kind_selection = self._select_freezer_multi_kind_options(
+            options,
+            target_weight=target_weight,
+            trace_context=trace_context,
+        )
+        if multi_kind_selection is not None:
+            selected_options, reason = multi_kind_selection
+            return self._create_freezer_vision_result(
+                selected_options=selected_options,
+                delta_weight=delta_weight,
+                target_weight=target_weight,
+                timestamp=timestamp,
+                trace_context=trace_context,
+                considered=considered,
+                reason=reason,
+            )
+
+        best_confidence = max(option["confidence"] for option in options)
+        confidence_band = max(0.0, float(config.weight.freezer_confidence_tie_band))
+        tie_pool = [
+            option
+            for option in options
+            if option["confidence"] >= best_confidence - confidence_band
+        ]
+        selected = min(
+            tie_pool,
+            key=lambda option: (
+                float(option["residual"]),
+                int(option["rank"]),
+                -float(option["confidence"]),
+            ),
+        )
+        return self._create_freezer_vision_result(
+            selected_options=[selected],
+            delta_weight=delta_weight,
+            target_weight=target_weight,
+            timestamp=timestamp,
+            trace_context=trace_context,
+            considered=considered,
+            reason="freezer_single_confidence_weight_tiebreak",
+        )
+
+    def _freezer_supported_count(
+        self,
+        *,
+        unit_weight: float,
+        target_weight: float,
+        instance_count_hint: int,
+        stock: int,
+    ) -> int:
+        if unit_weight <= 0.0:
+            return 1
+        max_hint = max(
+            1,
+            min(
+                int(instance_count_hint),
+                int(stock),
+                int(config.weight.max_count_per_item),
+            ),
+        )
+        if max_hint <= 1:
+            return 1
+
+        best_count = 1
+        best_residual = abs(target_weight - unit_weight)
+        for count in range(2, max_hint + 1):
+            residual = abs(target_weight - unit_weight * count)
+            if residual <= self._count_scaled_weight_tolerance(count) and residual < best_residual:
+                best_count = count
+                best_residual = residual
+        return best_count
+
+    def _select_freezer_multi_kind_options(
+        self,
+        options: list[dict[str, Any]],
+        *,
+        target_weight: float,
+        trace_context: Optional[object],
+    ) -> Optional[tuple[list[dict[str, Any]], str]]:
+        multi_min_confidence = float(config.weight.freezer_multi_min_confidence)
+        high_confidence = [
+            option for option in options if option["confidence"] >= multi_min_confidence
+        ]
+        high_confidence.sort(key=lambda item: (item["rank"], -item["confidence"]))
+        if len(high_confidence) < 2:
+            return None
+
+        max_kinds = max(2, int(config.weight.max_combination_kinds))
+        if self._freezer_trace_has_multi_item_evidence(trace_context):
+            return (
+                high_confidence[: min(max_kinds, len(high_confidence))],
+                "freezer_multi_kind_segment_evidence",
+            )
+
+        viable: list[tuple[int, float, float, int, list[dict[str, Any]]]] = []
+        for size in range(2, min(max_kinds, len(high_confidence)) + 1):
+            for combo in combinations(high_confidence, size):
+                selected = list(combo)
+                total_count = sum(int(option["count"]) for option in selected)
+                expected_weight = sum(float(option["expected_weight"]) for option in selected)
+                residual = abs(target_weight - expected_weight)
+                allowed = self._count_scaled_weight_tolerance(total_count)
+                if residual > allowed:
+                    continue
+                avg_confidence = sum(
+                    float(option["confidence"]) for option in selected
+                ) / len(selected)
+                rank_sum = sum(int(option["rank"]) for option in selected)
+                viable.append(
+                    (
+                        total_count,
+                        residual,
+                        -avg_confidence,
+                        rank_sum,
+                        selected,
+                    )
+                )
+        if not viable:
+            return None
+        viable.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        return viable[0][4], "freezer_multi_kind_weight_supported"
+
+    @staticmethod
+    def _freezer_trace_has_multi_item_evidence(trace_context: Optional[object]) -> bool:
+        loadcell = getattr(trace_context, "loadcell", None)
+        if not isinstance(loadcell, dict):
+            return False
+
+        removal_targets = loadcell.get("removal_segment_targets") or []
+        if isinstance(removal_targets, list) and len(removal_targets) >= 2:
+            return True
+        if bool(loadcell.get("compound_event")):
+            return True
+        try:
+            return int(loadcell.get("compound_negative_segment_count", 0) or 0) >= 2
+        except (TypeError, ValueError):
+            return False
+
+    def _create_freezer_vision_result(
+        self,
+        *,
+        selected_options: list[dict[str, Any]],
+        delta_weight: float,
+        target_weight: float,
+        timestamp: float,
+        trace_context: Optional[object],
+        considered: list[dict[str, Any]],
+        reason: str,
+    ) -> JudgmentResult:
+        products: list[ProductJudgment] = []
+        total_price = 0
+        explained_weight = 0.0
+        confidences: list[float] = []
+        for option in selected_options:
+            product = option["product"]
+            candidate = option["candidate"]
+            count = max(1, int(option["count"]))
+            unit_price = self._coerce_int(getattr(product, "sale_price", 0))
+            unit_weight = self._coerce_float(getattr(product, "product_weight", 0.0))
+            confidence = float(option["confidence"])
+            product_judgment = ProductJudgment(
+                product_id=int(getattr(product, "yolo_class_id", candidate.class_id)),
+                name=getattr(product, "product_name", candidate.class_name),
+                count=count,
+                unit_price=unit_price,
+                total_price=unit_price * count,
+                confidence=confidence,
+                unit_weight=unit_weight,
+            )
+            products.append(product_judgment)
+            total_price += product_judgment.total_price
+            explained_weight += max(0.0, unit_weight) * count
+            confidences.append(confidence)
+
+        residual = abs(target_weight - explained_weight)
+        tolerance = float(config.weight.tolerance_grams)
+        weight_reliable = residual <= tolerance
+        status = JudgmentStatus.COMPLETE if weight_reliable else JudgmentStatus.PARTIAL
+        confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        diagnostics = {
+            "accepted": True,
+            "reason": reason,
+            "target_weight": round(target_weight, 1),
+            "explained_weight": round(explained_weight, 1),
+            "weight_residual": round(residual, 1),
+            "tolerance": round(tolerance, 1),
+            "weight_used_as": "tiebreaker",
+            "weight_reliable": weight_reliable,
+            "selected": [option["diagnostics"] for option in selected_options],
+            "considered": considered,
+        }
+        self._record_weight_diagnostics(
+            trace_context,
+            {
+                "decision_branch": "freezer_vision_first",
+                "freezer_vision_first": diagnostics,
+            },
+        )
+        logger.info(
+            "[ENGINE][reason=freezer_vision_first] "
+            f"items={len(products)}, target={target_weight:.1f}g, "
+            f"explained={explained_weight:.1f}g, residual={residual:.1f}g, "
+            f"status={status.value}"
+        )
+        return JudgmentResult(
+            products=products,
+            total_price=total_price,
+            confidence=confidence,
+            status=status,
+            weight_delta=delta_weight,
+            weight_explained=explained_weight,
+            weight_residual=round(residual, 1),
+            timestamp=timestamp,
+        )
 
     def _judge_relaxed(
         self,
@@ -6729,6 +7080,10 @@ class ProductDecisionEngine:
     @staticmethod
     def _is_vision_first_identity_policy() -> bool:
         return str(config.weight.identity_policy).lower() == "vision_first"
+
+    @staticmethod
+    def _is_freezer_mode() -> bool:
+        return str(config.machine.cabinet_type).lower() == "freezer"
 
     @staticmethod
     def _active_products_by_class(active_products: Optional[List]) -> dict[int, object]:

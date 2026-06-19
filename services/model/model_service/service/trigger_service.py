@@ -103,6 +103,12 @@ class TriggerInput:
     top_video_path: Optional[str]
     side_video_path: Optional[str]
     timing: Optional[TriggerTimingMetadata] = None
+    cabinet_type: str = "refrigerated"
+    loadcell_scope: str = "zone"
+    loadcell_source: str = "loadcells"
+    requested_zone: Optional[int] = None
+    effective_channel_count: int = 0
+    loadcell_validation_reason: Optional[str] = None
 
 
 @dataclass
@@ -621,6 +627,32 @@ class TriggerService:
             waiting_for="stable_loadcell",
         )
 
+    @staticmethod
+    def _loadcell_channel_count(loadcells: Sequence[LoadcellReading]) -> int:
+        max_count = 0
+        for loadcell in loadcells:
+            for values in (loadcell.raw_value, loadcell.filtered_value):
+                if isinstance(values, (list, tuple)):
+                    max_count = max(max_count, len(values))
+        return max_count
+
+    def _input_loadcell_metadata(self, input_data: TriggerInput) -> dict:
+        return {
+            "cabinet_type": input_data.cabinet_type,
+            "loadcell_scope": input_data.loadcell_scope,
+            "loadcell_source": input_data.loadcell_source,
+            "requested_zone": (
+                input_data.zone
+                if input_data.requested_zone is None
+                else input_data.requested_zone
+            ),
+            "effective_channel_count": (
+                input_data.effective_channel_count
+                or self._loadcell_channel_count(input_data.loadcells)
+            ),
+            "loadcell_validation_reason": input_data.loadcell_validation_reason,
+        }
+
     def _loadcell_trace_metadata(
         self,
         loadcells: List[LoadcellReading],
@@ -628,8 +660,11 @@ class TriggerService:
         *,
         zone: Optional[int] = None,
         event_id: Optional[str] = None,
+        input_data: Optional[TriggerInput] = None,
     ) -> dict:
         metadata = loadcell_stats.summarize_loadcell_payload(loadcells)
+        if input_data is not None:
+            metadata.update(self._input_loadcell_metadata(input_data))
         if delta_analysis is None:
             metadata.update(
                 {
@@ -1290,6 +1325,28 @@ class TriggerService:
     ) -> List[VoteResult]:
         return VideoProcessor.merge_rescue_votes(vote_results, rescue_votes)
 
+    @staticmethod
+    def _record_raw_and_filter_handled_candidates(
+        *,
+        vote_results: List[VoteResult],
+        delta_weight: Optional[float],
+        product_weights: Optional[Dict[int, float]],
+        trace_context: Optional[TriggerTraceContext],
+        log_prefix: str,
+    ) -> List[VoteResult]:
+        if trace_context is not None:
+            trace_context.record_raw_vision_candidates(
+                vote_results,
+                product_weights or {},
+            )
+        return VideoProcessor.filter_freezer_handled_candidates(
+            vote_results,
+            delta_weight=delta_weight,
+            product_weights=product_weights or {},
+            trace_context=trace_context,
+            log_prefix=log_prefix,
+        )
+
     def _generate_idempotency_key(self, input_data: TriggerInput) -> str:
         """
         Idempotency key 생성 (v4.5).
@@ -1537,6 +1594,7 @@ class TriggerService:
             input_data.loadcells,
             delta_analysis,
             zone=input_data.zone,
+            input_data=input_data,
         )
         trace_context.record_loadcell_delta(
             delta_weight=delta_weight,
@@ -1552,6 +1610,10 @@ class TriggerService:
             f"first_filtered_total={payload_diagnostics['first_filtered_total']} "
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
             f"analysis_reason={delta_analysis.reason} "
+            f"cabinet_type={payload_diagnostics.get('cabinet_type')} "
+            f"loadcell_scope={payload_diagnostics.get('loadcell_scope')} "
+            f"loadcell_source={payload_diagnostics.get('loadcell_source')} "
+            f"effective_channels={payload_diagnostics.get('effective_channel_count')} "
             f"top_video={input_data.top_video_path or 'none'} "
             f"side_video={input_data.side_video_path or 'none'}"
         )
@@ -1575,6 +1637,7 @@ class TriggerService:
                 input_data.loadcells,
                 delta_analysis,
                 zone=input_data.zone,
+                input_data=input_data,
             )
             trace_context.record_loadcell_delta(
                 delta_weight=delta_weight,
@@ -1890,6 +1953,13 @@ class TriggerService:
 
         elapsed_ms = (time.perf_counter() - video_started) * 1000
         vote_results = list(getattr(processing_result, "vote_results", []) or [])
+        vote_results = self._record_raw_and_filter_handled_candidates(
+            vote_results=vote_results,
+            delta_weight=delta_weight,
+            product_weights=product_weights,
+            trace_context=trace_context,
+            log_prefix="TRIGGER-LOW-WEIGHT",
+        )
         stats = getattr(processing_result, "stats", None)
         if trace_context is not None:
             if stats is not None:
@@ -2277,6 +2347,7 @@ class TriggerService:
                 item.delta_analysis,
                 zone=input_data.zone,
                 event_id=item.event_id,
+                input_data=input_data,
             ),
         )
         trace_context.record_final_result(
@@ -2387,6 +2458,7 @@ class TriggerService:
                 item.delta_analysis,
                 zone=input_data.zone,
                 event_id=item.event_id,
+                input_data=input_data,
             ),
         )
         active_product_diagnostics = self._record_active_product_diagnostics(
@@ -2473,6 +2545,13 @@ class TriggerService:
         vote_results = self._merge_rescue_votes(
             processing_result.vote_results,
             rescue_votes + roi_rescue_votes,
+        )
+        vote_results = self._record_raw_and_filter_handled_candidates(
+            vote_results=vote_results,
+            delta_weight=item.delta_weight,
+            product_weights=item.product_weights or {},
+            trace_context=trace_context,
+            log_prefix="TRIGGER-WORKER",
         )
         stats = processing_result.stats
         trace_context.record_video_stats(stats)
@@ -2821,6 +2900,7 @@ class TriggerService:
             input_data.loadcells,
             delta_analysis,
             zone=input_data.zone,
+            input_data=input_data,
         )
         trace_context.record_loadcell_delta(
             delta_weight=delta_weight,
@@ -2836,6 +2916,10 @@ class TriggerService:
             f"first_filtered_total={payload_diagnostics['first_filtered_total']} "
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
             f"analysis_reason={delta_analysis.reason} "
+            f"cabinet_type={payload_diagnostics.get('cabinet_type')} "
+            f"loadcell_scope={payload_diagnostics.get('loadcell_scope')} "
+            f"loadcell_source={payload_diagnostics.get('loadcell_source')} "
+            f"effective_channels={payload_diagnostics.get('effective_channel_count')} "
             f"top_video={input_data.top_video_path or 'none'} "
             f"side_video={input_data.side_video_path or 'none'}"
         )
@@ -2858,6 +2942,7 @@ class TriggerService:
                 input_data.loadcells,
                 delta_analysis,
                 zone=input_data.zone,
+                input_data=input_data,
             )
             trace_context.record_loadcell_delta(
                 delta_weight=delta_weight,
@@ -3023,6 +3108,13 @@ class TriggerService:
         vote_results = self._merge_rescue_votes(
             processing_result.vote_results,
             rescue_votes + roi_rescue_votes,
+        )
+        vote_results = self._record_raw_and_filter_handled_candidates(
+            vote_results=vote_results,
+            delta_weight=delta_weight,
+            product_weights=product_weights,
+            trace_context=trace_context,
+            log_prefix="TRIGGER",
         )
         stats = processing_result.stats
         trace_context.record_video_stats(stats)
@@ -3351,6 +3443,7 @@ class TriggerService:
                     "rescue_weight_residual_g",
                     None,
                 ),
+                instance_count_hint=getattr(vote, "instance_count_hint", 1),
             )
             ensemble_results.append(ensemble)
         return ensemble_results

@@ -59,6 +59,23 @@ class APIModel(BaseModel):
         return value.lower()
 
 
+class MachineModel(BaseModel):
+    """Machine-level deployment configuration."""
+
+    cabinet_type: str = Field(
+        default="refrigerated",
+        description="Cabinet type: refrigerated or freezer",
+    )
+
+    @field_validator("cabinet_type", mode="after")
+    def validate_cabinet_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        valid = {"refrigerated", "freezer"}
+        if normalized not in valid:
+            raise ValueError(f"Invalid cabinet type: {value}")
+        return normalized
+
+
 class VisionModel(BaseModel):
     """Vision configuration settings (Jetson Orin Nano TensorRT only)."""
 
@@ -69,6 +86,10 @@ class VisionModel(BaseModel):
     yolo_internal_conf_threshold: float = Field(
         default=0.01,
         description="Internal YOLO confidence floor before service-side thresholds",
+    )
+    log_engine_classes: bool = Field(
+        default=False,
+        description="Log loaded YOLO engine class id/name pairs at startup",
     )
     hand_class_id: int = Field(
         default=0,
@@ -106,6 +127,22 @@ class VisionModel(BaseModel):
     motion_min_displacement_px: float = Field(
         default=10.0,
         description="Minimum bbox-center movement for motion filtering",
+    )
+    freezer_min_vote_ratio: float = Field(
+        default=0.08,
+        description="Freezer-only minimum frame vote ratio for final candidates",
+    )
+    freezer_min_vote_count: int = Field(
+        default=3,
+        description="Freezer-only minimum absolute vote count for final candidates",
+    )
+    freezer_motion_min_displacement_px: float = Field(
+        default=12.0,
+        description="Freezer-only minimum bbox-center movement",
+    )
+    freezer_lower_roi_y_split: float = Field(
+        default=240.0,
+        description="Freezer dual-top lower-half bbox center y threshold",
     )
     side_roi_x_max: float = Field(
         default=400.0,
@@ -248,6 +285,7 @@ class VisionModel(BaseModel):
     @field_validator(
         "crop_width",
         "min_vote_count",
+        "freezer_min_vote_count",
         "diagnostic_trace_max_frames",
         "threshold_rescue_max_candidates",
         "weight_rescue_no_motion_min_raw_votes",
@@ -321,6 +359,14 @@ class WeightModel(BaseModel):
     detected_single_fallback_min_votes: int = Field(
         default=4,
         description="Minimum stage/diagnostic votes for detected single-item fallback",
+    )
+    freezer_confidence_tie_band: float = Field(
+        default=0.08,
+        description="Freezer-only confidence band where weight residual can break ties",
+    )
+    freezer_multi_min_confidence: float = Field(
+        default=0.45,
+        description="Freezer-only confidence threshold for multi-kind vision decisions",
     )
     min_weight_change: float = Field(
         default=5.0,
@@ -604,6 +650,15 @@ class CatalogModel(BaseModel):
         default=False,
         description="Enable advisory dataset/yolo_product_mapping.json validation at startup",
     )
+    product_name_fallback_enabled: bool = Field(
+        default=True,
+        description=(
+            "Legacy compatibility flag retained for env stability. Runtime "
+            "active-product class identity is resolved from product_eng_name "
+            "matched against loaded YOLO engine class names; temporary "
+            "name/product_name engine-name fallbacks are also supported."
+        ),
+    )
 
     @field_validator("source_policy", mode="after")
     def validate_source_policy(cls, value: str) -> str:
@@ -622,6 +677,7 @@ class Settings(BaseSettings):
         MODEL__API__HOST: API server host (default: 0.0.0.0)
         MODEL__API__PORT: API server port (default: 8002)
         MODEL__API__LOG_LEVEL: Log level (default: info)
+        MODEL__MACHINE__CABINET_TYPE: refrigerated or freezer
         MODEL__VISION__YOLO_MODEL_PATH: YOLO model path
         MODEL__NODEJS_URL: Node.js orchestrator URL
     """
@@ -635,6 +691,7 @@ class Settings(BaseSettings):
     )
 
     api: APIModel = APIModel()
+    machine: MachineModel = MachineModel()
     vision: VisionModel = VisionModel()
     weight: WeightModel = WeightModel()
     loadcell: LoadcellModel = LoadcellModel()

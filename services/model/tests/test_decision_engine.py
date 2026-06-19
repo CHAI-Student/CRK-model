@@ -20,6 +20,7 @@ class MockActiveProduct:
 @pytest.fixture(autouse=True)
 def reset_weight_identity_policy(monkeypatch):
     monkeypatch.setattr(config.weight, "identity_policy", "vision_first")
+    monkeypatch.setattr(config.machine, "cabinet_type", "refrigerated")
 
 
 def use_weight_aware_identity(monkeypatch):
@@ -43,6 +44,8 @@ def make_candidate(
     class_id: int = 26,
     name: str = "치킨마요",
     confidence: float = 1.0,
+    raw_vote_count: int = 6,
+    instance_count_hint: int = 1,
 ) -> EnsembleResult:
     return EnsembleResult(
         class_id=class_id,
@@ -51,6 +54,11 @@ def make_candidate(
         side_confidence=confidence,
         combined_confidence=confidence,
         vote_count=2,
+        raw_vote_count=raw_vote_count,
+        top_motion_passed=True,
+        side_motion_passed=True,
+        motion_gate_passed=True,
+        instance_count_hint=instance_count_hint,
     )
 
 
@@ -266,6 +274,207 @@ def test_vision_first_missing_weight_preserves_strong_vision_identity_as_partial
     assert diagnostics["weight_validation_passed"] is False
     assert diagnostics["reason"] == "vision_identity_preserved_weight_unavailable"
     assert diagnostics["selected"]["weight_status"] == "unavailable"
+
+
+def test_freezer_vision_first_keeps_candidate_outside_weight_tolerance(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=26, name="FREEZER_PRODUCT_A", confidence=0.94)
+        ],
+        delta_weight=-375.0,
+        active_products=[
+            make_active_product(26, "FREEZER_PRODUCT_A", weight=365.0, stock=5),
+            make_active_product(99, "WEIGHT_NEAREST_ONLY", weight=375.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [(26, 1)]
+    assert result.weight_explained == 365.0
+    assert result.weight_residual == 10.0
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["weight_used_as"] == "tiebreaker"
+    assert diagnostics["weight_reliable"] is False
+
+
+def test_freezer_vision_first_uses_weight_only_inside_confidence_band(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_multi_min_confidence", 0.99)
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=1, name="HIGHER_CONF", confidence=0.95),
+            make_candidate(class_id=2, name="CLOSER_WEIGHT", confidence=0.90),
+        ],
+        delta_weight=-112.0,
+        active_products=[
+            make_active_product(1, "HIGHER_CONF", weight=100.0, stock=5),
+            make_active_product(2, "CLOSER_WEIGHT", weight=112.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [(2, 1)]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_single_confidence_weight_tiebreak"
+    assert diagnostics["selected"][0]["name"] == "CLOSER_WEIGHT"
+
+
+def test_freezer_vision_first_does_not_pick_non_candidate_weight_match(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=1, name="VISION_ONLY_CANDIDATE", confidence=0.94)
+        ],
+        delta_weight=-200.0,
+        active_products=[
+            make_active_product(1, "VISION_ONLY_CANDIDATE", weight=100.0, stock=5),
+            make_active_product(2, "NON_CANDIDATE_WEIGHT_MATCH", weight=200.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [(1, 1)]
+    assert trace.weight_diagnostics["freezer_vision_first"]["selected"][0]["class_id"] == 1
+
+
+def test_freezer_vision_first_outputs_multi_kind_when_vision_is_strong(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=1, name="FREEZER_A", confidence=0.92),
+            make_candidate(class_id=2, name="FREEZER_B", confidence=0.88),
+        ],
+        delta_weight=-210.0,
+        active_products=[
+            make_active_product(1, "FREEZER_A", weight=100.0, stock=5),
+            make_active_product(2, "FREEZER_B", weight=110.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (1, 1),
+        (2, 1),
+    ]
+    assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
+        "freezer_multi_kind_weight_supported"
+    )
+
+
+def test_freezer_vision_first_prefers_single_handled_item_by_weight_tiebreak(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=13,
+                name="BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                confidence=1.0,
+                instance_count_hint=3,
+            ),
+            make_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                confidence=1.0,
+                instance_count_hint=2,
+            ),
+            make_candidate(
+                class_id=37,
+                name="BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                confidence=0.4868,
+                instance_count_hint=3,
+            ),
+            make_candidate(
+                class_id=46,
+                name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                confidence=0.4854,
+                instance_count_hint=3,
+            ),
+        ],
+        delta_weight=-84.2,
+        active_products=[
+            make_active_product(
+                13,
+                "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                weight=185.0,
+                stock=99,
+            ),
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=93.0, stock=95),
+            make_active_product(
+                37,
+                "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                weight=307.0,
+                stock=100,
+            ),
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                stock=99,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (44, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_single_confidence_weight_tiebreak"
+    assert diagnostics["selected"][0]["class_id"] == 44
+    assert diagnostics["selected"][0]["raw_instance_count_hint"] == 2
+    assert diagnostics["selected"][0]["instance_count_hint"] == 1
+
+
+def test_freezer_vision_first_uses_instance_hint_for_same_class_count(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=1,
+                name="FREEZER_A",
+                confidence=0.92,
+                instance_count_hint=2,
+            )
+        ],
+        delta_weight=-200.0,
+        active_products=[
+            make_active_product(1, "FREEZER_A", weight=100.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [(1, 2)]
+    assert trace.weight_diagnostics["freezer_vision_first"]["selected"][0][
+        "instance_count_hint"
+    ] == 2
 
 
 def test_loadcell_only_returns_nearest_single_within_5g():

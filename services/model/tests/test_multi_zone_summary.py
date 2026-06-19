@@ -1256,11 +1256,31 @@ def _inventory_product(
     return {
         "product_idx": product_idx,
         "product_name": product_name,
+        "product_eng_name": product_name,
         "sale_price": 2000,
         "product_weight": weight,
         "stock_qty": stock,
         "has_loadcell": "true",
         "yolo_class_id": yolo_class_id,
+    }
+
+
+def _inventory_product_without_class_id(
+    *,
+    product_idx: str,
+    product_name: str,
+    product_eng_name: str | None = None,
+    weight: str,
+    stock: int,
+) -> dict:
+    return {
+        "product_idx": product_idx,
+        "product_name": product_name,
+        "product_eng_name": product_eng_name or product_name,
+        "sale_price": 2000,
+        "product_weight": weight,
+        "stock_qty": stock,
+        "has_loadcell": "true",
     }
 
 
@@ -1313,7 +1333,7 @@ async def test_multi_zone_valid_inventory_updates_active_product_store(
 
     monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
 
-    active_store = ActiveProductStore()
+    active_store = ActiveProductStore({"POWER_ADE": 23})
     await multi_zone_module.judge_multi_zone(
         body={
             "session_id": None,
@@ -1339,6 +1359,265 @@ async def test_multi_zone_valid_inventory_updates_active_product_store(
 
 
 @pytest.mark.asyncio
+async def test_multi_zone_product_eng_name_updates_active_product_store(
+    monkeypatch,
+    session_store,
+):
+    import model_service.api.routes.multi_zone as multi_zone_module
+    from model_service.session.active_product_store import ActiveProductStore
+
+    monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
+
+    active_store = ActiveProductStore(
+        {"CAN_LOTTE_HOT6_THE_KING_RUSH_355ML": 8},
+        source_policy="node_first",
+    )
+    await multi_zone_module.judge_multi_zone(
+        body={
+            "session_id": None,
+            "zone": 3,
+            "products": [
+                _inventory_product_without_class_id(
+                    product_idx="HOT6",
+                    product_name="\ud56b\uc2dd\uc2a4",
+                    product_eng_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                    weight="355",
+                    stock=6,
+                )
+            ],
+        },
+        session_store=session_store,
+        door_session_store=None,
+        active_product_store=active_store,
+    )
+
+    product = active_store.get_by_yolo_class_id(8)
+    assert active_store.get_allowed_class_ids() == [8]
+    assert product is not None
+    assert product.product_name == "\ud56b\uc2dd\uc2a4"
+    assert product.product_eng_name == "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML"
+    assert product.class_id_source == "product_eng_name_engine"
+    assert active_store.has_stock_positive_weight_products() is True
+
+
+@pytest.mark.asyncio
+async def test_multi_zone_edge_product_eng_name_payload_updates_active_product_store(
+    monkeypatch,
+    session_store,
+):
+    import model_service.api.routes.multi_zone as multi_zone_module
+    from model_service.session.active_product_store import ActiveProductStore
+
+    monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
+
+    active_store = ActiveProductStore(
+        {
+            "BAG_BINGGRAE_KKOTCHIGELANG_75G": 3,
+            "BAG_BINGGRAE_KKOTCHIGELANG_GREEN_75G": 4,
+            "BOX_ORION_DIGET_SSIN_84G": 76,
+        },
+        source_policy="node_first",
+    )
+    await multi_zone_module.judge_multi_zone(
+        body={
+            "session_id": None,
+            "zone": 1,
+            "products": [
+                {
+                    "division_idx": "DI17798460900133031",
+                    "device_idx": "DE17798461293792881",
+                    "product_idx": "P17790836506994281",
+                    "product_name": "\ube59\uadf8\ub808 \uaf43\uac8c\ub791 \uc624\ub9ac\uc9c0\ub110",
+                    "product_eng_name": "BAG_BINGGRAE_KKOTCHIGELANG_75G",
+                    "sale_price": 500,
+                    "stock_qty": 1,
+                    "product_weight": "75",
+                    "product_loadcell_weight": "83",
+                    "has_loadcell": "Y",
+                },
+                {
+                    "division_idx": "DI17798460900133031",
+                    "device_idx": "DE17798461293792881",
+                    "product_idx": "P17790836506994281",
+                    "product_name": "\ube59\uadf8\ub808 \uaf43\uac8c\ub791 \uc624\ub9ac\uc9c0\ub110",
+                    "product_eng_name": "BAG_BINGGRAE_KKOTCHIGELANG_GREEN_75G",
+                    "sale_price": 500,
+                    "stock_qty": 1,
+                    "product_weight": "75",
+                    "product_loadcell_weight": "79",
+                    "has_loadcell": "Y",
+                },
+                {
+                    "division_idx": "DI17798460900133031",
+                    "device_idx": "DE17798461293792881",
+                    "product_idx": "P17791537732012107",
+                    "product_name": "\uc624\ub9ac\uc628 \ub2e4\uc774\uc81c \uc52c",
+                    "product_eng_name": "BOX_ORION_DIGET_SSIN_84G",
+                    "sale_price": 1000,
+                    "stock_qty": 20,
+                    "product_weight": "84",
+                    "product_loadcell_weight": "110",
+                    "has_loadcell": "Y",
+                },
+            ],
+        },
+        session_store=session_store,
+        door_session_store=None,
+        active_product_store=active_store,
+    )
+
+    assert active_store.get_allowed_class_ids() == [3, 4, 76]
+    assert active_store.get_stats()["stock_positive_class_products"] == 3
+    assert active_store.get_stats()["stock_positive_weight_products"] == 3
+
+
+@pytest.mark.asyncio
+async def test_multi_zone_legacy_product_name_class_payload_updates_active_product_store(
+    monkeypatch,
+    session_store,
+):
+    import model_service.api.routes.multi_zone as multi_zone_module
+    from model_service.session.active_product_store import ActiveProductStore
+
+    monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
+
+    active_store = ActiveProductStore(
+        {
+            "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G": 3,
+            "BOX_BINGGRAE_YOMAMTE_150ML": 30,
+            "STICK_LALA_SWEET_GRAPE_ZERO_70ML": 46,
+        },
+        source_policy="node_first",
+    )
+    await multi_zone_module.judge_multi_zone(
+        body={
+            "session_id": None,
+            "zone": 1,
+            "products": [
+                {
+                    "product_idx": "P17514184380842082",
+                    "product_name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    "sale_price": 5000,
+                    "stock_qty": 100,
+                    "product_weight": "223",
+                    "has_loadcell": "Y",
+                },
+                {
+                    "product_idx": "P17437536515731485",
+                    "product_name": "BOX_BINGGRAE_YOMAMTE_150ML",
+                    "sale_price": 2500,
+                    "stock_qty": 100,
+                    "product_weight": "87",
+                    "has_loadcell": "Y",
+                },
+                {
+                    "product_idx": "P17815766992187371",
+                    "product_name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                    "sale_price": 2000,
+                    "stock_qty": 100,
+                    "product_weight": "71",
+                    "has_loadcell": "Y",
+                },
+            ],
+        },
+        session_store=session_store,
+        door_session_store=None,
+        active_product_store=active_store,
+    )
+
+    assert active_store.get_allowed_class_ids() == [3, 30, 46]
+    assert active_store.get_stats()["stock_positive_class_products"] == 3
+    assert active_store.get_by_yolo_class_id(3).class_id_source == (
+        "product_name_engine_legacy"
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_zone_name_compat_payload_updates_active_product_store(
+    monkeypatch,
+    session_store,
+):
+    import model_service.api.routes.multi_zone as multi_zone_module
+    from model_service.session.active_product_store import ActiveProductStore
+
+    monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
+
+    active_store = ActiveProductStore(
+        {"BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G": 3},
+        source_policy="node_first",
+    )
+    await multi_zone_module.judge_multi_zone(
+        body={
+            "session_id": None,
+            "zone": 1,
+            "products": [
+                {
+                    "product_idx": "P17514184380842082",
+                    "product_name": "비비고 청양고추 찐만두",
+                    "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    "sale_price": 5000,
+                    "stock_qty": 100,
+                    "product_weight": "223",
+                    "has_loadcell": "Y",
+                },
+            ],
+        },
+        session_store=session_store,
+        door_session_store=None,
+        active_product_store=active_store,
+    )
+
+    product = active_store.get_by_yolo_class_id(3)
+    assert active_store.get_allowed_class_ids() == [3]
+    assert product.product_name == "비비고 청양고추 찐만두"
+    assert product.class_id_source == "name_engine_compat"
+
+
+@pytest.mark.asyncio
+async def test_multi_zone_rejects_product_eng_name_camel_case_alias(
+    monkeypatch,
+    caplog,
+    session_store,
+):
+    import model_service.api.routes.multi_zone as multi_zone_module
+    from model_service.session.active_product_store import ActiveProductStore
+
+    monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
+
+    active_store = ActiveProductStore(
+        {"BAG_BINGGRAE_KKOTCHIGELANG_75G": 3},
+        source_policy="node_first",
+    )
+
+    caplog.set_level(logging.WARNING)
+    await multi_zone_module.judge_multi_zone(
+        body={
+            "session_id": None,
+            "zone": 1,
+            "products": [
+                {
+                    "product_idx": "P3",
+                    "product_name": "Display name",
+                    "productEngName": "BAG_BINGGRAE_KKOTCHIGELANG_75G",
+                    "sale_price": 500,
+                    "stock_qty": 1,
+                    "product_weight": "75",
+                }
+            ],
+        },
+        session_store=session_store,
+        door_session_store=None,
+        active_product_store=active_store,
+    )
+
+    assert active_store.get_allowed_class_ids() == []
+    assert "[MULTI-ZONE] unmapped products: ['Display name']" in caplog.text
+    assert "product_eng_name=" in caplog.text
+    assert "class_key_source=product_name" in caplog.text
+    assert "'eng_name':" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_multi_zone_zero_weight_valid_inventory_updates_vision_allowlist(
     monkeypatch,
     session_store,
@@ -1348,7 +1627,7 @@ async def test_multi_zone_zero_weight_valid_inventory_updates_vision_allowlist(
 
     monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
 
-    active_store = ActiveProductStore()
+    active_store = ActiveProductStore({"CORN_TEA": 44})
     await multi_zone_module.judge_multi_zone(
         body={
             "session_id": None,
@@ -1385,7 +1664,12 @@ async def test_multi_zone_close_payload_does_not_overwrite_inventory_snapshot(
 
     monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
 
-    active_store = ActiveProductStore()
+    active_store = ActiveProductStore(
+        {
+            "LABNOSH_PROTEIN": 45,
+            "BOX_ORION_DIGET_SSIN_84G": 76,
+        }
+    )
     active_store.set_products(
         [
             _inventory_product(
@@ -1434,7 +1718,12 @@ async def test_multi_zone_zero_stock_only_payload_preserves_valid_snapshot(
 
     monkeypatch.setattr(multi_zone_module, "_log_request_to_file", lambda *args: None)
 
-    active_store = ActiveProductStore()
+    active_store = ActiveProductStore(
+        {
+            "LABNOSH_PROTEIN": 45,
+            "BOX_ORION_DIGET_SSIN_84G": 76,
+        }
+    )
     active_store.set_products(
         [
             _inventory_product(

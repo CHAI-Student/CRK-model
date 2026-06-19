@@ -22,17 +22,21 @@ vision-supported product identity.
 ## Vision Processing
 
 - YOLO is TensorRT/FP16-oriented on Jetson with 480x480 input.
-- Runtime product identity/class mapping is Node-first by default. The model
-  service accepts Node `trainingidx`, `training_idx`, `trainingIdx`,
-  `yolo_class_id`, and `yoloClassId` as direct YOLO class ids; static
-  `dataset.yaml`/`yolo_product_mapping.json` data is not the default runtime
-  source.
+- Runtime product identity/class mapping is Node-first by default, but the
+  model resolves active-product class ids from Edge class-name keys matched
+  against loaded YOLO engine class names. Official input is
+  `product_eng_name`, tagged as `product_eng_name_engine`. During migration,
+  engine-matching `name` is tagged `name_engine_compat` and legacy
+  `product_name` is tagged `product_name_engine_legacy`. Direct
+  `trainingidx`, `training_idx`, `trainingIdx`, `yolo_class_id`,
+  `yoloClassId`, and `yolo_class_name` payload fields are ignored for runtime
+  class identity because they can drift from the deployed engine.
 - Top/Side frames are preprocessed with a left 480x480 crop from 640x480 camera
   frames by default, so ROI coordinates are interpreted in that 480x480 space.
 - Camera layout is configurable without changing the `/trigger` payload shape.
   `legacy_top_side` means physical Top plus per-zone Side; `dual_top_proxy`
-  means `videos.top` is top-center and `videos.side` is a top-left proxy that
-  uses the logical Side profile for ROI, thresholds, crop, and voting.
+  means `videos.top` is top-middle and `videos.side` is top-side. In freezer
+  mode both streams use the Top profile for lower-half dual-top filtering.
 - The current Jetson field profile sets Top FFmpeg gamma/contrast to `1.2/1.2`
   and Side to `1.0/1.0`. Trigger traces record the active values and frame
   stride for latency/recall comparison.
@@ -41,6 +45,12 @@ vision-supported product identity.
   Top ROI uses `delta_weight` only as an enablement/direction label: removals
   and returns both keep `center_y >= 240`, while zero/unknown delta skips the
   top ROI.
+- Freezer filtering applies only when
+  `MODEL__MACHINE__CABINET_TYPE=freezer`. With `dual_top_proxy`, both public
+  streams must keep bbox centers in the lower 240 pixels of the 480x480 crop,
+  pass the freezer motion floor, and pass freezer vote thresholds. Threshold
+  rescue and ROI rescue are disabled so weak/static evidence does not enter
+  freezer candidates.
 - Regular top/side confidence thresholds are now `0.25`, matching the Jetson
   live preview baseline used to verify Pepsi detection with
   `models/0204_morning.engine`.
@@ -81,6 +91,16 @@ vision-supported product identity.
   with loadcell, the vision product remains as `partial` with mismatch
   diagnostics; when no vision-derived identity exists, the result is no-charge
   `no_detection` or `uncertain`.
+- Freezer mode narrows this further: final freezer candidates are the only
+  chargeable identity source. The normal gram tolerance is not used to reject a
+  strong freezer candidate; confidence ranks first and weight residual only
+  breaks close confidence ties. Raw vision top-K is preserved in diagnostics,
+  but the handled candidate list sent to OPS, the engine, and DoorSession is
+  narrowed for single freezer removal segments. In that case one product is
+  selected from the top confidence band by weight residual. Multi-kind or
+  same-class multi-count freezer results require segment/compound evidence or a
+  combined weight/count fit; visible products are not summed by confidence
+  alone.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count

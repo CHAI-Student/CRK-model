@@ -32,6 +32,9 @@ Camera POST /trigger
   zone total. Older docs that say "average" are historical and should be
   cross-checked against `core/loadcell_stats.py` and tests before changing
   behavior.
+- Refrigerated and freezer modes both consume the zone-sliced
+  `/trigger.loadcells` payload. The deprecated `global_loadcells` field is
+  accepted for compatibility but is not the effective decision payload.
 - `active_products`: live Node product snapshot; required for strict and
   loadcell-only matching.
 - `stock_qty = 0`: sold-out signal; strict matching must exclude the product.
@@ -43,10 +46,13 @@ Camera POST /trigger
 `ProductDecisionEngine.judge()` is currently documented as evaluating:
 
 1. `vision_only`
-2. `loadcell_only_no_vision`
-3. `no_detection_min_weight`
-4. `strict_match`
-5. Relaxed fallback paths:
+2. freezer `freezer_vision_first` branch when
+   `MODEL__MACHINE__CABINET_TYPE=freezer` and the delta is negative
+3. stage-count/no-final-candidate recovery
+4. legacy `loadcell_only_no_vision` only under explicit `weight_aware`
+5. `no_detection_min_weight`
+6. `strict_match`
+7. Relaxed fallback paths:
    `single_product_match`, `combination_match`, `partial_result`,
    `loadcell_only_no_estimates`
 

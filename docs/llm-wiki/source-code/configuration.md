@@ -21,7 +21,7 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 | Vision | `VisionModel` | YOLO engine path, thresholds, crop/ROI policies, vote weights, rescue knobs. |
 | Weight | `WeightModel` | Strict/relaxed tolerance, combination limits, detected-single fallback. |
 | Trigger | `TriggerModel` | Dedup TTL/size, queue size, min weight, low-weight video fallback, return-only skip, balanced cancellation. |
-| Catalog | `CatalogModel` | Node-first active product catalog policy and optional legacy static validation. |
+| Catalog | `CatalogModel` | Node-first active product catalog policy, engine-backed class-name matching, and optional legacy static validation. |
 | Loadcell | `LoadcellModel` | Stable window and stability threshold. |
 | Video | `VideoModel` | AVI readiness polling limits. |
 | Async streaming | `AsyncStreamingModel` | Async enablement, frame queue, frame stride, zero-frame retry. |
@@ -36,15 +36,28 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__VISION__YOLO_INTERNAL_CONF_THRESHOLD=0.01` keeps raw YOLO
   collection broad; service-side regular candidate thresholds do the main
   filtering.
+- `MODEL__VISION__LOG_ENGINE_CLASSES=off` by default. Set it to `on`/`true`/`1`
+  to print every loaded YOLO engine class id/name at startup for field
+  debugging.
 - `MODEL__CATALOG__SOURCE_POLICY=node_first` makes Node-provided product data
-  the runtime source of truth. Direct class-id fields
-  `trainingidx`, `training_idx`, `trainingIdx`, `yolo_class_id`, and
-  `yoloClassId` are accepted; product-name fallback through
-  `yolo_product_mapping.json` is available only with
-  `static_mapping_compat`.
+  the runtime source of truth. Class identity is resolved from Edge
+  `product_eng_name` matched against loaded YOLO engine class names. During
+  Edge migration, engine-matching `name` and legacy `product_name` are
+  compatibility class keys after `product_eng_name`.
+- Direct class-id/name fields such as `trainingidx`, `training_idx`,
+  `trainingIdx`, `yolo_class_id`, `yoloClassId`, and `yolo_class_name` are
+  accepted for API compatibility but ignored for active-product class
+  identity.
+- `MODEL__CATALOG__PRODUCT_NAME_FALLBACK_ENABLED` is a legacy env flag kept for
+  deployment compatibility; it no longer enables runtime static-name fallback.
+  In the official contract `product_name` is the display name; as a temporary
+  bridge it can act as a class key only when it matches the current engine
+  class name.
 - `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=false` skips startup comparison
   against `dataset.yaml` and `services/config/yolo_product_mapping.json` by
   default, preventing stale static files from warning after an engine swap.
+  `yolo_product_mapping.json` is not used for runtime active-product
+  allowlists.
 - `MODEL__WEIGHT__IDENTITY_POLICY=vision_first` is the default product-identity
   policy. Product identity must come from final vision candidates, strong stage
   evidence, or weight-gated rescue evidence; loadcell-only and active-only
@@ -59,6 +72,16 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__WEIGHT__STRICT_MODE_FALLBACK=true`
 - `MODEL__WEIGHT__TOLERANCE_GRAMS=5.0` in code defaults, used by strict
   combination matching and relaxed count validation.
+- `MODEL__MACHINE__CABINET_TYPE=refrigerated` preserves the current
+  refrigerated loadcell/vision/weight policy. `freezer` keeps zone-sliced
+  loadcell input but uses freezer-specific lower-half dual-top filtering and a
+  vision-first decision branch where weight is only a tie-break/diagnostic
+  signal.
+- `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND=0.08` controls how close
+  freezer single-item candidates must be in confidence before weight residual
+  can break the tie.
+- `MODEL__WEIGHT__FREEZER_MULTI_MIN_CONFIDENCE=0.45` is the freezer
+  multi-kind vision evidence floor.
 - `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` is the per-item confidence
   floor for multi-kind combinations.
 - `MODEL__WEIGHT__SAME_PRODUCT_COUNT_TOLERANCE_GRAMS=5.0` applies only to the
@@ -99,11 +122,18 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   640x480 camera frames.
 - `MODEL__VISION__CAMERA_LAYOUT=legacy_top_side` preserves the current one Top
   plus per-zone Side camera mapping. `dual_top_proxy` keeps the `/trigger`
-  `videos.top/side` contract but records `videos.top` as physical `top_center`
-  and `videos.side` as `top_left_proxy` using the Side processing profile.
+  `videos.top/side` contract but records `videos.top` as physical
+  `top_middle` and `videos.side` as `top_side` using the Top processing
+  profile.
 - `MODEL__VISION__TOP_ROI_ENABLED=true`
 - `MODEL__VISION__MOTION_MIN_DISPLACEMENT_PX=10.0`; tracker dynamic thresholds
   also use this as the minimum floor before applying the bbox-size rule.
+- `MODEL__VISION__FREEZER_MOTION_MIN_DISPLACEMENT_PX=12.0` is the freezer
+  motion floor used only when `MODEL__MACHINE__CABINET_TYPE=freezer`.
+- `MODEL__VISION__FREEZER_MIN_VOTE_RATIO=0.08` and
+  `MODEL__VISION__FREEZER_MIN_VOTE_COUNT=3` tighten freezer candidate voting.
+- `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT=240.0` keeps freezer dual-top
+  detections only when their 480x480 bbox center is in the lower half.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both
   keep the lower region.

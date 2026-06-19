@@ -40,6 +40,9 @@ Node -> Payment/PNT using final model basket
   Model do not talk directly.
 - Node health MQTT is not proof that `/trigger` or `/api/judge/multi-zone`
   works.
+- Known sibling-repo risks are outside this CRK-model-only change: hardcoded
+  Edge/Camera/IO URLs, missing Camera retry for model
+  `waiting_for=stable_loadcell`, and stale IO Board docs.
 
 ## Evidence
 

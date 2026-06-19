@@ -84,6 +84,33 @@ Important inputs:
 - Fused confidence is configurable and vision-heavy by default:
   `vision=0.65`, `loadcell=0.25`, `count=0.10`.
 
+## Freezer Vision-First Branch
+
+- `MODEL__MACHINE__CABINET_TYPE=freezer` activates a freezer-specific branch
+  for negative deltas after `vision_only` handling and before the normal
+  refrigerated strict/relaxed matching path.
+- Freezer results can only use products present in final vision candidates and
+  in the active-product snapshot. Loadcell-only, active-only, or weight-nearest
+  products that are absent from candidates remain no-charge misses.
+- The normal `MODEL__WEIGHT__TOLERANCE_GRAMS` value is not a hard product
+  reject gate in freezer mode. Single-item freezer selection ranks by vision
+  confidence first; only candidates within
+  `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND` of the best confidence use
+  weight residual as a tie-break.
+- Freezer diagnostics record `decision_branch=freezer_vision_first`,
+  `weight_used_as=tiebreaker`, `weight_reliable`, `weight_residual`, and the
+  full considered/selected candidate list. A large residual becomes `partial`,
+  not an automatic identity rejection.
+- Single freezer removal segments now use a handled-candidate narrowing step:
+  raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
+  engine input, and DoorSession snapshots receive the one handled product
+  selected from the top confidence band by weight residual.
+- Multi-kind freezer results are created only when segment/compound loadcell
+  evidence indicates multiple handled items, or when the combined freezer
+  candidate weights fit the target inside the existing count-scaled tolerance.
+  Same-class count greater than one is allowed only when the voting
+  `instance_count_hint` is also supported by the target weight.
+
 ## StrictWeightMatcher
 
 - Converts active products and vision candidates into `CandidateProduct`

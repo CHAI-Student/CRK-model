@@ -1,6 +1,6 @@
 # CRK-model LLM Wiki
 
-Last updated: 2026-06-16
+Last updated: 2026-06-18
 
 This wiki is the LLM-facing map of the CRK model service. The original
 documents under `docs/` remain the raw sources. Pages here summarize and
@@ -43,14 +43,27 @@ shape without rereading every long historical document.
 - The model service receives Camera-packaged `/trigger` payloads and Node
   `/api/judge/multi-zone` calls. It does not call IO Board or Payment directly.
 - `active_products` from Node is the runtime product-catalog source by
-  default. `MODEL__CATALOG__SOURCE_POLICY=node_first` trusts Node-provided
-  `trainingidx`/`training_idx`/`trainingIdx`/`yolo_class_id` aliases as the
-  YOLO class id, and `static_mapping_compat` is the explicit legacy product
-  name mapping mode.
+  default. Active-product class identity is resolved from Edge
+  `product_eng_name` matched against class names loaded from the current YOLO
+  engine. During the Edge migration, engine-matching `name` and legacy
+  `product_name` are compatibility class keys after `product_eng_name`.
+- `trainingidx`/`training_idx`/`trainingIdx`/`yolo_class_id` and
+  `yolo_class_name` may still appear in payloads for API compatibility, but
+  they are ignored for active-product class identity because Edge ids can drift
+  from the deployed engine ids. Korean `product_name` is display metadata in
+  the official contract; it is used as a legacy class key only when it already
+  matches the loaded engine class name.
+- Edge `product_idx` is not a stable model class key. The model preserves it
+  for Node-facing product identity, but resolves YOLO classes from the
+  engine-matching class-name fields above.
 - Static `dataset.yaml` and `services/config/yolo_product_mapping.json`
   validation is advisory and opt-in through
   `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=true`; default startup records
   the loaded engine class summary without warning on stale static mappings.
+  The stale mapping file is not used for runtime active-product allowlists.
+- `MODEL__VISION__LOG_ENGINE_CLASSES=on` prints the loaded engine classes
+  through OPS logs. The log key `name=` is the engine class label, not an Edge
+  payload field name.
 - Stock-positive active products with valid class ids remain in the YOLO
   allowlist even when Node sends missing or `0g` product weight. Such rows are
   tracked as `weight_unavailable` for loadcell validation/count diagnostics
@@ -60,6 +73,11 @@ shape without rereading every long historical document.
   strong stage evidence, or weight-gated rescue evidence must support the
   product identity. Loadcell is count/validation evidence, and no-vision
   loadcell-only deltas return no-charge `no_detection` or `uncertain`.
+- `MODEL__MACHINE__CABINET_TYPE=refrigerated` keeps the existing
+  loadcell/vision/weight path. `freezer` uses the same zone-sliced
+  `/trigger.loadcells` payload but switches identity to a freezer
+  vision-first policy where loadcell weight is a tie-break/diagnostic signal,
+  not a hard product reject gate.
 - Strong vision identity with unavailable product weight is preserved as
   `partial` with `vision_identity_preserved_weight_unavailable`; loadcell count
   correction only runs when the active product has a valid positive weight.
@@ -72,14 +90,25 @@ shape without rereading every long historical document.
   frames by default, matching the TensorRT 480 input contract.
 - `MODEL__VISION__CAMERA_LAYOUT` defaults to `legacy_top_side`. In
   `dual_top_proxy`, Camera still sends `videos.top/side`, but `videos.top` is
-  recorded as physical `top_center` and `videos.side` is recorded as
-  `top_left_proxy` using the logical Side processing profile.
+  recorded as physical `top_middle` and `videos.side` is recorded as
+  `top_side` using the logical Top processing profile.
 - Python service inference defaults to `models/0204_morning.engine`, with
   regular Top/Side candidate thresholds at `0.25` to match the Jetson live
   preview baseline.
 - Top-camera ROI now uses the lower region for both removals and returns:
   non-zero deltas keep `center_y >= 240`, while zero or missing delta skips
   the top ROI.
+- Freezer `dual_top_proxy` treats both public streams as top cameras and keeps
+  only detections whose 480x480 bbox center is in the lower half
+  (`center_y >= MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT`, default `240`).
+  It applies stronger motion/vote floors and disables threshold/ROI rescue for
+  freezer candidates.
+- Freezer handled candidates are narrower than raw vision top-K. Raw top-K
+  candidates stay in trace diagnostics, while OPS candidates, engine input, and
+  DoorSession close snapshots use handled candidates. For a single freezer
+  removal segment, the handled list defaults to one product; weight residual
+  breaks ties inside the top confidence band, and same-class count hints are
+  used only when the target weight supports that count.
 - Side-camera ROI keeps hard `center_x <= 400` in the left 480 crop and adds a
   conditional `+5px` regular-candidate soft band. This catches Pepsi detections
   around `x=402..404` while leaving farther-right Trevi-style detections out.
@@ -126,6 +155,10 @@ shape without rereading every long historical document.
   multi-zone waiting response. A combined `removal_waiting_for_stable_loadcell`
   plus `missing_active_products` result means both Node inventory context and
   Camera/IO loadcell timing need inspection.
+- Latest sibling-repo risk notes are documentation-only in this Python repo:
+  Edge/Camera/IO URL hardcoding, Camera missing retry for
+  `waiting_for=stable_loadcell`, and stale IO protocol docs remain external
+  follow-ups rather than CRK-model code changes.
 - Return handling is hybrid: a positive delta deducts one same-zone product
   immediately only inside flat strict tolerance. Multi-count/combo/cross-zone
   returns and mixed `return_weight_hints` are deferred until CLOSE and then

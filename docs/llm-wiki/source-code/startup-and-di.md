@@ -34,10 +34,18 @@ model-service / python -m model_service
 
 - `SessionStore`
 - `YOLOWrapper`, with fail-fast `yolo.load()` check
-- `ActiveProductStore`, seeded with loaded engine name/id mapping and
-  `settings.catalog.source_policy`
+- Optional YOLO engine class logging when
+  `MODEL__VISION__LOG_ENGINE_CLASSES=on`; startup prints each loaded class
+  id/name after the engine loads.
+- `ActiveProductStore`, seeded with the loaded YOLO engine name/id mapping.
+  Runtime active-product identity uses Edge `product_eng_name` matched against
+  this engine-backed map, with engine-matching `name` and legacy
+  `product_name` accepted as migration compatibility keys.
 - Node-first catalog startup logging that records source policy, static
-  validation enablement, and loaded engine class count
+  validation enablement, legacy fallback flag state, and loaded engine class
+  count.
+- `services/config/yolo_product_mapping.json` may be read for legacy/advisory
+  logging, but it is ignored for runtime active-product allowlists.
 - optional legacy static class validation against engine names, `dataset.yaml`,
   and `config/yolo_product_mapping.json` only when
   `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=true`

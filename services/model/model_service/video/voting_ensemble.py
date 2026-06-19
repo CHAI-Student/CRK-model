@@ -37,12 +37,19 @@ class VoteCount:
     max_confidence: float = 0.0
     sum_confidence: float = 0.0
     class_name: str = ""
+    max_instance_count: int = 1
 
-    def add(self, confidence: float, class_name: str = "") -> None:
+    def add(
+        self,
+        confidence: float,
+        class_name: str = "",
+        instance_count: int = 1,
+    ) -> None:
         """Add a vote with confidence score."""
         self.count += 1
         self.max_confidence = max(self.max_confidence, confidence)
         self.sum_confidence += confidence
+        self.max_instance_count = max(self.max_instance_count, int(instance_count))
         if class_name and not self.class_name:
             self.class_name = class_name
 
@@ -105,6 +112,7 @@ class VoteResult:
     weight_gate_passed: Optional[bool] = None
     rescue_tolerance_g: Optional[float] = None
     rescue_weight_residual_g: Optional[float] = None
+    instance_count_hint: int = 1
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -143,6 +151,7 @@ class VoteResult:
                 if self.rescue_weight_residual_g is not None
                 else None
             ),
+            "instance_count_hint": int(self.instance_count_hint),
         }
         if self.roi_x_min is not None:
             payload.update(
@@ -180,6 +189,7 @@ class VotingEnsemble:
         class_id: int,
         confidence: float,
         class_name: str = "",
+        instance_count: int = 1,
     ) -> None:
         """
         Add a vote for a class.
@@ -191,7 +201,7 @@ class VotingEnsemble:
         """
         if class_id not in self._votes:
             self._votes[class_id] = VoteCount()
-        self._votes[class_id].add(confidence, class_name)
+        self._votes[class_id].add(confidence, class_name, instance_count)
 
     def increment_frame_count(self) -> None:
         """Increment total frame count."""
@@ -246,6 +256,7 @@ class VotingEnsemble:
                 max_confidence=vote.max_confidence,
                 avg_confidence=vote.avg_confidence,
                 vote_ratio=vote_ratio,
+                instance_count_hint=vote.max_instance_count,
             )
             results.append(result)
 
@@ -274,6 +285,10 @@ class VotingEnsemble:
             vote.count += other_vote.count
             vote.max_confidence = max(vote.max_confidence, other_vote.max_confidence)
             vote.sum_confidence += other_vote.sum_confidence
+            vote.max_instance_count = max(
+                vote.max_instance_count,
+                other_vote.max_instance_count,
+            )
             if other_vote.class_name and not vote.class_name:
                 vote.class_name = other_vote.class_name
 
@@ -346,6 +361,7 @@ class VotingEnsemble:
                 side_vote_count=0,
                 top_max_confidence=vote.max_confidence,
                 side_max_confidence=0.0,
+                instance_count_hint=vote.max_instance_count,
             )
 
         # Merge side camera votes
@@ -358,6 +374,10 @@ class VotingEnsemble:
                 existing.side_max_confidence = vote.max_confidence
                 existing.vote_count = existing.top_vote_count + vote.count
                 existing.max_confidence = max(existing.max_confidence, vote.max_confidence)
+                existing.instance_count_hint = max(
+                    existing.instance_count_hint,
+                    vote.max_instance_count,
+                )
                 existing.avg_confidence = (
                     (existing.avg_confidence * existing.top_vote_count +
                      vote.avg_confidence * vote.count) /
@@ -379,6 +399,7 @@ class VotingEnsemble:
                     side_vote_count=vote.count,
                     top_max_confidence=0.0,
                     side_max_confidence=vote.max_confidence,
+                    instance_count_hint=vote.max_instance_count,
                 )
 
         # Calculate vote ratios and weighted confidence

@@ -41,7 +41,7 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from model_service.core.config import config
@@ -630,9 +630,224 @@ class VideoProcessor:
             )
 
     def _threshold_for_camera(self, camera_type: str) -> float:
+        if self._uses_freezer_dual_top_profile(camera_type):
+            return self.top_confidence_threshold
         if camera_type == "side":
             return self.side_confidence_threshold
         return self.top_confidence_threshold
+
+    @staticmethod
+    def _is_freezer_mode() -> bool:
+        return str(config.machine.cabinet_type).lower() == "freezer"
+
+    def _uses_freezer_dual_top_profile(self, camera_type: str) -> bool:
+        return (
+            self._is_freezer_mode()
+            and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+            and camera_type in {"top", "side"}
+        )
+
+    @staticmethod
+    def _freezer_handled_filter_enabled(delta_weight: Optional[float]) -> bool:
+        return (
+            str(config.machine.cabinet_type).lower() == "freezer"
+            and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+            and delta_weight is not None
+            and float(delta_weight) < 0.0
+        )
+
+    @staticmethod
+    def _freezer_trace_has_multi_item_evidence(
+        trace_context: Optional[TriggerTraceContext],
+    ) -> bool:
+        loadcell = getattr(trace_context, "loadcell", None)
+        if not isinstance(loadcell, dict):
+            return False
+
+        removal_targets = loadcell.get("removal_segment_targets") or []
+        if isinstance(removal_targets, list) and len(removal_targets) >= 2:
+            return True
+        if bool(loadcell.get("compound_event")):
+            return True
+        try:
+            return int(loadcell.get("compound_negative_segment_count", 0) or 0) >= 2
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _freezer_candidate_unit_weight(
+        vote: VoteResult,
+        product_weights: Optional[Dict[int, float]],
+    ) -> Optional[float]:
+        if not product_weights:
+            return None
+        try:
+            weight = product_weights.get(int(vote.class_id))
+        except (TypeError, ValueError):
+            return None
+        try:
+            weight_value = float(weight)
+        except (TypeError, ValueError):
+            return None
+        return weight_value if weight_value > 0.0 else None
+
+    @staticmethod
+    def _freezer_count_tolerance(count: int) -> float:
+        return float(config.weight.tolerance_grams) + (
+            float(config.weight.same_product_count_tolerance_grams)
+            * max(0, int(count))
+        )
+
+    @classmethod
+    def _freezer_supported_instance_count(
+        cls,
+        vote: VoteResult,
+        *,
+        target_weight: float,
+        product_weights: Optional[Dict[int, float]],
+    ) -> int:
+        unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
+        if unit_weight is None:
+            return 1
+        try:
+            hint = int(getattr(vote, "instance_count_hint", 1) or 1)
+        except (TypeError, ValueError):
+            hint = 1
+        hint = max(1, min(hint, int(config.weight.max_count_per_item)))
+        if hint <= 1:
+            return 1
+
+        best_count = 1
+        best_residual = abs(target_weight - unit_weight)
+        for count in range(2, hint + 1):
+            residual = abs(target_weight - unit_weight * count)
+            if residual <= cls._freezer_count_tolerance(count) and residual < best_residual:
+                best_count = count
+                best_residual = residual
+        return best_count
+
+    @classmethod
+    def filter_freezer_handled_candidates(
+        cls,
+        vote_results: List[VoteResult],
+        *,
+        delta_weight: Optional[float],
+        product_weights: Optional[Dict[int, float]] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
+        log_prefix: str = "VIDEO",
+    ) -> List[VoteResult]:
+        """Reduce freezer dual-top removal candidates to handled-item evidence."""
+        votes = list(vote_results or [])
+        if not cls._freezer_handled_filter_enabled(delta_weight) or len(votes) <= 1:
+            return votes
+
+        target_weight = abs(float(delta_weight))
+        if cls._freezer_trace_has_multi_item_evidence(trace_context):
+            cls._record_freezer_candidate_filter_diagnostics(
+                trace_context,
+                {
+                    "accepted": False,
+                    "reason": "multi_item_trace_evidence_passthrough",
+                    "raw_candidate_count": len(votes),
+                    "handled_candidate_count": len(votes),
+                    "target_weight": round(target_weight, 1),
+                },
+            )
+            return votes
+
+        candidate_limit = max(1, int(config.vision.top_k))
+        ranked_votes = votes[:candidate_limit]
+        best_confidence = max(
+            float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
+            for vote in ranked_votes
+        )
+        confidence_band = max(0.0, float(config.weight.freezer_confidence_tie_band))
+        tie_pool = [
+            (index, vote)
+            for index, vote in enumerate(ranked_votes)
+            if float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
+            >= best_confidence - confidence_band
+        ]
+
+        def sort_key(item: tuple[int, VoteResult]) -> tuple[bool, float, int, float]:
+            index, vote = item
+            unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
+            residual = (
+                abs(target_weight - unit_weight)
+                if unit_weight is not None
+                else target_weight
+            )
+            confidence = float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
+            return (unit_weight is None, residual, index, -confidence)
+
+        selected_index, selected_vote = min(tie_pool, key=sort_key)
+        supported_count = cls._freezer_supported_instance_count(
+            selected_vote,
+            target_weight=target_weight,
+            product_weights=product_weights,
+        )
+        selected = replace(selected_vote, instance_count_hint=supported_count)
+        unit_weight = cls._freezer_candidate_unit_weight(selected_vote, product_weights)
+        residual = (
+            abs(target_weight - unit_weight)
+            if unit_weight is not None
+            else target_weight
+        )
+        diagnostics = {
+            "accepted": True,
+            "reason": "single_removal_weight_tiebreak",
+            "raw_candidate_count": len(votes),
+            "handled_candidate_count": 1,
+            "target_weight": round(target_weight, 1),
+            "confidence_band": round(confidence_band, 4),
+            "selected": {
+                "rank": selected_index + 1,
+                "class_id": int(selected.class_id),
+                "name": selected.class_name,
+                "confidence": round(
+                    float(getattr(selected, "weighted_confidence", 0.0) or 0.0),
+                    4,
+                ),
+                "unit_weight": round(unit_weight, 1) if unit_weight is not None else None,
+                "weight_residual": round(residual, 1),
+                "instance_count_hint": supported_count,
+            },
+        }
+        cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
+        logger.info(
+            "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=1 selected=%s "
+            "target=%.1fg residual=%.1fg",
+            log_prefix,
+            len(votes),
+            selected.class_name,
+            target_weight,
+            residual,
+        )
+        return [selected]
+
+    @staticmethod
+    def _record_freezer_candidate_filter_diagnostics(
+        trace_context: Optional[TriggerTraceContext],
+        diagnostics: dict,
+    ) -> None:
+        if trace_context is None or not hasattr(trace_context, "record_weight_diagnostics"):
+            return
+        existing = dict(getattr(trace_context, "weight_diagnostics", {}) or {})
+        existing["freezer_candidate_filter"] = diagnostics
+        trace_context.record_weight_diagnostics(existing)
+
+    def _freezer_roi_y_split(self) -> float:
+        return float(config.vision.freezer_lower_roi_y_split)
+
+    def _effective_min_vote_ratio(self) -> float:
+        if self._is_freezer_mode():
+            return float(config.vision.freezer_min_vote_ratio)
+        return float(self.min_vote_ratio)
+
+    def _effective_min_vote_count(self) -> int:
+        if self._is_freezer_mode():
+            return int(config.vision.freezer_min_vote_count)
+        return int(self.min_vote_count)
 
     def _top_roi_direction(self, delta_weight: Optional[float]) -> Optional[str]:
         if not self.top_roi_enabled or delta_weight is None or delta_weight == 0.0:
@@ -652,6 +867,43 @@ class VideoProcessor:
 
         center_y = detection.center[1]
         return center_y >= self.top_roi_y_split, direction
+
+    def _freezer_lower_roi_accepts(self, detection: YOLODetection) -> bool:
+        if not self.top_roi_enabled:
+            return True
+        return float(detection.center[1]) >= self._freezer_roi_y_split()
+
+    def _freezer_motion_floor(self) -> float:
+        if self._is_freezer_mode():
+            return float(config.vision.freezer_motion_min_displacement_px)
+        return float(self.min_motion_displacement)
+
+    def _motion_threshold_for_detection(
+        self,
+        camera_type: str,
+        bbox_size: float,
+    ) -> float:
+        min_floor = (
+            self._freezer_motion_floor()
+            if self._uses_freezer_dual_top_profile(camera_type)
+            else float(self.min_motion_displacement)
+        )
+        return max(min_floor, bbox_size * 0.10)
+
+    def _low_confidence_roi_eligible(
+        self,
+        detection: YOLODetection,
+        camera_type: str,
+        delta_weight: Optional[float],
+    ) -> bool:
+        if self._uses_freezer_dual_top_profile(camera_type):
+            return self._freezer_lower_roi_accepts(detection)
+        if camera_type == "top":
+            roi_eligible, _ = self._top_roi_accepts(detection, delta_weight)
+            return roi_eligible
+        if camera_type == "side":
+            return detection.center[0] <= self.side_roi_x_max
+        return True
 
     def _side_roi_soft_limit(self) -> float:
         return float(self.side_roi_x_max) + float(self.side_roi_soft_margin_px)
@@ -833,7 +1085,7 @@ class VideoProcessor:
         allowed_class_ids: Optional[List[int]],
         log_prefix: str,
     ) -> List[ThresholdRescueCandidate]:
-        if not config.vision.threshold_rescue_enabled:
+        if self._is_freezer_mode() or not config.vision.threshold_rescue_enabled:
             return []
         allowed_set = set(allowed_class_ids) if allowed_class_ids is not None else None
         candidates: List[ThresholdRescueCandidate] = []
@@ -908,7 +1160,7 @@ class VideoProcessor:
         allowed_class_ids: Optional[List[int]],
         log_prefix: str,
     ) -> List[ThresholdRescueCandidate]:
-        if not config.vision.threshold_rescue_enabled:
+        if self._is_freezer_mode() or not config.vision.threshold_rescue_enabled:
             return []
         allowed_set = set(allowed_class_ids) if allowed_class_ids is not None else None
         candidates: List[ThresholdRescueCandidate] = []
@@ -1520,10 +1772,11 @@ class VideoProcessor:
         # Filter by minimum vote ratio OR minimum vote count
         # 조건 1: vote_ratio >= 5% (기존)
         # 조건 2: vote_count >= min_vote_count (짧은 비디오 대응)
-        min_vote_count = self.min_vote_count
+        min_vote_count = self._effective_min_vote_count()
+        min_vote_ratio = self._effective_min_vote_ratio()
         filtered_results = [
             r for r in combined_results
-            if r.vote_ratio >= self.min_vote_ratio or r.vote_count >= min_vote_count
+            if r.vote_ratio >= min_vote_ratio or r.vote_count >= min_vote_count
         ]
         filtered_results = self._limit_candidates(filtered_results, "VIDEO")
         threshold_rescue_candidates = self._build_threshold_rescue_candidates(
@@ -1550,10 +1803,10 @@ class VideoProcessor:
             )
 
         # 필터링 로그
-        filtered_by_ratio = sum(1 for r in combined_results if r.vote_ratio >= self.min_vote_ratio)
-        filtered_by_count = sum(1 for r in combined_results if r.vote_count >= min_vote_count and r.vote_ratio < self.min_vote_ratio)
+        filtered_by_ratio = sum(1 for r in combined_results if r.vote_ratio >= min_vote_ratio)
+        filtered_by_count = sum(1 for r in combined_results if r.vote_count >= min_vote_count and r.vote_ratio < min_vote_ratio)
         logger.info(
-            f"[VIDEO] 필터링: vote_ratio >= {self.min_vote_ratio*100:.0f}%: {filtered_by_ratio}개, "
+            f"[VIDEO] 필터링: vote_ratio >= {min_vote_ratio*100:.0f}%: {filtered_by_ratio}개, "
             f"vote_count >= {min_vote_count}: 추가 {filtered_by_count}개"
         )
 
@@ -1646,8 +1899,8 @@ class VideoProcessor:
         # Motion tracking
         top_bbox_trackers: Dict[int, BboxTracker] = {}
         side_bbox_trackers: Dict[int, BboxTracker] = {}
-        top_pending_votes: Dict[int, List[Tuple[float, str]]] = {}
-        side_pending_votes: Dict[int, List[Tuple[float, str]]] = {}
+        top_pending_votes: Dict[int, List[Tuple[float, str, int]]] = {}
+        side_pending_votes: Dict[int, List[Tuple[float, str, int]]] = {}
         low_confidence_stats: Dict[int, _LowConfidenceClassStats] = {}
         roi_filtered_stats: Dict[int, _RoiFilteredClassStats] = {}
 
@@ -1811,7 +2064,11 @@ class VideoProcessor:
                         if det.conf < self._threshold_for_camera("top"):
                             top_threshold_filtered_count += 1
                             bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
-                            roi_eligible, _ = self._top_roi_accepts(det, delta_weight)
+                            roi_eligible = self._low_confidence_roi_eligible(
+                                det,
+                                "top",
+                                delta_weight,
+                            )
                             self._record_low_confidence_detection(
                                 low_confidence_stats,
                                 class_id=det.cls,
@@ -1840,21 +2097,31 @@ class VideoProcessor:
                             camera="top",
                             confidence=det.conf,
                         )
-                        top_roi_passed, top_roi_direction = self._top_roi_accepts(
-                            det,
-                            delta_weight,
-                        )
+                        if self._uses_freezer_dual_top_profile("top"):
+                            top_roi_passed = self._freezer_lower_roi_accepts(det)
+                            top_roi_direction = "freezer_lower_half"
+                            top_roi_y_limit = self._freezer_roi_y_split()
+                        else:
+                            top_roi_passed, top_roi_direction = self._top_roi_accepts(
+                                det,
+                                delta_weight,
+                            )
+                            top_roi_y_limit = self.top_roi_y_split
                         if not top_roi_passed:
                             roi_filtered_count += 1
                             self._record_stage(
                                 trace_context,
                                 class_id=det.cls,
                                 class_name=det.name,
-                                stage="roi_filtered",
+                                stage=(
+                                    "freezer_roi_filtered"
+                                    if top_roi_direction == "freezer_lower_half"
+                                    else "roi_filtered"
+                                ),
                                 camera="top",
                                 confidence=det.conf,
                                 center=det.center,
-                                roi_y_limit=self.top_roi_y_split,
+                                roi_y_limit=top_roi_y_limit,
                                 roi_direction=top_roi_direction,
                             )
                             continue
@@ -1871,9 +2138,9 @@ class VideoProcessor:
 
                         # 동적 임계값 계산
                         bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
-                        dynamic_threshold = max(
-                            float(self.min_motion_displacement),
-                            bbox_size * 0.10,
+                        dynamic_threshold = self._motion_threshold_for_detection(
+                            "top",
+                            bbox_size,
                         )
 
                         if class_id not in top_bbox_trackers:
@@ -1886,7 +2153,7 @@ class VideoProcessor:
 
                         if class_id not in top_pending_votes:
                             top_pending_votes[class_id] = []
-                        top_pending_votes[class_id].append((det.conf, det.name))
+                        top_pending_votes[class_id].append((det.conf, det.name, frame_idx))
                         top_detection_count += 1
 
                 else:  # side
@@ -1904,7 +2171,6 @@ class VideoProcessor:
                         )
                         if det.conf < self._threshold_for_camera("side"):
                             side_threshold_filtered_count += 1
-                            center_x = det.center[0]
                             bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
                             self._record_low_confidence_detection(
                                 low_confidence_stats,
@@ -1915,7 +2181,11 @@ class VideoProcessor:
                                 center=det.center,
                                 frame_idx=frame_idx,
                                 bbox_size=bbox_size,
-                                roi_eligible=center_x <= self.side_roi_x_max,
+                                roi_eligible=self._low_confidence_roi_eligible(
+                                    det,
+                                    "side",
+                                    delta_weight,
+                                ),
                             )
                             self._record_stage(
                                 trace_context,
@@ -1937,35 +2207,55 @@ class VideoProcessor:
 
                         # Side ROI 필터
                         center_x = det.center[0]
-                        side_roi_passed, side_roi_soft_passed = self._side_roi_accepts(
-                            center_x
-                        )
+                        freezer_dual_top_side = self._uses_freezer_dual_top_profile("side")
+                        side_roi_soft_passed = False
+                        if freezer_dual_top_side:
+                            side_roi_passed = self._freezer_lower_roi_accepts(det)
+                        else:
+                            side_roi_passed, side_roi_soft_passed = self._side_roi_accepts(
+                                center_x
+                            )
                         if not side_roi_passed:
                             roi_filtered_count += 1
-                            if center_x > self._side_roi_soft_limit():
+                            if not freezer_dual_top_side and center_x > self._side_roi_soft_limit():
                                 side_roi_soft_filtered_count += 1
                             bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
-                            self._record_roi_filtered_detection(
-                                roi_filtered_stats,
-                                class_id=det.cls,
-                                class_name=det.name,
-                                confidence=det.conf,
-                                center=det.center,
-                                frame_idx=frame_idx,
-                                bbox_size=bbox_size,
-                                roi_x_limit=self.side_roi_x_max,
-                            )
+                            if not freezer_dual_top_side:
+                                self._record_roi_filtered_detection(
+                                    roi_filtered_stats,
+                                    class_id=det.cls,
+                                    class_name=det.name,
+                                    confidence=det.conf,
+                                    center=det.center,
+                                    frame_idx=frame_idx,
+                                    bbox_size=bbox_size,
+                                    roi_x_limit=self.side_roi_x_max,
+                                )
                             self._record_stage(
                                 trace_context,
                                 class_id=det.cls,
                                 class_name=det.name,
-                                stage="roi_filtered",
+                                stage=(
+                                    "freezer_roi_filtered"
+                                    if freezer_dual_top_side
+                                    else "roi_filtered"
+                                ),
                                 camera="side",
                                 confidence=det.conf,
                                 center=det.center,
-                                roi_x_limit=self.side_roi_x_max,
+                                roi_x_limit=None if freezer_dual_top_side else self.side_roi_x_max,
+                                roi_y_limit=(
+                                    self._freezer_roi_y_split()
+                                    if freezer_dual_top_side
+                                    else None
+                                ),
+                                roi_direction=(
+                                    "freezer_lower_half"
+                                    if freezer_dual_top_side
+                                    else None
+                                ),
                             )
-                            if center_x > self._side_roi_soft_limit():
+                            if not freezer_dual_top_side and center_x > self._side_roi_soft_limit():
                                 self._record_stage(
                                     trace_context,
                                     class_id=det.cls,
@@ -1999,9 +2289,9 @@ class VideoProcessor:
                         center = det.center
 
                         bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
-                        dynamic_threshold = max(
-                            float(self.min_motion_displacement),
-                            bbox_size * 0.10,
+                        dynamic_threshold = self._motion_threshold_for_detection(
+                            "side",
+                            bbox_size,
                         )
 
                         if class_id not in side_bbox_trackers:
@@ -2014,7 +2304,7 @@ class VideoProcessor:
 
                         if class_id not in side_pending_votes:
                             side_pending_votes[class_id] = []
-                        side_pending_votes[class_id].append((det.conf, det.name))
+                        side_pending_votes[class_id].append((det.conf, det.name, frame_idx))
                         side_detection_count += 1
 
                 # 진행 로그 (50프레임마다)
@@ -2203,10 +2493,11 @@ class VideoProcessor:
                 )
 
         # 최소 투표 필터링
-        min_vote_count = self.min_vote_count
+        min_vote_count = self._effective_min_vote_count()
+        min_vote_ratio = self._effective_min_vote_ratio()
         filtered_results = [
             r for r in combined_results
-            if r.vote_ratio >= self.min_vote_ratio or r.vote_count >= min_vote_count
+            if r.vote_ratio >= min_vote_ratio or r.vote_count >= min_vote_count
         ]
         filtered_results = self._limit_candidates(filtered_results, "VIDEO-ASYNC")
         threshold_rescue_candidates = self._build_threshold_rescue_candidates(
@@ -2273,7 +2564,7 @@ class VideoProcessor:
     def _apply_motion_filter_and_votes(
         self,
         camera_type: str,
-        pending_votes: Dict[int, List[Tuple[float, str]]],
+        pending_votes: Dict[int, List[Tuple[float, str, int]]],
         bbox_trackers: Dict[int, BboxTracker],
         ensemble: VotingEnsemble,
         trace_context: Optional[TriggerTraceContext] = None,
@@ -2295,25 +2586,41 @@ class VideoProcessor:
 
         for class_id, votes in pending_votes.items():
             tracker = bbox_trackers.get(class_id)
+            normalized_votes: List[Tuple[float, str, int]] = []
+            for idx, vote in enumerate(votes):
+                if len(vote) >= 3:
+                    conf, class_name, frame_idx = vote[0], vote[1], vote[2]
+                else:
+                    conf, class_name = vote[0], vote[1]
+                    frame_idx = idx
+                normalized_votes.append((conf, class_name, frame_idx))
 
             has_motion = True
-            if self.motion_filter_enabled and tracker is not None:
-                has_motion = tracker.has_motion(self.min_motion_displacement)
+            motion_required = self.motion_filter_enabled or self._is_freezer_mode()
+            if motion_required and tracker is not None:
+                has_motion = tracker.has_motion(self._freezer_motion_floor())
 
             if has_motion:
-                for conf, class_name in votes:
+                frame_instance_counts: Dict[int, int] = {}
+                for _, _, frame_idx in normalized_votes:
+                    frame_instance_counts[frame_idx] = (
+                        frame_instance_counts.get(frame_idx, 0) + 1
+                    )
+                instance_count_hint = max(frame_instance_counts.values(), default=1)
+                for conf, class_name, _ in normalized_votes:
                     ensemble.add_vote(
                         class_id=class_id,
                         confidence=conf,
                         class_name=class_name,
+                        instance_count=instance_count_hint,
                     )
                 self._record_stage(
                     trace_context,
                     class_id=class_id,
-                    class_name=votes[0][1] if votes else "",
+                    class_name=normalized_votes[0][1] if normalized_votes else "",
                     stage="motion_passed",
                     camera=camera_type,
-                    amount=len(votes),
+                    amount=len(normalized_votes),
                 )
                 motion_passed_count += 1
 
@@ -2329,10 +2636,10 @@ class VideoProcessor:
                 self._record_stage(
                     trace_context,
                     class_id=class_id,
-                    class_name=votes[0][1] if votes else "",
+                    class_name=normalized_votes[0][1] if normalized_votes else "",
                     stage="motion_filtered",
                     camera=camera_type,
-                    amount=len(votes),
+                    amount=len(normalized_votes),
                 )
                 if tracker:
                     threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement
@@ -2397,7 +2704,7 @@ class VideoProcessor:
 
         # Buffer votes until motion filtering decides whether to keep them.
         # class_id -> list of (confidence, class_name) tuples
-        pending_votes: Dict[int, List[Tuple[float, str]]] = {}
+        pending_votes: Dict[int, List[Tuple[float, str, int]]] = {}
 
         # Use factory to get appropriate extractor (ffmpeg or cv2 fallback)
         # v4.6: camera_type 전달하여 카메라별 gamma/contrast 적용
@@ -2457,11 +2764,11 @@ class VideoProcessor:
                 if det.conf < self._threshold_for_camera(camera_type):
                     threshold_filtered_count += 1
                     bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
-                    roi_eligible = True
-                    if camera_type == "top":
-                        roi_eligible, _ = self._top_roi_accepts(det, delta_weight)
-                    if camera_type == "side":
-                        roi_eligible = det.center[0] <= self.side_roi_x_max
+                    roi_eligible = self._low_confidence_roi_eligible(
+                        det,
+                        camera_type,
+                        delta_weight,
+                    )
                     if low_confidence_stats is not None:
                         self._record_low_confidence_detection(
                             low_confidence_stats,
@@ -2493,29 +2800,39 @@ class VideoProcessor:
                 )
 
                 # Top camera ROI changes by weight direction.
-                if camera_type == "top":
-                    top_roi_passed, top_roi_direction = self._top_roi_accepts(
-                        det,
-                        delta_weight,
-                    )
+                if camera_type == "top" or self._uses_freezer_dual_top_profile(camera_type):
+                    if self._uses_freezer_dual_top_profile(camera_type):
+                        top_roi_passed = self._freezer_lower_roi_accepts(det)
+                        top_roi_direction = "freezer_lower_half"
+                        top_roi_y_limit = self._freezer_roi_y_split()
+                    else:
+                        top_roi_passed, top_roi_direction = self._top_roi_accepts(
+                            det,
+                            delta_weight,
+                        )
+                        top_roi_y_limit = self.top_roi_y_split
                     if not top_roi_passed:
                         roi_filtered_count += 1
                         self._record_stage(
                             trace_context,
                             class_id=det.cls,
                             class_name=det.name,
-                            stage="roi_filtered",
+                            stage=(
+                                "freezer_roi_filtered"
+                                if top_roi_direction == "freezer_lower_half"
+                                else "roi_filtered"
+                            ),
                             camera=camera_type,
                             confidence=det.conf,
                             center=det.center,
-                            roi_y_limit=self.top_roi_y_split,
+                            roi_y_limit=top_roi_y_limit,
                             roi_direction=top_roi_direction,
                         )
                         continue
 
                 # Side 카메라 ROI 필터: 왼쪽 영역만 허용
                 # bbox 중심점이 오른쪽 영역(> side_roi_x_max)에 있으면 제외
-                if camera_type == "side":
+                if camera_type == "side" and not self._uses_freezer_dual_top_profile(camera_type):
                     center_x = det.center[0]
                     side_roi_passed, side_roi_soft_passed = self._side_roi_accepts(
                         center_x
@@ -2586,9 +2903,9 @@ class VideoProcessor:
                 bbox_height = det.y2 - det.y1
                 bbox_size = max(bbox_width, bbox_height)
                 # Dynamic threshold: 10% of bbox size, floored by motion config.
-                dynamic_threshold = max(
-                    float(self.min_motion_displacement),
-                    bbox_size * 0.10,
+                dynamic_threshold = self._motion_threshold_for_detection(
+                    camera_type,
+                    bbox_size,
                 )
 
                 # Update bbox tracker
@@ -2604,7 +2921,7 @@ class VideoProcessor:
                 # Store vote for later (will be applied after motion filtering)
                 if class_id not in pending_votes:
                     pending_votes[class_id] = []
-                pending_votes[class_id].append((det.conf, det.name))
+                pending_votes[class_id].append((det.conf, det.name, frame_count - 1))
 
                 detection_count += 1
 
@@ -2625,18 +2942,25 @@ class VideoProcessor:
         for class_id, votes in pending_votes.items():
             tracker = bbox_trackers.get(class_id)
 
-            # Check motion
             has_motion = True
-            if self.motion_filter_enabled and tracker is not None:
-                has_motion = tracker.has_motion(self.min_motion_displacement)
+            motion_required = self.motion_filter_enabled or self._is_freezer_mode()
+            if motion_required and tracker is not None:
+                has_motion = tracker.has_motion(self._freezer_motion_floor())
 
             if has_motion:
                 # Add all votes for this class
-                for conf, class_name in votes:
+                frame_instance_counts: Dict[int, int] = {}
+                for _, _, frame_idx in votes:
+                    frame_instance_counts[frame_idx] = (
+                        frame_instance_counts.get(frame_idx, 0) + 1
+                    )
+                instance_count_hint = max(frame_instance_counts.values(), default=1)
+                for conf, class_name, _ in votes:
                     ensemble.add_vote(
                         class_id=class_id,
                         confidence=conf,
                         class_name=class_name,
+                        instance_count=instance_count_hint,
                     )
                 self._record_stage(
                     trace_context,

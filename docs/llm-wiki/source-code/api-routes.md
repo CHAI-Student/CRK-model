@@ -33,6 +33,9 @@ polling surface.
 
 - Validates video paths and loadcell payload shape.
 - Computes/analyzes weight delta through shared loadcell helpers.
+- Uses `/trigger.loadcells` as the effective loadcell payload for every
+  cabinet type. `global_loadcells` is accepted only as a deprecated
+  compatibility field and does not change decision input.
 - Creates a `TriggerTraceContext`.
 - Uses `TriggerService` when available; fallback route still performs video,
   decision, and session storage so the behavior stays weight-aware.
@@ -45,9 +48,15 @@ polling surface.
 ## `/api/judge/multi-zone` Behavior
 
 - Accepts object-form or array-form products.
-- Stores product snapshots in `ActiveProductStore`. Valid stock-positive,
-  positive-weight payloads update both current and last-valid snapshots; CLOSE
-  cleanup clears current data while preserving the bounded last-valid fallback.
+- Stores product snapshots in `ActiveProductStore`. Stock-positive payloads
+  need an engine class-name key so the store can match it to the loaded YOLO
+  engine class names. Official input is `product_eng_name`; during migration,
+  engine-matching `name` and legacy `product_name` are accepted after
+  `product_eng_name`. `trainingidx`, `yolo_class_id`, and `yolo_class_name`
+  are accepted for API compatibility but ignored for active-product class
+  identity. Valid stock-positive, positive-weight payloads update both current
+  and last-valid snapshots; CLOSE cleanup clears current data while preserving
+  the bounded last-valid fallback.
 - Interprets `session_id` as door state:
   `OPEN`, `CLOSE`, `null` polling, `zone_...` lookup, or legacy device id.
 - Handles close debounce through `DoorSessionStore.handle_close_signal()`.

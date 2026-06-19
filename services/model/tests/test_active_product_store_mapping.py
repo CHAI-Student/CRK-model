@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 
-def test_active_product_store_accepts_direct_yolo_class_id_and_name():
+def test_active_product_store_uses_product_eng_name_and_ignores_direct_fields():
     from model_service.session.active_product_store import ActiveProductStore
 
     store = ActiveProductStore(
@@ -17,7 +17,8 @@ def test_active_product_store_accepts_direct_yolo_class_id_and_name():
             {
                 "product_idx": "P31",
                 "product_name": "Korean display name",
-                "yolo_class_id": 31,
+                "product_eng_name": "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                "yolo_class_id": 9999,
                 "sale_price": 1800,
                 "product_weight": "523",
                 "stock_qty": 3,
@@ -25,7 +26,8 @@ def test_active_product_store_accepts_direct_yolo_class_id_and_name():
             {
                 "product_idx": "P96",
                 "product_name": "Another display name",
-                "yolo_class_name": "BAG_JAYEONLU_MOIST_SWEET_CHESTNUT_80G",
+                "product_eng_name": "BAG_JAYEONLU_MOIST_SWEET_CHESTNUT_80G",
+                "yolo_class_name": "STALE_CLASS_NAME",
                 "sale_price": 2500,
                 "product_weight": "80",
                 "stock_qty": 0,
@@ -38,12 +40,13 @@ def test_active_product_store_accepts_direct_yolo_class_id_and_name():
     assert result.allowed_products == 1
     assert result.zero_stock_products == 1
     assert result.unmapped_names == []
+    assert result.invalid_class_id_total == 0
     assert store.get_allowed_class_ids() == [31]
     assert store.get_by_yolo_class_id(31).product_name == "Korean display name"
     assert store.get_by_yolo_class_id(96).stock_qty == 0
 
 
-def test_active_product_store_node_first_accepts_trainingidx_without_name_mapping():
+def test_active_product_store_rejects_trainingidx_without_product_eng_name():
     from model_service.session.active_product_store import ActiveProductStore
 
     store = ActiveProductStore(
@@ -64,18 +67,18 @@ def test_active_product_store_node_first_accepts_trainingidx_without_name_mappin
         ]
     )
 
-    assert result.mapped_products == 1
-    assert result.unmapped_names == []
-    assert store.get_allowed_class_ids() == [44]
-    assert store.get_by_yolo_class_id(44).product_name == "Store display name"
+    assert result.mapped_products == 0
+    assert result.unmapped_names == ["Store display name"]
+    assert store.get_allowed_class_ids() == []
 
 
-def test_active_product_store_node_first_rejects_missing_class_id_without_name_fallback():
+def test_active_product_store_uses_legacy_product_name_engine_match():
     from model_service.session.active_product_store import ActiveProductStore
 
     store = ActiveProductStore(
         yolo_name_to_id={"PRODUCT_A": 1},
         source_policy="node_first",
+        product_name_fallback_enabled=False,
     )
 
     result = store.set_products(
@@ -90,12 +93,230 @@ def test_active_product_store_node_first_rejects_missing_class_id_without_name_f
         ]
     )
 
+    assert result.mapped_products == 1
+    assert result.unmapped_names == []
+    assert store.get_allowed_class_ids() == [1]
+    assert store.get_by_yolo_class_id(1).class_id_source == "product_name_engine_legacy"
+
+
+def test_active_product_store_node_first_uses_product_eng_name_engine_match():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"CAN_LOTTE_HOT6_THE_KING_RUSH_355ML": 8},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P8",
+                "product_name": "\ud55c\uae00 \ud45c\uc2dc\uba85",
+                "product_eng_name": "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                "sale_price": 1800,
+                "product_weight": "355",
+                "stock_qty": 2,
+            }
+        ]
+    )
+
+    assert result.mapped_products == 1
+    assert result.unmapped_names == []
+    assert store.get_allowed_class_ids() == [8]
+    product = store.get_by_yolo_class_id(8)
+    assert product.product_name == "\ud55c\uae00 \ud45c\uc2dc\uba85"
+    assert product.product_eng_name == "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML"
+    assert product.product_idx == "P8"
+    assert product.class_id_source == "product_eng_name_engine"
+
+
+def test_active_product_store_uses_name_compat_engine_match():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G": 3},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P3",
+                "product_name": "비비고 청양고추 찐만두",
+                "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                "sale_price": 5000,
+                "product_weight": "223",
+                "stock_qty": 100,
+            }
+        ]
+    )
+
+    product = store.get_by_yolo_class_id(3)
+
+    assert result.mapped_products == 1
+    assert result.unmapped_names == []
+    assert store.get_allowed_class_ids() == [3]
+    assert product.product_name == "비비고 청양고추 찐만두"
+    assert product.product_eng_name == ""
+    assert product.class_id_source == "name_engine_compat"
+
+
+def test_active_product_store_product_eng_name_wins_over_name_compat():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"PRODUCT_A": 1, "PRODUCT_B": 2},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P1",
+                "product_name": "Display name",
+                "product_eng_name": "PRODUCT_A",
+                "name": "PRODUCT_B",
+                "sale_price": 1000,
+                "product_weight": "100",
+                "stock_qty": 2,
+            }
+        ]
+    )
+
+    assert result.mapped_products == 1
+    assert store.get_allowed_class_ids() == [1]
+    assert store.get_by_yolo_class_id(1).class_id_source == "product_eng_name_engine"
+    assert store.get_by_yolo_class_id(2) is None
+
+
+def test_active_product_store_product_eng_name_mapping_ignores_changed_product_idx():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"BAG_NONGSHIM_POSTIC_84G": 70},
+        source_policy="node_first",
+    )
+
+    first = store.set_products(
+        [
+            {
+                "product_idx": "OLD_PRODUCT_IDX",
+                "product_name": "\ub18d\uc2ec \ud3ec\uc2a4\ud2f1",
+                "product_eng_name": "BAG_NONGSHIM_POSTIC_84G",
+                "sale_price": 500,
+                "product_weight": "84",
+                "stock_qty": 100,
+            }
+        ]
+    )
+    second = store.set_products(
+        [
+            {
+                "product_idx": "NEW_PRODUCT_IDX",
+                "product_name": "\ub18d\uc2ec \ud3ec\uc2a4\ud2f1",
+                "product_eng_name": "BAG_NONGSHIM_POSTIC_84G",
+                "sale_price": 500,
+                "product_weight": "84",
+                "stock_qty": 100,
+            }
+        ]
+    )
+
+    product = store.get_by_yolo_class_id(70)
+
+    assert first.mapped_products == 1
+    assert second.mapped_products == 1
+    assert store.get_allowed_class_ids() == [70]
+    assert product.product_idx == "NEW_PRODUCT_IDX"
+    assert product.product_name == "\ub18d\uc2ec \ud3ec\uc2a4\ud2f1"
+    assert product.product_eng_name == "BAG_NONGSHIM_POSTIC_84G"
+
+
+def test_active_product_store_rejects_eng_name_alias():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"BAG_BINGGRAE_KKOTCHIGELANG_75G": 3},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P3",
+                "product_name": "Display name",
+                "eng_name": "BAG_BINGGRAE_KKOTCHIGELANG_75G",
+                "sale_price": 1500,
+                "product_weight": "75",
+                "stock_qty": 2,
+            }
+        ]
+    )
+
     assert result.mapped_products == 0
-    assert result.unmapped_names == ["PRODUCT_A"]
+    assert result.unmapped_names == ["Display name"]
     assert store.get_allowed_class_ids() == []
+    assert store.get_by_yolo_class_id(3) is None
 
 
-def test_active_product_store_static_mapping_compat_keeps_product_name_fallback():
+def test_active_product_store_rejects_product_eng_name_camel_case_alias():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"BAG_BINGGRAE_KKOTCHIGELANG_75G": 3},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P3",
+                "product_name": "Display name",
+                "productEngName": "BAG_BINGGRAE_KKOTCHIGELANG_75G",
+                "sale_price": 1500,
+                "product_weight": "75",
+                "stock_qty": 2,
+            }
+        ]
+    )
+
+    assert result.mapped_products == 0
+    assert result.unmapped_names == ["Display name"]
+    assert store.get_allowed_class_ids() == []
+    assert store.get_by_yolo_class_id(3) is None
+
+
+def test_active_product_store_product_eng_name_overrides_invalid_direct_class_id():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"CAN_LOTTE_HOT6_THE_KING_RUSH_355ML": 8},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P8",
+                "product_name": "핫식스",
+                "product_eng_name": "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                "trainingidx": "9999",
+                "sale_price": 1800,
+                "product_weight": "355",
+                "stock_qty": 2,
+            }
+        ]
+    )
+
+    assert result.mapped_products == 1
+    assert result.invalid_class_id_total == 0
+    assert result.invalid_class_ids == []
+    assert result.unmapped_names == []
+    assert store.get_allowed_class_ids() == [8]
+    assert store.get_by_yolo_class_id(8).class_id_source == "product_eng_name_engine"
+
+
+def test_active_product_store_static_mapping_compat_still_uses_engine_product_eng_name():
     from model_service.session.active_product_store import ActiveProductStore
 
     store = ActiveProductStore(
@@ -107,7 +328,8 @@ def test_active_product_store_static_mapping_compat_keeps_product_name_fallback(
         [
             {
                 "product_idx": "P1",
-                "product_name": "PRODUCT_A",
+                "product_name": "\ud55c\uae00 \uc0c1\ud488\uba85",
+                "product_eng_name": "PRODUCT_A",
                 "sale_price": 1000,
                 "product_weight": "100",
                 "stock_qty": 2,
@@ -117,6 +339,69 @@ def test_active_product_store_static_mapping_compat_keeps_product_name_fallback(
 
     assert result.mapped_products == 1
     assert store.get_allowed_class_ids() == [1]
+
+
+def test_active_product_store_does_not_use_korean_product_name_as_class_key():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"PRODUCT_A": 1},
+        source_policy="node_first",
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P1",
+                "product_name": "\ud55c\uae00 \uc0c1\ud488\uba85",
+                "sale_price": 1000,
+                "product_weight": "100",
+                "stock_qty": 2,
+            }
+        ]
+    )
+
+    assert result.mapped_products == 0
+    assert result.unmapped_names == ["\ud55c\uae00 \uc0c1\ud488\uba85"]
+    assert store.get_allowed_class_ids() == []
+
+
+def test_active_product_store_static_mapping_does_not_override_engine_class_name():
+    from model_service.session.active_product_store import ActiveProductStore
+
+    store = ActiveProductStore(
+        yolo_name_to_id={"BAG_BINGGRAE_KKOTCHIGELANG_75G": 3},
+        source_policy="node_first",
+    )
+    loaded = store.load_yolo_mapping(
+        {
+            "mappings": [
+                {
+                    "yolo_class_id": 74,
+                    "yolo_class_name": "BAG_BINGGRAE_KKOTCHIGELANG_75G",
+                }
+            ]
+        }
+    )
+
+    result = store.set_products(
+        [
+            {
+                "product_idx": "P-FRESH",
+                "product_name": "\ube59\uadf8\ub808 \uaf43\uac8c\ub791",
+                "product_eng_name": "BAG_BINGGRAE_KKOTCHIGELANG_75G",
+                "sale_price": 500,
+                "product_weight": "75",
+                "stock_qty": 100,
+            }
+        ]
+    )
+
+    assert loaded == 1
+    assert result.mapped_products == 1
+    assert result.invalid_class_id_total == 0
+    assert store.get_allowed_class_ids() == [3]
+    assert store.get_by_yolo_class_id(3).class_id_source == "product_eng_name_engine"
 
 
 def test_active_product_store_alias_maps_jayeonlu_jayeonru_variant():
@@ -133,7 +418,8 @@ def test_active_product_store_alias_maps_jayeonlu_jayeonru_variant():
         [
             {
                 "product_idx": "P96",
-                "product_name": "BAG_JAYEONRU_MOIST_SWEET_CHESTNUT_80G",
+                "product_name": "\uc790\uc5f0\ub8e8 \ub9db\uad70\ubc24",
+                "product_eng_name": "BAG_JAYEONRU_MOIST_SWEET_CHESTNUT_80G",
                 "sale_price": 2500,
                 "product_weight": "80",
                 "stock_qty": 1,
@@ -167,14 +453,16 @@ def test_active_product_store_stats_expose_mapping_diagnostics():
         [
             {
                 "product_idx": "P1",
-                "product_name": "PRODUCT_A",
+                "product_name": "\ud45c\uc2dc\uba85 A",
+                "product_eng_name": "PRODUCT_A",
                 "sale_price": 1000,
                 "product_weight": "100",
                 "stock_qty": 0,
             },
             {
                 "product_idx": "P2",
-                "product_name": "UNKNOWN_PRODUCT",
+                "product_name": "\uc54c \uc218 \uc5c6\ub294 \uc0c1\ud488",
+                "product_eng_name": "UNKNOWN_PRODUCT",
                 "sale_price": 1000,
                 "product_weight": "100",
                 "stock_qty": 5,
@@ -202,6 +490,7 @@ def test_active_product_store_preserves_valid_snapshot_on_invalid_overwrite(capl
             {
                 "product_idx": "P1",
                 "product_name": "PRODUCT_A",
+                "product_eng_name": "PRODUCT_A",
                 "yolo_class_id": 1,
                 "sale_price": 1000,
                 "product_weight": "100",
@@ -215,6 +504,7 @@ def test_active_product_store_preserves_valid_snapshot_on_invalid_overwrite(capl
             {
                 "product_idx": "P2",
                 "product_name": "PRODUCT_B",
+                "product_eng_name": "PRODUCT_B",
                 "yolo_class_id": 2,
                 "sale_price": 1200,
                 "product_weight": "0",
@@ -244,6 +534,7 @@ def test_active_product_store_uses_last_valid_snapshot_after_clear():
             {
                 "product_idx": "P1",
                 "product_name": "PRODUCT_A",
+                "product_eng_name": "PRODUCT_A",
                 "yolo_class_id": 1,
                 "sale_price": 1000,
                 "product_weight": "100",
@@ -273,6 +564,7 @@ def test_active_product_store_invalid_payload_after_clear_keeps_last_valid_fallb
             {
                 "product_idx": "P1",
                 "product_name": "PRODUCT_A",
+                "product_eng_name": "PRODUCT_A",
                 "yolo_class_id": 1,
                 "sale_price": 1000,
                 "product_weight": "100",
@@ -287,6 +579,7 @@ def test_active_product_store_invalid_payload_after_clear_keeps_last_valid_fallb
             {
                 "product_idx": "P2",
                 "product_name": "PRODUCT_B",
+                "product_eng_name": "PRODUCT_B",
                 "yolo_class_id": 2,
                 "sale_price": 1200,
                 "product_weight": "0",
@@ -316,6 +609,7 @@ def test_active_product_store_last_valid_fallback_expires(monkeypatch):
             {
                 "product_idx": "P1",
                 "product_name": "PRODUCT_A",
+                "product_eng_name": "PRODUCT_A",
                 "yolo_class_id": 1,
                 "sale_price": 1000,
                 "product_weight": "100",
@@ -372,6 +666,7 @@ def test_active_product_store_accepts_product_weight_aliases():
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "productWeight": 520,
@@ -395,6 +690,7 @@ def test_active_product_store_repairs_zero_weight_from_current_snapshot():
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "product_weight": "520",
@@ -408,6 +704,7 @@ def test_active_product_store_repairs_zero_weight_from_current_snapshot():
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "product_weight": "0",
@@ -430,6 +727,7 @@ def test_active_product_store_repairs_zero_weight_from_last_valid_snapshot():
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "product_weight": "520",
@@ -444,6 +742,7 @@ def test_active_product_store_repairs_zero_weight_from_last_valid_snapshot():
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "product_weight": "0",
@@ -466,6 +765,7 @@ def test_active_product_store_current_zero_weight_snapshot_wins_for_vision_allow
             {
                 "product_idx": "P1",
                 "product_name": "PRODUCT_A",
+                "product_eng_name": "PRODUCT_A",
                 "yolo_class_id": 1,
                 "sale_price": 1000,
                 "product_weight": "100",
@@ -479,6 +779,7 @@ def test_active_product_store_current_zero_weight_snapshot_wins_for_vision_allow
             {
                 "product_idx": "P2",
                 "product_name": "PRODUCT_B",
+                "product_eng_name": "PRODUCT_B",
                 "yolo_class_id": 2,
                 "sale_price": 1200,
                 "product_weight": "0",
@@ -505,6 +806,7 @@ def test_active_product_store_node_first_does_not_use_known_weight_fallback():
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "product_weight": "0",
@@ -532,6 +834,7 @@ def test_active_product_store_repairs_class_44_zero_weight_with_known_fallback()
             {
                 "product_idx": "P44",
                 "product_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                "product_eng_name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
                 "yolo_class_id": 44,
                 "sale_price": 1800,
                 "product_weight": "0",
@@ -557,6 +860,7 @@ def test_active_product_store_does_not_repair_unknown_zero_weight_without_histor
             {
                 "product_idx": "P1",
                 "product_name": "PRODUCT_A",
+                "product_eng_name": "PRODUCT_A",
                 "yolo_class_id": 1,
                 "sale_price": 1000,
                 "product_weight": "0",

@@ -57,12 +57,17 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   motion-filter fail-closed behavior, low-weight video diagnostic-only traces,
   unstable removal waiting before queue/video/engine, and runtime vision config
   fields.
+  Recent freezer coverage verifies that zone-sliced `loadcells` remain the
+  effective payload, even when the deprecated compatibility field is present,
+  and traces retain `loadcell_scope=zone`.
 - [test_video_processor_thresholds.py](../../../services/model/tests/test_video_processor_thresholds.py):
   thresholds, top-k, frame stride, 480-left-crop-aligned ROI defaults, top/side
   ROI filtering, side ROI hard `center_x <= 400` plus `+5px` soft-band Pepsi
   promotion, far-right Trevi filtering, Bibigo/Pepero/Letsbe candidate
   promotion regressions, stage counts, diagnostic trace, threshold/ROI/no-motion
   rescue, and side-ROI-conflicted threshold rescue rejection.
+  Freezer tests cover dual-top lower-half ROI filtering, freezer rescue
+  suppression, and same-frame multi-bbox `instance_count_hint`.
 - [test_yolo_wrapper_geometry.py](../../../services/model/tests/test_yolo_wrapper_geometry.py):
   default left-crop and optional crop/letterbox geometry.
 - [test_voting_ensemble.py](../../../services/model/tests/test_voting_ensemble.py):
@@ -106,6 +111,10 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   `last_unpaired_negative_segment` as a standalone forced fallback target, and
   no-charge `UNCERTAIN` results when a successful branch does not explain the
   full stable removal delta.
+  Freezer decision tests cover confidence-first single selection outside the
+  normal weight tolerance, weight residual tie-breaks only inside the
+  confidence band, candidate-only identity, multi-kind vision evidence, and
+  same-class counts gated by `instance_count_hint`.
 - [test_session_store_lifecycle.py](../../../services/model/tests/test_session_store_lifecycle.py):
   normal `processing -> complete/waiting/error` session saves do not emit
   `Session overwritten`, while replacing an already completed session still
@@ -147,6 +156,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   `test_yolo_wrapper_geometry.py`, `test_voting_ensemble.py`.
 - Decision/weight change: `test_decision_engine.py`,
   `test_strict_weight_matcher.py`, `test_scenario_matrix_contract.py`.
+- Freezer policy change: `test_frame_trace.py`,
+  `test_video_processor_thresholds.py`, and `test_decision_engine.py`.
 - Session/return change: `test_product_aggregator.py`,
   `test_cross_zone_return.py`, `test_multi_zone_summary.py`.
 - Jetson bootstrap change: `test_runtime_env.py`.
