@@ -1006,7 +1006,11 @@ class VideoProcessor:
     ) -> List[VoteResult]:
         """Reduce freezer dual-top removal candidates to handled-item evidence."""
         votes = list(vote_results or [])
-        if not cls._freezer_handled_filter_enabled(delta_weight) or len(votes) <= 1:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        has_stage_evidence = isinstance(stage_counts, dict) and bool(stage_counts)
+        if not cls._freezer_handled_filter_enabled(delta_weight) or (
+            len(votes) <= 1 and not has_stage_evidence
+        ):
             return votes
 
         target_weight = abs(float(delta_weight))
@@ -1067,6 +1071,7 @@ class VideoProcessor:
             camera_exit_counts = cls._freezer_stage_camera_exit_counts(stage_entry)
             source = str(getattr(vote, "source", "vision") or "vision")
             stage_only = source == "freezer_stage_exit_path"
+            identity_supported = source != "vision" or confidence >= 0.3
             dual_camera_exit_path = len(camera_exit_counts) >= 2
             roi_x_avg, roi_y_avg = cls._freezer_stage_center(stage_entry)
             if (
@@ -1110,6 +1115,7 @@ class VideoProcessor:
                     "roi_y_avg": roi_y_avg,
                     "source": source,
                     "stage_only": stage_only,
+                    "identity_supported": identity_supported,
                     "source_priority": 1 if stage_only else 0,
                     "tier": tier,
                     "reason": reason,
@@ -1122,6 +1128,7 @@ class VideoProcessor:
                 handled_pool,
                 key=lambda item: (
                     int(item["tier"]),
+                    int(not item["identity_supported"]),
                     int(item["source_priority"]),
                     -int(item["freezer_exit_path_votes"]),
                     float(item["residual"]),
@@ -1161,6 +1168,7 @@ class VideoProcessor:
                 "freezerExitPathVotes": int(item["freezer_exit_path_votes"]),
                 "source": str(item["source"]),
                 "stageOnly": bool(item["stage_only"]),
+                "identitySupported": bool(item["identity_supported"]),
                 "cameraExitCounts": dict(item["camera_exit_counts"]),
                 "dualCameraExitPath": bool(item["dual_camera_exit_path"]),
                 "roiXAvg": (
@@ -1229,6 +1237,7 @@ class VideoProcessor:
                 ),
                 "source": getattr(selected, "source", "vision"),
                 "stageOnly": bool(selected_item["stage_only"]),
+                "identitySupported": bool(selected_item["identity_supported"]),
                 "unit_weight": round(unit_weight, 1) if unit_weight is not None else None,
                 "weight_residual": round(residual, 1),
                 "instance_count_hint": supported_count,

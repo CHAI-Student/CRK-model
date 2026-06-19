@@ -1140,6 +1140,101 @@ def test_video_processor_freezer_stage_only_rescues_yomamte_dual_camera(
     }
 
 
+def test_video_processor_freezer_stage_only_replaces_low_confidence_melona(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_k", 5)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-yomamte-low-confidence-melona",
+        zone=2,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "raw": 60,
+            "raw_max_confidence": 0.8223,
+            "threshold_passed": 13,
+            "threshold_passed_max_confidence": 0.8223,
+            "freezer_roi_filtered": 10,
+            "freezerExitPathVotes": 10,
+            "freezer_roi_filtered_max_confidence": 0.7808,
+            "unit_weight_g": 87.0,
+            "roi_x_avg": 420.9,
+            "roi_y_avg": 69.5,
+            "cameras": {
+                "top": {
+                    "raw": 40,
+                    "threshold_passed": 11,
+                    "freezer_roi_filtered": 10,
+                    "freezerExitPathVotes": 10,
+                    "raw_max_confidence": 0.8223,
+                },
+                "side": {"raw": 20, "threshold_passed": 2, "raw_max_confidence": 0.7047},
+            },
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "raw": 78,
+            "raw_max_confidence": 0.7111,
+            "threshold_passed": 13,
+            "freezer_roi_filtered": 9,
+            "freezerExitPathVotes": 9,
+            "unit_weight_g": 93.0,
+            "roi_x_avg": 441.8,
+            "roi_y_avg": 119.4,
+            "cameras": {
+                "top": {"freezer_roi_filtered": 7, "freezerExitPathVotes": 7},
+                "side": {"freezer_roi_filtered": 2, "freezerExitPathVotes": 2},
+            },
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                4,
+                0.5983,
+                0.2411,
+                weighted_confidence=0.2411,
+                top_detected=True,
+                top_vote_count=4,
+                freezer_exit_path_votes=9,
+            )
+        ],
+        delta_weight=-94.7,
+        product_weights={44: 93.0, 30: 87.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [30]
+    assert handled[0].source == "freezer_stage_exit_path"
+    assert diagnostics["selected"]["source"] == "freezer_stage_exit_path"
+    assert diagnostics["selected"]["identitySupported"] is True
+    melona = next(
+        item for item in diagnostics["considered"] if item["class_id"] == 44
+    )
+    assert melona["identitySupported"] is False
+
+
 @pytest.mark.asyncio
 async def test_async_video_processor_top_roi_return_keeps_lower_region(
     monkeypatch: pytest.MonkeyPatch,
