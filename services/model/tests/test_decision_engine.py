@@ -503,6 +503,28 @@ def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
     monkeypatch.setattr(config.vision, "top_k", 6)
     trace = FakeLoadcellTrace({})
     trace.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "raw": 31,
+            "raw_max_confidence": 0.5891,
+            "threshold_passed": 8,
+            "threshold_passed_max_confidence": 0.5891,
+            "freezer_roi_filtered": 8,
+            "freezerExitPathVotes": 8,
+            "freezer_roi_filtered_max_confidence": 0.5891,
+            "roi_x_avg": 463.0,
+            "roi_y_avg": 128.7,
+            "cameras": {
+                "top": {
+                    "threshold_passed": 8,
+                    "freezer_roi_filtered": 8,
+                    "freezerExitPathVotes": 8,
+                    "raw_max_confidence": 0.5891,
+                },
+                "side": {"raw": 6, "raw_max_confidence": 0.1214},
+            },
+        },
         "46": {
             "class_id": 46,
             "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
@@ -541,6 +563,7 @@ def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
             make_active_product(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", weight=185.0),
             make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=93.0),
             make_active_product(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", weight=154.0),
+            make_active_product(30, "BOX_BINGGRAE_YOMAMTE_150ML", weight=87.0),
             make_active_product(
                 42,
                 "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
@@ -557,6 +580,128 @@ def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
     assert diagnostics["selected"][0]["freezerExitPathVotes"] == 13
+
+
+def test_freezer_vision_first_rescues_yomamte_stage_only_dual_camera(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "top_k", 5)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "raw": 47,
+            "raw_max_confidence": 0.5761,
+            "threshold_passed": 11,
+            "threshold_passed_max_confidence": 0.5761,
+            "freezer_roi_filtered": 11,
+            "freezerExitPathVotes": 11,
+            "freezer_roi_filtered_max_confidence": 0.5761,
+            "roi_x_avg": 369.8,
+            "roi_y_avg": 73.0,
+            "cameras": {
+                "top": {
+                    "raw": 34,
+                    "threshold_passed": 10,
+                    "freezer_roi_filtered": 10,
+                    "freezerExitPathVotes": 10,
+                    "raw_max_confidence": 0.5761,
+                },
+                "side": {
+                    "raw": 13,
+                    "threshold_passed": 1,
+                    "freezer_roi_filtered": 1,
+                    "freezerExitPathVotes": 1,
+                    "raw_max_confidence": 0.5291,
+                },
+            },
+        },
+        "42": {
+            "class_id": 42,
+            "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+            "raw": 57,
+            "raw_max_confidence": 0.6808,
+            "threshold_passed": 15,
+            "threshold_passed_max_confidence": 0.6808,
+            "freezer_roi_filtered": 14,
+            "freezerExitPathVotes": 14,
+            "freezer_roi_filtered_max_confidence": 0.6808,
+            "roi_x_avg": 380.1,
+            "roi_y_avg": 66.9,
+            "cameras": {
+                "top": {
+                    "raw": 50,
+                    "threshold_passed": 14,
+                    "freezer_roi_filtered": 14,
+                    "freezerExitPathVotes": 14,
+                    "raw_max_confidence": 0.6808,
+                },
+                "side": {"raw": 7, "threshold_passed": 1, "raw_max_confidence": 0.335},
+            },
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "raw": 26,
+            "raw_max_confidence": 0.666,
+            "threshold_passed": 8,
+            "freezer_roi_filtered": 5,
+            "freezerExitPathVotes": 5,
+            "roi_x_avg": 438.0,
+            "roi_y_avg": 92.5,
+            "cameras": {
+                "top": {
+                    "threshold_passed": 8,
+                    "freezer_roi_filtered": 5,
+                    "freezerExitPathVotes": 5,
+                    "raw_max_confidence": 0.666,
+                }
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", confidence=1.0),
+            make_candidate(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", confidence=0.7469),
+            make_candidate(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", confidence=0.4317),
+            make_candidate(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", confidence=0.341),
+            make_candidate(44, "STICK_BINGGRAE_MELONA_75ML", confidence=0.153),
+        ],
+        delta_weight=-96.3,
+        active_products=[
+            make_active_product(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", weight=71.0),
+            make_active_product(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", weight=185.0),
+            make_active_product(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", weight=307.0),
+            make_active_product(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", weight=154.0),
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=93.0),
+            make_active_product(30, "BOX_BINGGRAE_YOMAMTE_150ML", weight=87.0),
+            make_active_product(
+                42,
+                "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+                weight=93.0,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (30, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert (
+        diagnostics["reason"]
+        == "freezer_single_ambiguous_dual_camera_stage_exit_path"
+    )
+    assert diagnostics["selected"][0]["source"] == "freezer_stage_exit_path"
+    assert diagnostics["selected"][0]["dualCameraExitPath"] is True
+    assert {item["class_id"] for item in diagnostics["ambiguousCandidates"]} == {
+        30,
+        42,
+        44,
+    }
 
 
 def test_freezer_vision_first_uses_instance_hint_for_same_class_count(monkeypatch):

@@ -958,6 +958,29 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
         sample_export_enabled=False,
     )
     trace_context.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "raw": 31,
+            "raw_max_confidence": 0.5891,
+            "threshold_passed": 8,
+            "threshold_passed_max_confidence": 0.5891,
+            "freezer_roi_filtered": 8,
+            "freezerExitPathVotes": 8,
+            "freezer_roi_filtered_max_confidence": 0.5891,
+            "unit_weight_g": 87.0,
+            "roi_x_avg": 463.0,
+            "roi_y_avg": 128.7,
+            "cameras": {
+                "top": {
+                    "threshold_passed": 8,
+                    "freezer_roi_filtered": 8,
+                    "freezerExitPathVotes": 8,
+                    "raw_max_confidence": 0.5891,
+                },
+                "side": {"raw": 6, "raw_max_confidence": 0.1214},
+            },
+        },
         "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_filtered": 0},
         "44": {
             "class_id": 44,
@@ -981,7 +1004,7 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
             VoteResult(42, "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G", 3, 0.8253, 0.4, weighted_confidence=0.4011),
         ],
         delta_weight=-97.9,
-        product_weights={46: 71.0, 37: 307.0, 13: 185.0, 44: 93.0, 24: 154.0, 42: 93.0},
+        product_weights={46: 71.0, 37: 307.0, 13: 185.0, 44: 93.0, 24: 154.0, 42: 93.0, 30: 87.0},
         trace_context=trace_context,
         log_prefix="TEST",
     )
@@ -990,6 +1013,131 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
     assert [candidate.class_id for candidate in handled] == [42]
     assert diagnostics["reason"] == "weight_gate_exit_path"
     assert diagnostics["selected"]["freezerExitPathVotes"] == 13
+
+
+def test_video_processor_freezer_stage_only_rescues_yomamte_dual_camera(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_k", 5)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-yomamte-stage-only",
+        zone=2,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "raw": 47,
+            "raw_max_confidence": 0.5761,
+            "threshold_passed": 11,
+            "threshold_passed_max_confidence": 0.5761,
+            "freezer_roi_filtered": 11,
+            "freezerExitPathVotes": 11,
+            "freezer_roi_filtered_max_confidence": 0.5761,
+            "unit_weight_g": 87.0,
+            "roi_x_avg": 369.8,
+            "roi_y_avg": 73.0,
+            "cameras": {
+                "top": {
+                    "raw": 34,
+                    "threshold_passed": 10,
+                    "freezer_roi_filtered": 10,
+                    "freezerExitPathVotes": 10,
+                    "raw_max_confidence": 0.5761,
+                },
+                "side": {
+                    "raw": 13,
+                    "threshold_passed": 1,
+                    "freezer_roi_filtered": 1,
+                    "freezerExitPathVotes": 1,
+                    "raw_max_confidence": 0.5291,
+                },
+            },
+        },
+        "42": {
+            "class_id": 42,
+            "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+            "raw": 57,
+            "raw_max_confidence": 0.6808,
+            "threshold_passed": 15,
+            "threshold_passed_max_confidence": 0.6808,
+            "freezer_roi_filtered": 14,
+            "freezerExitPathVotes": 14,
+            "freezer_roi_filtered_max_confidence": 0.6808,
+            "unit_weight_g": 93.0,
+            "roi_x_avg": 380.1,
+            "roi_y_avg": 66.9,
+            "cameras": {
+                "top": {
+                    "raw": 50,
+                    "threshold_passed": 14,
+                    "freezer_roi_filtered": 14,
+                    "freezerExitPathVotes": 14,
+                    "raw_max_confidence": 0.6808,
+                },
+                "side": {"raw": 7, "threshold_passed": 1, "raw_max_confidence": 0.335},
+            },
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "raw": 26,
+            "raw_max_confidence": 0.666,
+            "threshold_passed": 8,
+            "freezer_roi_filtered": 5,
+            "freezerExitPathVotes": 5,
+            "unit_weight_g": 93.0,
+            "roi_x_avg": 438.0,
+            "roi_y_avg": 92.5,
+            "cameras": {
+                "top": {
+                    "threshold_passed": 8,
+                    "freezer_roi_filtered": 5,
+                    "freezerExitPathVotes": 5,
+                    "raw_max_confidence": 0.666,
+                }
+            },
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", 184, 0.8941, 0.82, weighted_confidence=1.0),
+            VoteResult(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", 44, 0.878, 0.75, weighted_confidence=0.7469),
+            VoteResult(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", 118, 0.7849, 0.62, weighted_confidence=0.4317),
+            VoteResult(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", 44, 0.7839, 0.45, weighted_confidence=0.341),
+            VoteResult(44, "STICK_BINGGRAE_MELONA_75ML", 3, 0.666, 0.153, weighted_confidence=0.153),
+        ],
+        delta_weight=-96.3,
+        product_weights={46: 71.0, 13: 185.0, 37: 307.0, 24: 154.0, 44: 93.0, 30: 87.0, 42: 93.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [30]
+    assert handled[0].source == "freezer_stage_exit_path"
+    assert diagnostics["reason"] == "ambiguous_dual_camera_stage_exit_path"
+    assert diagnostics["selected"]["stageOnly"] is True
+    assert diagnostics["selected"]["dualCameraExitPath"] is True
+    assert {item["class_id"] for item in diagnostics["ambiguousCandidates"]} == {
+        30,
+        42,
+        44,
+    }
 
 
 @pytest.mark.asyncio

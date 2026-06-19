@@ -737,6 +737,239 @@ class VideoProcessor:
         entry = stage_counts.get(str(class_id)) or stage_counts.get(class_id)
         return entry if isinstance(entry, dict) else {}
 
+    _FREEZER_AMBIGUOUS_PRODUCT_CLASSES = frozenset({30, 42, 44})
+
+    @staticmethod
+    def _freezer_stage_int(entry: dict[str, Any], *keys: str) -> int:
+        values: list[int] = []
+        for key in keys:
+            try:
+                values.append(int(entry.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                pass
+        return max(values or [0])
+
+    @staticmethod
+    def _freezer_stage_float(entry: dict[str, Any], *keys: str) -> float:
+        values: list[float] = []
+        for key in keys:
+            try:
+                values.append(float(entry.get(key, 0.0) or 0.0))
+            except (TypeError, ValueError):
+                pass
+        return max(values or [0.0])
+
+    @classmethod
+    def _freezer_stage_camera_exit_counts(
+        cls,
+        entry: dict[str, Any],
+    ) -> dict[str, int]:
+        cameras = entry.get("cameras") or {}
+        if not isinstance(cameras, dict):
+            return {}
+
+        exit_counts: dict[str, int] = {}
+        for camera, camera_entry in cameras.items():
+            if not isinstance(camera_entry, dict):
+                continue
+            count = cls._freezer_stage_int(
+                camera_entry,
+                "freezerExitPathVotes",
+                "freezer_exit_path_votes",
+                "freezer_roi_filtered",
+            )
+            if count > 0:
+                exit_counts[str(camera)] = count
+        return exit_counts
+
+    @staticmethod
+    def _freezer_stage_center(
+        entry: dict[str, Any],
+    ) -> tuple[Optional[float], Optional[float]]:
+        try:
+            x_avg = (
+                float(entry["roi_x_avg"])
+                if entry.get("roi_x_avg") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            x_avg = None
+        try:
+            y_avg = (
+                float(entry["roi_y_avg"])
+                if entry.get("roi_y_avg") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            y_avg = None
+        return x_avg, y_avg
+
+    @staticmethod
+    def _freezer_spatially_clustered(
+        first: dict[str, Any],
+        second: dict[str, Any],
+    ) -> bool:
+        if (
+            first.get("roi_x_avg") is None
+            or first.get("roi_y_avg") is None
+            or second.get("roi_x_avg") is None
+            or second.get("roi_y_avg") is None
+        ):
+            return False
+        try:
+            return (
+                abs(float(first["roi_x_avg"]) - float(second["roi_x_avg"])) <= 130.0
+                and abs(float(first["roi_y_avg"]) - float(second["roi_y_avg"])) <= 130.0
+            )
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _freezer_stage_vote_result(
+        cls,
+        *,
+        class_id: int,
+        entry: dict[str, Any],
+        product_weights: Optional[Dict[int, float]],
+        target_weight: float,
+        near_residual_limit: float,
+        min_exit_path_votes: int,
+    ) -> Optional[VoteResult]:
+        exit_path_votes = cls._freezer_stage_int(
+            entry,
+            "freezerExitPathVotes",
+            "freezer_exit_path_votes",
+            "freezer_roi_filtered",
+        )
+        threshold_votes = cls._freezer_stage_int(
+            entry,
+            "threshold_passed",
+            "motion_passed",
+            "raw",
+        )
+        min_stage_votes = max(1, int(config.weight.detected_single_fallback_min_votes))
+        if exit_path_votes < min_exit_path_votes or threshold_votes < min_stage_votes:
+            return None
+
+        unit_weight = cls._freezer_stage_float(entry, "unit_weight_g")
+        if unit_weight <= 0.0 and product_weights is not None:
+            try:
+                unit_weight = float(product_weights.get(class_id, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                unit_weight = 0.0
+        if unit_weight <= 0.0:
+            return None
+
+        residual = abs(target_weight - unit_weight)
+        if residual > near_residual_limit:
+            return None
+
+        stage_confidence = cls._freezer_stage_float(
+            entry,
+            "freezer_roi_filtered_max_confidence",
+            "threshold_passed_max_confidence",
+            "raw_max_confidence",
+        )
+        if stage_confidence < float(config.weight.multi_kind_min_confidence):
+            return None
+
+        cameras = entry.get("cameras") if isinstance(entry.get("cameras"), dict) else {}
+        top_entry = cameras.get("top", {}) if isinstance(cameras, dict) else {}
+        side_entry = cameras.get("side", {}) if isinstance(cameras, dict) else {}
+        if not isinstance(top_entry, dict):
+            top_entry = {}
+        if not isinstance(side_entry, dict):
+            side_entry = {}
+
+        top_confidence = cls._freezer_stage_float(
+            top_entry,
+            "freezer_roi_filtered_max_confidence",
+            "threshold_passed_max_confidence",
+            "raw_max_confidence",
+        )
+        side_confidence = cls._freezer_stage_float(
+            side_entry,
+            "freezer_roi_filtered_max_confidence",
+            "threshold_passed_max_confidence",
+            "raw_max_confidence",
+        )
+        top_votes = cls._freezer_stage_int(
+            top_entry,
+            "freezerExitPathVotes",
+            "freezer_roi_filtered",
+            "threshold_passed",
+            "raw",
+        )
+        side_votes = cls._freezer_stage_int(
+            side_entry,
+            "freezerExitPathVotes",
+            "freezer_roi_filtered",
+            "threshold_passed",
+            "raw",
+        )
+
+        return VoteResult(
+            class_id=class_id,
+            class_name=str(entry.get("name") or f"class_{class_id}"),
+            vote_count=max(1, threshold_votes),
+            max_confidence=stage_confidence,
+            avg_confidence=stage_confidence,
+            top_detected=top_votes > 0,
+            side_detected=side_votes > 0,
+            top_vote_count=top_votes,
+            side_vote_count=side_votes,
+            top_max_confidence=top_confidence,
+            side_max_confidence=side_confidence,
+            weighted_confidence=stage_confidence,
+            source="freezer_stage_exit_path",
+            raw_vote_count=cls._freezer_stage_int(entry, "raw", "threshold_passed"),
+            top_motion_passed=bool(top_entry.get("motion_passed") or top_entry.get("motion_filtered")),
+            side_motion_passed=bool(side_entry.get("motion_passed") or side_entry.get("motion_filtered")),
+            motion_gate_passed=True,
+            weight_gate_passed=residual
+            <= float(config.weight.detected_single_fallback_tolerance_grams),
+            rescue_tolerance_g=near_residual_limit,
+            rescue_weight_residual_g=residual,
+            freezer_exit_path_votes=exit_path_votes,
+        )
+
+    @classmethod
+    def _freezer_stage_only_candidates(
+        cls,
+        *,
+        existing_class_ids: set[int],
+        target_weight: float,
+        near_residual_limit: float,
+        min_exit_path_votes: int,
+        product_weights: Optional[Dict[int, float]],
+        trace_context: Optional[TriggerTraceContext],
+    ) -> list[VoteResult]:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        if not isinstance(stage_counts, dict):
+            return []
+
+        candidates: list[VoteResult] = []
+        for raw_class_id, entry in stage_counts.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                class_id = int(entry.get("class_id", raw_class_id))
+            except (TypeError, ValueError):
+                continue
+            if class_id in existing_class_ids:
+                continue
+            candidate = cls._freezer_stage_vote_result(
+                class_id=class_id,
+                entry=entry,
+                product_weights=product_weights,
+                target_weight=target_weight,
+                near_residual_limit=near_residual_limit,
+                min_exit_path_votes=min_exit_path_votes,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        return candidates
+
     @classmethod
     def _freezer_exit_path_votes(
         cls,
@@ -810,8 +1043,18 @@ class VideoProcessor:
             float(config.weight.same_product_count_tolerance_grams),
         )
 
+        existing_class_ids = {int(vote.class_id) for vote in ranked_votes}
+        stage_only_votes = cls._freezer_stage_only_candidates(
+            existing_class_ids=existing_class_ids,
+            target_weight=target_weight,
+            near_residual_limit=near_residual_limit,
+            min_exit_path_votes=min_exit_path_votes,
+            product_weights=product_weights,
+            trace_context=trace_context,
+        )
+
         scored: list[dict[str, Any]] = []
-        for index, vote in enumerate(ranked_votes):
+        for index, vote in enumerate([*ranked_votes, *stage_only_votes]):
             unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
             residual = (
                 abs(target_weight - unit_weight)
@@ -820,7 +1063,23 @@ class VideoProcessor:
             )
             confidence = float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
             exit_path_votes = cls._freezer_exit_path_votes(vote, trace_context)
+            stage_entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
+            camera_exit_counts = cls._freezer_stage_camera_exit_counts(stage_entry)
+            source = str(getattr(vote, "source", "vision") or "vision")
+            stage_only = source == "freezer_stage_exit_path"
+            dual_camera_exit_path = len(camera_exit_counts) >= 2
+            roi_x_avg, roi_y_avg = cls._freezer_stage_center(stage_entry)
             if (
+                stage_only
+                and int(vote.class_id) in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
+                and dual_camera_exit_path
+                and unit_weight is not None
+                and residual <= near_residual_limit
+                and exit_path_votes >= min_exit_path_votes
+            ):
+                tier = -1
+                reason = "ambiguous_dual_camera_stage_exit_path"
+            elif (
                 unit_weight is not None
                 and residual <= strict_residual_limit
                 and exit_path_votes >= min_exit_path_votes
@@ -845,6 +1104,13 @@ class VideoProcessor:
                     "residual": residual,
                     "confidence": confidence,
                     "freezer_exit_path_votes": exit_path_votes,
+                    "camera_exit_counts": camera_exit_counts,
+                    "dual_camera_exit_path": dual_camera_exit_path,
+                    "roi_x_avg": roi_x_avg,
+                    "roi_y_avg": roi_y_avg,
+                    "source": source,
+                    "stage_only": stage_only,
+                    "source_priority": 1 if stage_only else 0,
                     "tier": tier,
                     "reason": reason,
                 }
@@ -856,6 +1122,7 @@ class VideoProcessor:
                 handled_pool,
                 key=lambda item: (
                     int(item["tier"]),
+                    int(item["source_priority"]),
                     -int(item["freezer_exit_path_votes"]),
                     float(item["residual"]),
                     -float(item["confidence"]),
@@ -892,6 +1159,20 @@ class VideoProcessor:
                 else None,
                 "weightResidual": round(float(item["residual"]), 1),
                 "freezerExitPathVotes": int(item["freezer_exit_path_votes"]),
+                "source": str(item["source"]),
+                "stageOnly": bool(item["stage_only"]),
+                "cameraExitCounts": dict(item["camera_exit_counts"]),
+                "dualCameraExitPath": bool(item["dual_camera_exit_path"]),
+                "roiXAvg": (
+                    round(float(item["roi_x_avg"]), 1)
+                    if item["roi_x_avg"] is not None
+                    else None
+                ),
+                "roiYAvg": (
+                    round(float(item["roi_y_avg"]), 1)
+                    if item["roi_y_avg"] is not None
+                    else None
+                ),
                 "selectionTier": str(item["reason"]),
             }
 
@@ -914,10 +1195,24 @@ class VideoProcessor:
             if unit_weight is not None
             else target_weight
         )
+        ambiguous_candidates = [
+            {
+                **considered_entry(item),
+                "spatialClusterWithSelected": cls._freezer_spatially_clustered(
+                    item,
+                    selected_item,
+                ),
+            }
+            for item in scored
+            if int(item["vote"].class_id) in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
+            and float(item["residual"]) <= near_residual_limit
+            and int(item["freezer_exit_path_votes"]) >= min_exit_path_votes
+        ]
         diagnostics = {
             "accepted": True,
             "reason": reason,
             "raw_candidate_count": len(votes),
+            "stage_only_candidate_count": len(stage_only_votes),
             "handled_candidate_count": 1,
             "target_weight": round(target_weight, 1),
             "confidence_band": round(confidence_band, 4),
@@ -932,13 +1227,19 @@ class VideoProcessor:
                     float(getattr(selected, "weighted_confidence", 0.0) or 0.0),
                     4,
                 ),
+                "source": getattr(selected, "source", "vision"),
+                "stageOnly": bool(selected_item["stage_only"]),
                 "unit_weight": round(unit_weight, 1) if unit_weight is not None else None,
                 "weight_residual": round(residual, 1),
                 "instance_count_hint": supported_count,
                 "freezerExitPathVotes": int(selected.freezer_exit_path_votes),
+                "cameraExitCounts": dict(selected_item["camera_exit_counts"]),
+                "dualCameraExitPath": bool(selected_item["dual_camera_exit_path"]),
                 "selectionTier": reason,
             },
             "considered": [considered_entry(item) for item in scored],
+            "ambiguousCandidates": ambiguous_candidates,
+            "hardNegativeCandidates": ambiguous_candidates,
         }
         cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
         logger.info(

@@ -172,6 +172,7 @@ class ProductDecisionEngine:
     WEIGHT_MATCH_WEIGHT = 0.5  # 무게 매칭 가중치
     COUNT_WEIGHT = 0.1       # 개수 합리성 가중치
     STAGE_COUNT_COMBINATION_LIMIT = 10
+    _FREEZER_AMBIGUOUS_PRODUCT_CLASSES = frozenset({30, 42, 44})
 
     def __init__(
         self,
@@ -540,6 +541,26 @@ class ProductDecisionEngine:
             return None
 
         target_weight = abs(float(delta_weight))
+        min_exit_path_votes = max(
+            0,
+            int(getattr(config.vision, "freezer_min_exit_path_votes", 3)),
+        )
+        strict_residual_limit = max(
+            0.0,
+            float(config.weight.detected_single_fallback_tolerance_grams),
+        )
+        near_residual_limit = strict_residual_limit + max(
+            0.0,
+            float(config.weight.same_product_count_tolerance_grams),
+        )
+        vision_candidates = self._augment_freezer_stage_exit_path_candidates(
+            vision_candidates=vision_candidates,
+            active_products=active_products,
+            trace_context=trace_context,
+            target_weight=target_weight,
+            min_exit_path_votes=min_exit_path_votes,
+            near_residual_limit=near_residual_limit,
+        )
         if not vision_candidates:
             self._record_weight_diagnostics(
                 trace_context,
@@ -558,22 +579,40 @@ class ProductDecisionEngine:
         considered: list[dict[str, Any]] = []
         options: list[dict[str, Any]] = []
         top_k = max(1, int(config.vision.top_k))
+        candidate_pool = [
+            *vision_candidates[:top_k],
+            *[
+                candidate
+                for candidate in vision_candidates[top_k:]
+                if str(getattr(candidate, "source", "") or "")
+                == "freezer_stage_exit_path"
+            ],
+        ]
 
-        for rank, candidate in enumerate(vision_candidates[:top_k], start=1):
+        for rank, candidate in enumerate(candidate_pool, start=1):
             class_id = int(candidate.class_id)
             confidence = float(candidate.combined_confidence)
+            stage_entry = self._freezer_stage_entry(trace_context, class_id)
+            camera_exit_counts = self._freezer_stage_camera_exit_counts(stage_entry)
+            roi_x_avg, roi_y_avg = self._freezer_stage_center(stage_entry)
+            source = str(getattr(candidate, "source", "vision") or "vision")
             product = active_map.get(class_id)
             diag: dict[str, Any] = {
                 "rank": rank,
                 "class_id": class_id,
                 "name": candidate.class_name,
-                "source": getattr(candidate, "source", "vision"),
+                "source": source,
                 "confidence": round(confidence, 4),
                 "raw_vote_count": int(getattr(candidate, "raw_vote_count", 0) or 0),
                 "freezerExitPathVotes": self._freezer_exit_path_votes(
                     candidate,
                     trace_context,
                 ),
+                "cameraExitCounts": dict(camera_exit_counts),
+                "dualCameraExitPath": len(camera_exit_counts) >= 2,
+                "stageOnly": source == "freezer_stage_exit_path",
+                "roiXAvg": round(float(roi_x_avg), 1) if roi_x_avg is not None else None,
+                "roiYAvg": round(float(roi_y_avg), 1) if roi_y_avg is not None else None,
                 "instance_count_hint": max(
                     1,
                     int(getattr(candidate, "instance_count_hint", 1) or 1),
@@ -587,6 +626,28 @@ class ProductDecisionEngine:
                 considered.append(diag)
                 continue
             if not self._candidate_has_vision_identity_evidence(candidate):
+                unit_weight = self._coerce_float(
+                    getattr(product, "product_weight", 0.0)
+                )
+                residual = (
+                    abs(target_weight - unit_weight)
+                    if unit_weight > 0
+                    else target_weight
+                )
+                diag.update(
+                    {
+                        "product_name": getattr(
+                            product,
+                            "product_name",
+                            candidate.class_name,
+                        ),
+                        "unit_weight": round(unit_weight, 1),
+                        "count": 1,
+                        "expected_weight": round(max(0.0, unit_weight), 1),
+                        "weight_residual": round(residual, 1),
+                        "weight_used_as": "diagnostic",
+                    }
+                )
                 diag["reason"] = "insufficient_vision_identity_evidence"
                 considered.append(diag)
                 continue
@@ -636,6 +697,11 @@ class ProductDecisionEngine:
                 "expected_weight": expected_weight,
                 "residual": residual,
                 "freezer_exit_path_votes": int(diag["freezerExitPathVotes"]),
+                "camera_exit_counts": camera_exit_counts,
+                "dual_camera_exit_path": bool(diag["dualCameraExitPath"]),
+                "stage_only": bool(diag["stageOnly"]),
+                "source": source,
+                "source_priority": 1 if source == "freezer_stage_exit_path" else 0,
                 "diagnostics": diag,
             }
             options.append(option)
@@ -695,6 +761,206 @@ class ProductDecisionEngine:
         entry = stage_counts.get(str(class_id)) or stage_counts.get(class_id)
         return entry if isinstance(entry, dict) else {}
 
+    @staticmethod
+    def _freezer_stage_int(entry: dict[str, Any], *keys: str) -> int:
+        values: list[int] = []
+        for key in keys:
+            try:
+                values.append(int(entry.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                pass
+        return max(values or [0])
+
+    @staticmethod
+    def _freezer_stage_float(entry: dict[str, Any], *keys: str) -> float:
+        values: list[float] = []
+        for key in keys:
+            try:
+                values.append(float(entry.get(key, 0.0) or 0.0))
+            except (TypeError, ValueError):
+                pass
+        return max(values or [0.0])
+
+    @classmethod
+    def _freezer_stage_camera_exit_counts(
+        cls,
+        entry: dict[str, Any],
+    ) -> dict[str, int]:
+        cameras = entry.get("cameras") or {}
+        if not isinstance(cameras, dict):
+            return {}
+        counts: dict[str, int] = {}
+        for camera, camera_entry in cameras.items():
+            if not isinstance(camera_entry, dict):
+                continue
+            count = cls._freezer_stage_int(
+                camera_entry,
+                "freezerExitPathVotes",
+                "freezer_exit_path_votes",
+                "freezer_roi_filtered",
+            )
+            if count > 0:
+                counts[str(camera)] = count
+        return counts
+
+    @staticmethod
+    def _freezer_stage_center(
+        entry: dict[str, Any],
+    ) -> tuple[Optional[float], Optional[float]]:
+        try:
+            x_avg = (
+                float(entry["roi_x_avg"])
+                if entry.get("roi_x_avg") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            x_avg = None
+        try:
+            y_avg = (
+                float(entry["roi_y_avg"])
+                if entry.get("roi_y_avg") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            y_avg = None
+        return x_avg, y_avg
+
+    def _augment_freezer_stage_exit_path_candidates(
+        self,
+        *,
+        vision_candidates: List[EnsembleResult],
+        active_products: Optional[List],
+        trace_context: Optional[object],
+        target_weight: float,
+        min_exit_path_votes: int,
+        near_residual_limit: float,
+    ) -> List[EnsembleResult]:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        if not isinstance(stage_counts, dict) or not active_products:
+            return vision_candidates
+
+        active_map = self._active_products_by_class(active_products)
+        if not active_map:
+            return vision_candidates
+
+        existing_class_ids = {
+            int(candidate.class_id)
+            for candidate in vision_candidates
+            if getattr(candidate, "class_id", None) is not None
+        }
+        augmented = list(vision_candidates)
+        min_stage_votes = max(1, int(config.weight.detected_single_fallback_min_votes))
+        min_confidence = float(config.weight.multi_kind_min_confidence)
+
+        for raw_class_id, entry in stage_counts.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                class_id = int(entry.get("class_id", raw_class_id))
+            except (TypeError, ValueError):
+                continue
+            if class_id in existing_class_ids:
+                continue
+            product = active_map.get(class_id)
+            if product is None or not self._active_product_has_loadcell(product):
+                continue
+            stock = self._coerce_int(getattr(product, "stock_qty", 0))
+            unit_weight = self._coerce_float(getattr(product, "product_weight", 0.0))
+            if stock <= 0 or unit_weight <= 0.0:
+                continue
+            residual = abs(target_weight - unit_weight)
+            if residual > near_residual_limit:
+                continue
+            exit_path_votes = self._freezer_stage_int(
+                entry,
+                "freezerExitPathVotes",
+                "freezer_exit_path_votes",
+                "freezer_roi_filtered",
+            )
+            threshold_votes = self._freezer_stage_int(
+                entry,
+                "threshold_passed",
+                "motion_passed",
+                "raw",
+            )
+            confidence = self._freezer_stage_float(
+                entry,
+                "freezer_roi_filtered_max_confidence",
+                "threshold_passed_max_confidence",
+                "raw_max_confidence",
+            )
+            if (
+                exit_path_votes < min_exit_path_votes
+                or threshold_votes < min_stage_votes
+                or confidence < min_confidence
+            ):
+                continue
+
+            cameras = entry.get("cameras") if isinstance(entry.get("cameras"), dict) else {}
+            top_entry = cameras.get("top", {}) if isinstance(cameras, dict) else {}
+            side_entry = cameras.get("side", {}) if isinstance(cameras, dict) else {}
+            if not isinstance(top_entry, dict):
+                top_entry = {}
+            if not isinstance(side_entry, dict):
+                side_entry = {}
+            top_votes = self._freezer_stage_int(
+                top_entry,
+                "freezerExitPathVotes",
+                "freezer_roi_filtered",
+                "threshold_passed",
+                "raw",
+            )
+            side_votes = self._freezer_stage_int(
+                side_entry,
+                "freezerExitPathVotes",
+                "freezer_roi_filtered",
+                "threshold_passed",
+                "raw",
+            )
+            augmented.append(
+                EnsembleResult(
+                    class_id=class_id,
+                    class_name=str(
+                        entry.get("name") or getattr(product, "product_name", "")
+                    ),
+                    top_confidence=self._freezer_stage_float(
+                        top_entry,
+                        "freezer_roi_filtered_max_confidence",
+                        "threshold_passed_max_confidence",
+                        "raw_max_confidence",
+                    ),
+                    side_confidence=self._freezer_stage_float(
+                        side_entry,
+                        "freezer_roi_filtered_max_confidence",
+                        "threshold_passed_max_confidence",
+                        "raw_max_confidence",
+                    ),
+                    combined_confidence=confidence,
+                    vote_count=2 if top_votes > 0 and side_votes > 0 else 1,
+                    source="freezer_stage_exit_path",
+                    raw_vote_count=self._freezer_stage_int(
+                        entry,
+                        "raw",
+                        "threshold_passed",
+                    ),
+                    top_motion_passed=bool(
+                        top_entry.get("motion_passed")
+                        or top_entry.get("motion_filtered")
+                    ),
+                    side_motion_passed=bool(
+                        side_entry.get("motion_passed")
+                        or side_entry.get("motion_filtered")
+                    ),
+                    motion_gate_passed=True,
+                    weight_gate_passed=residual
+                    <= float(config.weight.detected_single_fallback_tolerance_grams),
+                    rescue_tolerance_g=near_residual_limit,
+                    rescue_weight_residual_g=residual,
+                    freezer_exit_path_votes=exit_path_votes,
+                )
+            )
+        return augmented
+
     def _freezer_exit_path_votes(
         self,
         candidate: EnsembleResult,
@@ -718,8 +984,9 @@ class ProductDecisionEngine:
                 pass
         return max(values or [0])
 
-    @staticmethod
+    @classmethod
     def _freezer_handled_tier(
+        cls,
         option: dict[str, Any],
         *,
         min_exit_path_votes: int,
@@ -728,6 +995,15 @@ class ProductDecisionEngine:
     ) -> tuple[int, str]:
         residual = float(option["residual"])
         exit_path_votes = int(option.get("freezer_exit_path_votes", 0) or 0)
+        if (
+            bool(option.get("stage_only"))
+            and int(getattr(option.get("candidate"), "class_id", -1))
+            in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
+            and bool(option.get("dual_camera_exit_path"))
+            and residual <= near_residual_limit
+            and exit_path_votes >= min_exit_path_votes
+        ):
+            return -1, "freezer_single_ambiguous_dual_camera_stage_exit_path"
         if residual <= strict_residual_limit and exit_path_votes >= min_exit_path_votes:
             return 0, "freezer_single_weight_gate_exit_path"
         if residual <= near_residual_limit and exit_path_votes >= min_exit_path_votes:
@@ -774,6 +1050,7 @@ class ProductDecisionEngine:
                 handled,
                 key=lambda item: (
                     item[0],
+                    int(item[2].get("source_priority", 0) or 0),
                     -int(item[2].get("freezer_exit_path_votes", 0) or 0),
                     float(item[2]["residual"]),
                     -float(item[2]["confidence"]),
@@ -948,6 +1225,22 @@ class ProductDecisionEngine:
             "selected": [option["diagnostics"] for option in selected_options],
             "considered": considered,
         }
+        ambiguous_candidates = [
+            item
+            for item in considered
+            if int(item.get("class_id", -1)) in self._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
+            and float(item.get("weight_residual", target_weight) or target_weight)
+            <= max(
+                0.0,
+                float(config.weight.detected_single_fallback_tolerance_grams),
+            )
+            + max(0.0, float(config.weight.same_product_count_tolerance_grams))
+            and int(item.get("freezerExitPathVotes", 0) or 0)
+            >= max(0, int(getattr(config.vision, "freezer_min_exit_path_votes", 3)))
+        ]
+        if ambiguous_candidates:
+            diagnostics["ambiguousCandidates"] = ambiguous_candidates
+            diagnostics["hardNegativeCandidates"] = ambiguous_candidates
         self._record_weight_diagnostics(
             trace_context,
             {
@@ -7214,6 +7507,13 @@ class ProductDecisionEngine:
             return confidence >= max(0.0, float(self.confidence_threshold))
         if source in {"threshold_rescue", "roi_rescue"}:
             return bool(getattr(candidate, "weight_gate_passed", False))
+        if source == "freezer_stage_exit_path":
+            return (
+                self._is_freezer_mode()
+                and int(getattr(candidate, "freezer_exit_path_votes", 0) or 0)
+                >= max(0, int(getattr(config.vision, "freezer_min_exit_path_votes", 3)))
+                and confidence >= float(config.weight.multi_kind_min_confidence)
+            )
         if source == "stage_weight_gate":
             return confidence >= float(config.weight.multi_kind_min_confidence)
         return False
