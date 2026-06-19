@@ -1,0 +1,289 @@
+# CRK-model LLM Wiki
+
+Last updated: 2026-06-16
+
+This wiki is the LLM-facing map of the CRK model service. The original
+documents under `docs/` remain the raw sources. Pages here summarize and
+synthesize those sources so another Codex or LLM can recover the current system
+shape without rereading every long historical document.
+
+## Start Here
+
+- [Wiki schema](wiki-schema.md): how to add future source summaries, synthesis
+  pages, and work-log entries.
+- [Repo overview](source-code/repo-overview.md): runtime role, README-level
+  status, package shape, dataset, and env groups.
+- [File inventory](source-code/file-inventory.md): every runtime Python module,
+  test file, script, and root operational source.
+- [Runtime flow](synthesis/runtime-flow.md): the main `/trigger` to final
+  judgment path.
+- [System map](synthesis/system-map.md): how Edge_Environment, CRK-CAMERA,
+  CRK-IO-BOARD, CRK-PAYMENT, and CRK-model relate.
+- [Jetson and testing](synthesis/jetson-and-testing.md): runtime verification
+  rules and safe local checks.
+- [Latency and frame stride](synthesis/latency-and-frame-stride.md): current
+  latency work, telemetry, and `frame_stride` tradeoffs.
+- [Scenario readiness and 0g diagnostics](synthesis/scenario-readiness-and-0g.md):
+  Excel scenario fixture coverage, strict combination limits, stride-2 latency
+  contract, and payment-path 0g diagnostics.
+
+## Current Operating Rules
+
+- Runtime target is the Jetson Orin Nano service. Local PC startup, health
+  checks, or TensorRT behavior are not valid production-runtime proof.
+- This Python repo is currently documented by README as the legacy/reference
+  TensorRT `.engine` path; fresh clone-based operation should prefer
+  `CRK-model-go` unless the task explicitly targets this Python service.
+- Preferred local safety gate is `pytest services/model/tests -q`; the
+  2026-06-15 local run recorded `366 passed` alongside a passing Ruff check
+  with `uv run --no-sync ruff check services/model scripts`.
+- Frame trace image export is opt-in. `.env.example` keeps
+  `MODEL__TRACE__SAMPLE_EXPORT_ENABLED=false` so replacing a live `.env` does
+  not add sample-frame disk writes on Jetson.
+- The model service receives Camera-packaged `/trigger` payloads and Node
+  `/api/judge/multi-zone` calls. It does not call IO Board or Payment directly.
+- `active_products` from Node is the runtime product-catalog source by
+  default. `MODEL__CATALOG__SOURCE_POLICY=node_first` trusts Node-provided
+  `trainingidx`/`training_idx`/`trainingIdx`/`yolo_class_id` aliases as the
+  YOLO class id, and `static_mapping_compat` is the explicit legacy product
+  name mapping mode.
+- Static `dataset.yaml` and `services/config/yolo_product_mapping.json`
+  validation is advisory and opt-in through
+  `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=true`; default startup records
+  the loaded engine class summary without warning on stale static mappings.
+- Stock-positive active products with valid class ids remain in the YOLO
+  allowlist even when Node sends missing or `0g` product weight. Such rows are
+  tracked as `weight_unavailable` for loadcell validation/count diagnostics
+  rather than blocking vision detection.
+- Product identity is vision-first by default. With
+  `MODEL__WEIGHT__IDENTITY_POLICY=vision_first`, final vision candidates,
+  strong stage evidence, or weight-gated rescue evidence must support the
+  product identity. Loadcell is count/validation evidence, and no-vision
+  loadcell-only deltas return no-charge `no_detection` or `uncertain`.
+- Strong vision identity with unavailable product weight is preserved as
+  `partial` with `vision_identity_preserved_weight_unavailable`; loadcell count
+  correction only runs when the active product has a valid positive weight.
+- Confidence fusion is vision-heavy by default:
+  `MODEL__WEIGHT__FUSION_VISION_WEIGHT=0.65`,
+  `MODEL__WEIGHT__FUSION_LOADCELL_WEIGHT=0.25`, and
+  `MODEL__WEIGHT__FUSION_COUNT_WEIGHT=0.10`.
+- `delta_weight < 0` means removal. `delta_weight > 0` means return.
+- Top/Side YOLO preprocessing uses the left 480x480 crop from 640x480 camera
+  frames by default, matching the TensorRT 480 input contract.
+- `MODEL__VISION__CAMERA_LAYOUT` defaults to `legacy_top_side`. In
+  `dual_top_proxy`, Camera still sends `videos.top/side`, but `videos.top` is
+  recorded as physical `top_center` and `videos.side` is recorded as
+  `top_left_proxy` using the logical Side processing profile.
+- Python service inference defaults to `models/0204_morning.engine`, with
+  regular Top/Side candidate thresholds at `0.25` to match the Jetson live
+  preview baseline.
+- Top-camera ROI now uses the lower region for both removals and returns:
+  non-zero deltas keep `center_y >= 240`, while zero or missing delta skips
+  the top ROI.
+- Side-camera ROI keeps hard `center_x <= 400` in the left 480 crop and adds a
+  conditional `+5px` regular-candidate soft band. This catches Pepsi detections
+  around `x=402..404` while leaving farther-right Trevi-style detections out.
+- Current README/tests describe physical zone loadcell channels as summed into
+  the zone total. Older docs that mention averaging are historical context.
+- The current Jetson template uses Top FFmpeg gamma/contrast `1.2/1.2` and
+  Side `1.0/1.0`; traces record these values so field runs can be compared
+  against candidate recall and YOLO latency.
+- Rapid same-zone judgment now keeps two extra pieces of model-side context:
+  compound loadcell segments inside one trigger payload, and same-zone
+  loadcell events from the last `3.0s`.
+- Simultaneous same-zone removals can use physical loadcell channel deltas as
+  evidence-required segment targets. A channel-supported split such as
+  Tteokbokki + Welchs is judged before a same-weight aggregate rescue product.
+- Chargeable negative deltas use matched-only finalization. After regular
+  matching fails, forced fallback can still return a low-confidence `PARTIAL`
+  from active product weights, but only when the product weight sum explains
+  the full stable removal delta inside the existing branch tolerance. A
+  sub-segment-only fallback returns no-charge `UNCERTAIN` with
+  `final_weight_mismatch_guard` diagnostics.
+- Collision-specific identity guards are preferred over broad tolerance
+  changes. Regular rank-1 final vision combinations and strong regular 500ml
+  two-bottle repeats can use count-scaled grace only when replacing
+  same-weight lower-rank/rescue/active-only collisions. Single 500ml bottles
+  stay on flat strict tolerance before strict identity can override tighter
+  weight evidence.
+- Detected-single fallback has one narrow single-bottle exception: when final
+  candidates are empty and a rejected 450-560g bottle has strong side/motion
+  stage or diagnostic evidence, it can replace a weak residual-only single
+  fallback inside `detected_single_fallback_tolerance +
+  same_product_count_tolerance`. Keep this as diagnostics-driven fallback
+  identity evidence, not as OPS candidate filtering.
+- Strong 500ml bottle `x2` removal evidence with a materially undercounted
+  negative loadcell delta returns `waiting_for=stable_loadcell` and is excluded
+  from DoorSession/payment until Camera/Node posts a new stable loadcell tail.
+- Chargeable loadcell deltas now require stable plateau evidence. The service
+  uses the first confirmed stable plateau as baseline and the last confirmed
+  stable tail plateau as the final value; first/last samples and raw max/min
+  swings are diagnostics only. Negative removals with no confirmed stable tail
+  return `waiting_for=stable_loadcell` before video, engine, DoorSession, or
+  payment aggregation.
+- Negative removals that wait for a stable loadcell tail now keep any active
+  product fail-closed reason in the trigger session, trace final result, and
+  multi-zone waiting response. A combined `removal_waiting_for_stable_loadcell`
+  plus `missing_active_products` result means both Node inventory context and
+  Camera/IO loadcell timing need inspection.
+- Return handling is hybrid: a positive delta deducts one same-zone product
+  immediately only inside flat strict tolerance. Multi-count/combo/cross-zone
+  returns and mixed `return_weight_hints` are deferred until CLOSE and then
+  replayed against the final net delta.
+- Strict single-item matching records both matcher raw order and engine
+  post-sort order. Once candidates are inside flat strict tolerance, single
+  products sort by candidate rank before source priority, residual, or evidence;
+  this includes `threshold_rescue` and `stage_weight_gate` candidates.
+- Stage-count evidence that passed the weight gate can be promoted to
+  `source=stage_weight_gate` when votes/confidence are sufficient. It recovers
+  products missing from final candidates, but it does not let a lower-rank
+  stage candidate override a higher-rank strict single candidate.
+- When final candidates are empty, stage-count/rescue evidence can still build
+  strict multi-item combinations before loadcell-only or active-only forced
+  fallback. Candidate/stage-supported repeats and pairs therefore outrank
+  unseen active-only pair injection when they explain the stable target inside
+  existing tolerances.
+- Segment matching retries ordinary time-based `removal_segment_targets` when
+  evidence-required physical channel targets cannot explain every channel. This
+  lets sequential removals such as Haluyache + LetsBe + Jagabee recover before
+  aggregate strict or active-only forced fallback.
+- Segment-first matching treats low-confidence stage traces as unsupported
+  evidence, so weak Pepero/Binch-style small-item repeats do not outrank
+  active large-bottle explanations or become `COMPLETE`.
+- Segment-first matching can split a merged loadcell segment into a trusted
+  compound option such as Fanta + Pepsi. Small-item repeats remain recovery,
+  but are rejected behind valid compound/single large-item alternatives.
+- Segment targets enforce the configured grip-size cap
+  `MODEL__WEIGHT__MAX_ITEMS_PER_SEGMENT`. The template default is three
+  products per detected loadcell segment; setting the env value to `4` allows
+  four total products in that segment, including mixed products.
+- Clean evidence-supported loadcell segment matches are kept ahead of aggregate
+  repeated-count overrides when their total residual is no worse, so separate
+  product removals do not collapse into a same-product repeat.
+- Stage/diagnostic-only small fragments are not clean support when a high-rank
+  regular candidate explains the aggregate segment total as a same-product
+  repeat inside count-scaled tolerance.
+- Do not lower regular candidate thresholds to solve small-product filler
+  mistakes. Keep low-confidence evidence in rescue/diagnostic paths, and block
+  unsupported `unit_weight < 200g`, `count >= 2` fragments at decision time
+  unless they are regular final candidates or strong motion-backed stage
+  evidence.
+- Same-weight 500ml bottle segment collisions prefer repeated two-camera or
+  very strong stage evidence over reusing a single top-only candidate across
+  several separated segment targets.
+- CLOSE finalization performs a final basket-weight validation. Over-fragmented
+  mixed baskets can be corrected to a repeated ranked candidate when the final
+  effective delta supports that repeat inside count-scaled tolerance, while
+  unresolved return/cross-zone sessions and clean supported mixed baskets are preserved.
+  Unsupported small-fragment baskets get a narrow wider residual-gap allowance
+  so strong Sky Barley `x3` evidence can replace a lower-residual fragment mix.
+- CLOSE finalization does not swap an all-regular vision-supported current
+  basket to a different product identity only because the alternative has a
+  lower loadcell residual. It can still correct the count of the same
+  vision-supported product.
+- CLOSE repeat correction has a final count cap based on stock, same-product
+  max count, per-item max count, and
+  `removal_trigger_count * MODEL__WEIGHT__MAX_ITEMS_PER_SEGMENT`; cap failures
+  record `count_exceeds_close_repeat_cap`.
+- Low/zero-weight tail triggers can run diagnostic video processing, but the
+  trace records `engine_skipped=true` and the trigger stays excluded from
+  CLOSE/payment.
+- No-vision active-only forced fallback is not part of the default
+  `vision_first` identity policy. The older low-weight noise guard still
+  applies when `MODEL__WEIGHT__IDENTITY_POLICY=weight_aware` is explicitly
+  selected for legacy fallback behavior.
+- Future delivery for this repo should happen on `main` unless the user
+  explicitly asks for a different branch strategy. When the user asks to
+  finalize changes, commit and push them to `origin/main`.
+
+## Synthesis Pages
+
+| Page | Purpose |
+| --- | --- |
+| [system-map](synthesis/system-map.md) | Service boundaries and cross-repo dependencies. |
+| [runtime-flow](synthesis/runtime-flow.md) | End-to-end trigger, queue, video, decision, session, and close flow. |
+| [product-detection-pipeline](synthesis/product-detection-pipeline.md) | Seven-stage detection pipeline and judgment logic. |
+| [protocol-contracts](synthesis/protocol-contracts.md) | Camera, Node, IO Board, and Payment contracts from the model perspective. |
+| [jetson-and-testing](synthesis/jetson-and-testing.md) | Jetson setup, verification boundaries, and test commands. |
+| [historical-risk-and-fixes](synthesis/historical-risk-and-fixes.md) | Historical risk review, fixes, roadmap, and recovery notes. |
+| [latency-and-frame-stride](synthesis/latency-and-frame-stride.md) | Latency bottlenecks, telemetry, recent commits, and stride policy. |
+| [scenario-readiness-and-0g](synthesis/scenario-readiness-and-0g.md) | Scenario matrix fixture, model contract coverage, and 0g diagnostic branch. |
+
+## Code Maps
+
+- [repo-overview](source-code/repo-overview.md): README, package, dataset, and
+  `.env.example` operational summary.
+- [file-inventory](source-code/file-inventory.md): complete source/test/script
+  inventory.
+- [startup-and-di](source-code/startup-and-di.md): `main.py`, FastAPI lifespan,
+  and `ServiceContainer` graph.
+- [api-routes](source-code/api-routes.md): HTTP endpoints and compatibility
+  rules.
+- [configuration](source-code/configuration.md): Pydantic settings and env var
+  groups.
+- [loadcell-and-trigger](source-code/loadcell-and-trigger.md): loadcell delta,
+  low-weight handling, dedup, and trigger worker.
+- [video-and-vision](source-code/video-and-vision.md): frame extraction, YOLO,
+  filters, voting, and rescue candidates.
+- [decision-and-weight](source-code/decision-and-weight.md): decision engine,
+  strict matcher, relaxed matching, and fallbacks.
+- [session-and-persistence](source-code/session-and-persistence.md): trigger
+  sessions, door/global sessions, active products, YAML persistence.
+- [observability-and-traces](source-code/observability-and-traces.md): OPS
+  logs, latency logs, trace schema, and debug heuristics.
+- [tests-map](source-code/tests-map.md): test files by subsystem and when to
+  run them.
+- [scripts-and-jetson-tools](source-code/scripts-and-jetson-tools.md): Jetson
+  setup, runtime env, torch install, live preview, and engine conversion.
+
+## Source Document Summaries
+
+### Agent Guides
+
+- [architecture](source-docs/agent-guides-architecture.md): current model
+  service architecture and inference branches.
+- [build-test](source-docs/agent-guides-build-test.md): preferred tests and
+  focused regression suites.
+- [conventions](source-docs/agent-guides-conventions.md): runtime defaults,
+  config rules, and project layout.
+- [jetson-setup notes](source-docs/agent-guides-jetson-setup.md): concise
+  Jetson setup and recovery notes.
+
+### Core Docs
+
+- [API reference](source-docs/reference.md): model HTTP endpoints and response
+  shapes.
+- [Jetson setup](source-docs/jetson-setup.md): full Jetson Orin Nano setup and
+  troubleshooting guide.
+- [Product detection flow](source-docs/product-detection-flow.md): seven-stage
+  pipeline overview.
+- [Product detection detail](source-docs/product-detection-detail.md): YOLO,
+  filters, voting, decision, and session internals.
+- [Trigger capture debugging](source-docs/trigger-capture-debugging.md): field
+  timing contract across Edge, Camera, and Model.
+- [Trigger inference recovery notes](source-docs/trigger-inference-recovery-notes-2026-03-31.md):
+  current trigger hardening and return recovery behavior.
+
+### Historical Planning And Risk Docs
+
+- [Implementation roadmap](source-docs/implementation-roadmap.md): scenario
+  phases and completion history.
+- [Model process risk review](source-docs/model-process-risk-review-2026-03-04.md):
+  historical risk review, some text encoding issues in the source file.
+- [Fixes applied](source-docs/fixes-applied-2026-03-05.md): fixes following
+  the March 2026 risk review.
+
+### Protocol Docs
+
+- [Camera protocol](source-docs/protocols-camera.md): Node-to-Camera and
+  Camera-to-Model contracts.
+- [IO Board protocol](source-docs/protocols-io-board.md): loadcell and door
+  data path as seen by the model.
+- [Node protocol](source-docs/protocols-node.md): health and multi-zone judge
+  contracts.
+- [Payment protocol](source-docs/protocols-payment.md): indirect payment
+  relation through Node.
+
+## Maintenance Log
+
+See [log](log.md) for append-only wiki maintenance history.

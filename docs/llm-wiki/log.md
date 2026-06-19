@@ -1,0 +1,735 @@
+# LLM Wiki Log
+
+## [2026-06-16] maintenance | Waiting loadcell plus active snapshot diagnostics
+
+- Documented that `removal_waiting_for_stable_loadcell` can now preserve the
+  active-product fail-closed reason when Node inventory context is missing at
+  the same time as the Camera/IO loadcell payload lacks a stable tail.
+- Updated loadcell, observability, session, and index pages for the new
+  `SessionData.failure_reason`, trace final-result failure reason, and
+  multi-zone waiting `failureReasons` behavior.
+- Left raw operational trace JSON files and `result.xlsx` untouched.
+
+## [2026-06-15] maintenance | Node-first catalog and zero-weight vision path
+
+- Documented `MODEL__CATALOG__SOURCE_POLICY=node_first` as the default runtime
+  catalog mode, with Node `trainingidx`/`yolo_class_id` aliases as direct YOLO
+  class ids.
+- Recorded that static `dataset.yaml` and `yolo_product_mapping.json`
+  validation is opt-in through
+  `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=true`.
+- Updated startup, configuration, video/vision, decision/weight, and pipeline
+  pages for zero-weight active products: they stay in the vision allowlist but
+  are marked unavailable for loadcell count/validation.
+- Recorded the vision-first missing-weight behavior:
+  `vision_identity_preserved_weight_unavailable` returns the vision product as
+  `partial` instead of falling back to active/loadcell identity.
+
+## [2026-06-11] maintenance | CLOSE vision identity stability
+
+- Documented that CLOSE final-weight correction preserves all-regular
+  vision-supported current basket identities and blocks lower-residual
+  different-product repeat replacements with `identitySwapBlocked=true`.
+- Recorded that CLOSE can still adjust counts for the same vision-supported
+  product id when final weight validation supports a different count.
+
+## [2026-06-11] maintenance | Vision-first loadcell policy
+
+- Added `MODEL__WEIGHT__IDENTITY_POLICY=vision_first` as the default decision
+  policy and documented `weight_aware` as the explicit legacy fallback mode.
+- Documented configurable confidence fusion defaults of vision `0.65`,
+  loadcell `0.25`, and count `0.10`.
+- Recorded that loadcell-only and active-only candidates no longer create
+  product identity under the default policy; loadcell validates/counts
+  vision-supported identity and produces mismatch diagnostics when it conflicts.
+
+## [2026-06-11] maintenance | Camera layout role trace
+
+- Added `MODEL__VISION__CAMERA_LAYOUT` with `legacy_top_side` and
+  `dual_top_proxy` layouts while preserving the public `/trigger`
+  `videos.top/side` contract.
+- Recorded camera layout and logical-to-physical role mapping in frame trace
+  summary/detail JSON so operators can distinguish a physical Side stream from
+  the new `top_left_proxy` stream.
+
+## [2026-06-04] maintenance | Documentation command sync
+
+- Updated active README, AGENTS, test README, build-test, and Jetson setup
+  docs to stop recommending removed startup/API helper test files.
+- Recorded the current code-backed default engine path as
+  `models/0204_morning.engine` and left the older conflicting engine-path
+  claim only in historical source docs.
+- Added scenario fixture and verification scripts to the scripts code map and
+  recorded the 2026-06-04 local gate: Ruff over `services/model scripts` and
+  the full model test suite with `351 passed`.
+
+## [2026-06-02] maintenance | Full-delta matched-only finalization
+
+- Added the matched-only finalization rule for chargeable removals. Engine
+  `COMPLETE`/`PARTIAL` results must explain the full stable negative delta
+  inside existing branch tolerances, otherwise the result becomes no-charge
+  `UNCERTAIN` with `final_weight_mismatch_guard` diagnostics.
+- Documented the Haluyache + LetsBe + Jagabee regression. Failed physical
+  channel splits now fall back to ordinary time-based removal segments, and
+  segment-local stage/rescue evidence can complete the full product set before
+  active-only forced fallback.
+- Recorded that forced final fallback rejects partial purchase targets such as
+  `last_unpaired_negative_segment` unless they equal the full removal delta,
+  and that CLOSE clears unresolved mismatched baskets with
+  `finalWeightValidation.reason=unresolved_final_weight_mismatch`.
+
+## [2026-06-02] maintenance | Accuracy-first loadcell and candidate priority
+
+- Documented stable-tail-only chargeable loadcell deltas: first/last samples
+  and raw max/min extremes are retained as diagnostics, while removals require
+  a confirmed stable final plateau before `decision_delta` can charge.
+- Recorded the broader removal stabilization policy. Unstable, truncated, or
+  simple-fallback negative removals return `waiting_for=stable_loadcell`,
+  skip video and `engine.judge()`, and stay out of DoorSession/payment
+  aggregation until a stable payload arrives.
+- Updated decision ordering so no-final-candidate stage-count/rescue
+  combinations run before loadcell-only and active-only forced fallback, with
+  trace branch diagnostics for `stage_count_combination_match`.
+- Added regression-map coverage for stable-tail diagnostics, unstable removal
+  waiting, ranked candidate repeats over unseen active repeats, no-final
+  stage-count combination recovery, and normal session lifecycle logging.
+
+## [2026-06-02] maintenance | CLOSE deferred returns and fixed stride 2
+
+- Documented the hybrid return policy: strict same-zone single returns can be
+  deducted immediately, while same-product `x2+`, combo, cross-zone, and mixed
+  return-hint deltas are stored in `DoorSession.deferred_returns` until CLOSE.
+- Recorded CLOSE deferred return reconciliation diagnostics under
+  `finalWeightValidation.deferredReturnReconciliation`, followed by net-delta
+  validation and final repeat correction.
+- Added the CLOSE repeat count cap
+  `min(stock_qty, same_product_max_count, max_count_per_item,
+  removal_trigger_count * max_items_per_segment)`, with
+  `count_exceeds_close_repeat_cap` for rejected repeat corrections such as
+  HomeRunBall `x33`.
+- Updated async streaming policy: `MODEL__ASYNC_STREAMING__FRAME_STRIDE=2` is
+  fixed, settings reject other values, and the processor runtime also pins
+  stride to `2`.
+
+## [2026-06-02] maintenance | LetsBe repeat over unsupported small fragments
+
+- Documented the LetsBe/HALUYACHE regression where a small product absent from
+  final candidates was used as residual filler in a mixed basket.
+- Recorded the new unsupported small repeat fragment rule:
+  `unit_weight < 200g` with `count >= 2` is rejected from aggregate
+  strict/relaxed combinations unless it is a regular final vision candidate or
+  has strong motion-backed stage evidence.
+- Clarified that regular candidate thresholds should not be lowered for this
+  class of issue; low-confidence evidence remains available through
+  rescue/diagnostic paths, while decision-time guards prevent tiny noisy
+  fragments from becoming charged products.
+
+## [2026-06-02] maintenance | Pepsi detected-single identity override
+
+- Documented the zone 5 Pepsi/Trevi single-bottle fallback regression: Pepsi had
+  strong side/motion stage evidence but missed the final candidate weight gate,
+  while weak Trevi won detected-single fallback only by residual.
+- Added the fallback-only 500ml identity override rule. Strong rejected bottle
+  evidence can replace a weak residual-only single fallback inside
+  `detected_single_fallback_tolerance + same_product_count_tolerance`; strict
+  single-candidate ordering and OPS final-candidate logs remain unchanged.
+- Added diagnostics guidance for
+  `weight_diagnostics.detected_single_item_fallback.single_bottle_identity_override`
+  so operators can see when rejected Pepsi evidence was used after candidates
+  were empty.
+
+## [2026-06-02] maintenance | SKY repeat over fragment baskets
+
+- Documented the Sky Barley x3 regression where a lower-residual
+  Condition/Hot6/Binch fragment basket survived until CLOSE even though ranked
+  Sky evidence explained the final delta inside count-scaled tolerance.
+- Recorded the segment aggregate rule: stage/diagnostic-only small fragments are
+  not clean support when a high-rank regular same-product repeat explains the
+  aggregate total.
+- Updated CLOSE correction guidance so unsupported small-fragment baskets can
+  use `base + same_product_count_tolerance` residual-gap allowance while clean
+  supported mixed baskets and return/cross-zone sessions remain protected.
+
+## [2026-06-02] maintenance | Low-delta active-only fallback noise guard
+
+- Documented the no-vision `6-10g` shelf-shake regression where loadcell-only
+  matching failed strict tolerance and forced final fallback charged Condition
+  Stick as the nearest tiny active product.
+- Recorded the new active-only low-weight noise guard: without vision/stage or
+  purchase-delta evidence, deltas below the lightest active product minus
+  strict tolerance stay as loadcell-only misses instead of creating a product.
+- Kept real small-item behavior separate: a true Condition Stick-sized delta
+  can still match through strict loadcell nearest-single behavior.
+
+## [2026-06-02] maintenance | CLOSE final-weight candidate correction
+
+- Documented the CLOSE-only final basket validation that compares each zone's
+  effective negative delta with the final aggregated product weight.
+- Recorded the new DoorSession candidate snapshot contract: trigger results
+  persist ranked vision candidates joined with active weight, price, stock, and
+  top/side evidence for close-time correction.
+- Clarified that over-fragmented mixed baskets can be replaced by a supported
+  same-product repeat inside count-scaled tolerance, while return/cross-zone
+  sessions and clean supported mixed baskets are preserved.
+
+## [2026-06-02] maintenance | Strict single rank priority over stage promotion
+
+- Documented the zone 4 Sky/Trevi regression root cause: Sky Barley was the raw
+  strict single winner at `delta=-525g` (`523g`, residual `2g`), but lower-rank
+  Trevi was promoted to `stage_weight_gate` and source priority moved it ahead.
+- Updated strict single-item policy: once candidates are inside flat strict
+  tolerance, candidate rank sorts before source priority, residual, and
+  evidence for `vision`, `threshold_rescue`, and `stage_weight_gate`.
+- Clarified stage weight-gate as a recovery path, not a reason to override an
+  already valid higher-rank strict single candidate.
+
+## [2026-06-02] maintenance | Removal stabilization and single-bottle strict guard
+
+- Documented the Pepsi x2 undercount contract: when strong regular 500ml
+  bottle repeat evidence conflicts with a materially short negative loadcell
+  delta, the trigger worker saves a `waiting` session, records
+  `weight_diagnostics.removal_stabilization`, skips `engine.judge()`, and waits
+  for a new stable loadcell payload.
+- Updated same-weight identity guidance: single bottles keep flat strict
+  tolerance, so a Trevi `530g` rank-1 candidate at `521g` no longer overrides a
+  tighter Corn/Pepsi `520g` weight-gated rescue; controlled count-scaled grace
+  remains available only for strong 450-560g `x2` repeats and rank-aware
+  combinations.
+- Recorded stage weight-gate promotion for already-present non-regular
+  candidates, plus the multi-zone `status="waiting"` response contract with
+  `reason="waiting_for_stable_loadcell"`.
+
+## [2026-06-02] maintenance | Vision identity collision grace
+
+- Documented the Sky/Corn/Fanta and Pepsi/Trevi regression fix: regular
+  rank-1 final vision combinations and strong regular 500ml bottle repeats can
+  use count-scaled grace only inside same-weight lower-rank/rescue/active-only
+  collision guards.
+- Recorded forced fallback behavior for Pepsi-only evidence: supported
+  same-product repeat pairs can use the same controlled repeat allowance and
+  outrank mixed detected-plus-active pairs that inject unsupported Trevi.
+- Updated return aggregation notes: single returns keep flat tolerance, while
+  multi-product return combinations use count-scaled tolerance and record
+  `last_return_diagnostics`.
+
+## [2026-06-01] maintenance | Pepsi side ROI soft-band recovery
+
+- Documented the candidate miss root cause from field traces: Pepsi had strong
+  raw/threshold evidence, but side centers around `x=402..404` were clipped by
+  hard `side_roi_x_max=400` and fell back to `threshold_rescue`.
+- Added the hard-ROI-plus-soft-band policy: keep hard side ROI at `400`, allow
+  threshold-passed side detections through `405` only for regular candidate
+  formation and motion filtering, and leave threshold/ROI rescue hard-gated.
+- Updated configuration, video/vision, observability, pipeline, and tests maps
+  for `MODEL__VISION__SIDE_ROI_SOFT_MARGIN_PX=5.0`, Top gamma/contrast
+  `1.2/1.2`, trace `vision_config` timing fields, and Pepsi/Corn same-weight
+  candidate-priority coverage.
+
+## [2026-06-01] maintenance | Simultaneous channel split recovery
+
+- Documented `channel_removal_segment_targets` and
+  `channel_delta_diagnostics` for same-zone simultaneous removals where
+  physical loadcell channels split one aggregate time segment.
+- Recorded decision behavior: channel targets are evidence-required, single
+  product per channel, and a supported split such as Tteokbokki + Welchs beats
+  a same-weight aggregate `threshold_rescue`.
+- Added test-map coverage for channel target extraction, positive-channel and
+  single-channel rejection, supported channel split selection, and active-only
+  channel fallback to aggregate strict matching.
+
+## [2026-06-01] maintenance | Pepsi stage weight-gate recovery
+
+- Documented `source=stage_weight_gate` candidate promotion for classes that
+  pass the stage weight gate, have valid active stock/weight, meet the
+  detected-single vote minimum, and reach confidence `>=0.08`.
+- Recorded same-weight 500ml bottle collision handling for separated segment
+  targets: repeated two-camera or very strong stage evidence can explain all
+  bottle-weight segments, while a single top-only candidate is rejected with
+  `repeated_segment_evidence_insufficient`.
+- Updated trace/test maps for `stage_weight_gate_candidates`,
+  `same_weight_bottle_collision`, and `repeated_segment_reuse_guard`
+  diagnostics.
+
+## [2026-06-01] maintenance | Strict single-candidate priority diagnostics
+
+- Documented strict post-sort diagnostics:
+  `weight_diagnostics.strict_candidate_priority_selection` now distinguishes
+  matcher raw residual order from final engine candidate-priority order.
+- Recorded the Hatban/HOT6 regression policy: regular rank/source inside strict
+  tolerance beats a lower-rank regular or rescue candidate with only a 1-2g
+  residual advantage.
+- Added decision-engine coverage for Hatban `365g` at `delta=-368g` selecting
+  Hatban over HOT6 `367g`, while preserving the tighter match when rank 1 is
+  outside strict tolerance.
+
+## [2026-06-01] maintenance | Segment grip cap
+
+- Documented `MODEL__WEIGHT__MAX_ITEMS_PER_SEGMENT=3`: segment-first matching
+  caps one detected loadcell segment to three product units, while preserving
+  existing aggregate `SAME_PRODUCT_MAX_COUNT=8` behavior when segment targets
+  are absent.
+- Recorded segment-derived total caps for aggregate overrides and strict
+  fallback paths: two segments allow up to six units, but x8 repeats are
+  rejected with `count_exceeds_segment_grip_limit`.
+- Added decision-engine coverage for one-segment Pepero x8 rejection, two
+  segment Pepero x6 allowance, and aggregate override cap enforcement.
+
+## [2026-06-01] maintenance | Compound segment split and low-weight diagnostics
+
+- Documented segment compound options for merged loadcell movements: one
+  segment can split into two or three `count=1` items when at least one item is
+  final/trusted and companions have supported or weak companion evidence.
+- Recorded explicit segment selection tiers and the small-item repeat guard:
+  `unit_weight < 200g` with `count >= 3` is rejected behind valid compound,
+  trusted/supported single, or tight large-item alternatives.
+- Updated low-weight behavior: `LOW_WEIGHT_VISION_FALLBACK=true` now runs video
+  diagnostics only, records `engine_skipped=true`, and stays excluded from
+  DoorSession/CLOSE payment.
+
+## [2026-06-01] maintenance | Clean segment match priority
+
+- Documented segment override ordering: when loadcell segments are cleanly
+  matched by evidence-supported products, segment selections beat aggregate
+  repeated-count overrides with equal or higher residual.
+- Added diagnostics for blocked aggregate overrides:
+  `reason=clean_supported_segment_match_preferred`,
+  `candidate_aggregate_residual`, and `selected_segment_all_supported`.
+- Added regression coverage for Binch + Haruyache + Letsbe versus Chapagetti
+  x4, while preserving collision-like aggregate repeated-count recovery.
+
+## [2026-06-01] maintenance | Side ROI candidate promotion
+
+- Relaxed regular side ROI from `center_x <= 250` to `center_x <= 400` in the
+  left 480 crop so strong side detections for Bibigo and Pepero become normal
+  candidates instead of only stage-count fallback evidence.
+- Kept regular Top/Side thresholds at `0.25`, top ROI at `center_y >= 240`,
+  and ROI rescue strict at the current side ROI boundary.
+- Added regression coverage for side ROI boundary behavior, Bibigo/Pepero trace
+  shapes, and Letsbe `0.2926` confidence under the preview-aligned threshold.
+
+## [2026-06-01] maintenance | Pepsi/Trevi preview alignment
+
+- Documented the service/preview alignment: Python service defaults now use
+  `models/0204_morning.engine` and regular Top/Side thresholds `0.25`.
+- Recorded ROI-strict threshold rescue diagnostics: conflicted weak rescues now
+  expose `roi_conflict` and `threshold_rescue_rejected_reason`.
+- Added regression coverage for weak Trevi threshold rescue rejection and
+  regular Pepsi winning over Trevi rescue residual collisions.
+
+## [2026-06-01] maintenance | Dummy artifact and env-interference audit
+
+- Documented the audit result: runtime-interfering dummy artifacts were limited
+  to an enabled sample-frame export default, an unreachable legacy block, and
+  confusing YOLO warmup dummy naming.
+- Recorded that `.env.example` now keeps frame sample export disabled by
+  default, matching the Jetson templates and avoiding extra disk I/O when copied
+  into a live `.env`.
+- Kept test-only mocks/fixtures and the multi-zone dummy/test product-name
+  rejection guard; they are not runtime dummy data and prevent invalid products
+  from entering inference.
+
+## [2026-06-01] maintenance | Segment weak-evidence repeat guard
+
+- Documented segment-first matching support tiers: weak stage traces are not
+  enough to make small-item repeated counts outrank active large-bottle
+  explanations.
+- Recorded `evidence_supported` in segment diagnostics and regression coverage
+  for Pepsi x2 versus weak Pepero repeats and Sky Barley x2 versus weak Binch
+  repeats.
+- Aligned `.env.example` weight settings with the Jetson templates so replacing
+  a live `.env` does not silently omit repeated-count and strict-search limits.
+
+## [2026-06-01] maintenance | Forced fallback pair support ranking
+
+- Documented forced final fallback pair ordering so supported same-product
+  repeats beat unsupported mixed active-product pairs even when the mixed pair
+  has a smaller residual.
+- Recorded new diagnostics: `mode=detected_same_product_pair`,
+  `pair_support_rank`, per-product `pair_support`, and `evidence_score`.
+- Added decision-engine regression coverage for Pepsi x2 versus weak Trevi
+  pair injection, plus supported mixed-pair preservation.
+
+## [2026-06-01] maintenance | 480-crop ROI alignment
+
+- Documented the new operating geometry: Top/Side inference uses the left
+  480x480 crop from 640x480 camera frames so ROI coordinates match the
+  TensorRT 480 input contract.
+- Updated ROI defaults: side keeps `center_x <= 400`, top keeps
+  `center_y >= 240` for both removal and return deltas, and side ROI rescue is
+  strict at the ROI boundary.
+- Updated configuration, video/vision, product-pipeline, observability, and
+  test-map wiki pages for the new 480-crop-aligned filters.
+
+## [2026-06-01] maintenance | Camera-aware stage evidence scoring
+
+- Documented stage-count evidence scoring that caps raw vote influence with
+  `log1p` and weights side confidence, ROI/threshold, and motion evidence above
+  low-confidence top-only raw detections.
+- Recorded segment-first selection ordering where evidence tier is preserved
+  but residual beats weak evidence-score differences, allowing Welchs x2 to
+  beat top-raw-heavy Cupban x2 in split loadcell traces.
+- Added trace/test map notes for `stage_score`, camera confidence/vote fields,
+  and stage-count expansion ordering before the 10-class limit.
+
+## [2026-06-01] maintenance | Same-weight candidate and close delta guard
+
+- Documented compatibility `/trigger` parity for `return_segment_targets`,
+  mixed return hints, and `effective_count_guard` diagnostics.
+- Recorded the same-weight candidate identity guard so regular Pepsi-style
+  candidates beat same-weight active-only products and lower-rank rescue
+  candidates within the scaled allowance.
+- Documented basket-facing CLOSE delta behavior: still-unmatched return hints
+  are excluded from effective delta, and empty baskets normalize tolerance-sized
+  residuals to `0.0g`.
+
+## [2026-06-01] maintenance | Mixed return segment replay
+
+- Documented `return_segment_targets` for paired-out-free positive loadcell
+  segments inside compound trigger histories.
+- Recorded the internal `return_weight_hints` path: negative chargeable
+  triggers keep judging the removal `decision_delta`, while DoorSession replay
+  uses the positive hint to cancel an earlier removal in the basket.
+- Updated trace and test maps for `weight_diagnostics.mixed_return_segments`,
+  mixed return/removal aggregation, and CLOSE effective delta accounting.
+
+## [2026-06-01] maintenance | Trevi return and King Rush segment recovery
+
+- Documented evidence-aware segment selection where stage/diagnostic evidence
+  can beat active-only exact residuals for separable removal segments.
+- Recorded aggregate override tightening: low-count threshold/ROI rescue flags
+  are not trusted aggregate evidence unless backed by final rank, weight gate,
+  or strong stage/diagnostic evidence.
+- Documented chronological door-session trigger replay and relaxed same-zone
+  single return matching so a `524g` return can cancel a `530g` Trevi removal.
+
+## [2026-06-01] maintenance | Candidate-first repeated count before stage expansion
+
+- Documented the strict-miss recovery order where final candidates get a
+  same-product repeated-count match before stage-count products can supplement
+  the basket.
+- Updated the same-product repeated-count tolerance formula to
+  `count * same_product_count_tolerance + tolerance_grams`, matching the
+  segment aggregate override allowance.
+- Recorded diagnostics for `same_product_count_match.stage_count_preempted`
+  and test coverage for the Welchs x2 regression plus the outside-tolerance
+  stage-count fallback guard.
+
+## [2026-06-01] maintenance | Candidate rank and repeated Pepsi recovery
+
+- Documented strict single-item ordering that prefers regular final-candidate
+  source/rank over lower-confidence rescue candidates when both are inside the
+  fixed strict tolerance.
+- Recorded regression coverage for Sky Barley rank-1 versus Trevi threshold
+  rescue, and for stage-supported Pepsi repeated-count recovery over a mixed
+  fragmented segment basket.
+
+## [2026-06-01] maintenance | Trevi collision segment recovery
+
+- Documented aggregate evidence override for collision-like loadcell segment
+  fragmentation, where a strong repeated-product stage/diagnostic candidate can
+  beat a low-confidence mixed segment basket.
+- Recorded the new `aggregate_evidence_override` trace diagnostics for segment
+  matching, including candidate residuals, evidence strength, and rejection
+  reasons.
+- Updated the decision test map for the Trevi x5 fragmentation regression and
+  low-evidence guard coverage.
+
+## [2026-06-01] maintenance | Hot6 segment candidate priority
+
+- Documented the segment-weight override where trusted final candidate or
+  trusted stage evidence can beat evidence-free active-only products when the
+  aggregate segment total supports a repeated same-product count.
+- Recorded the diagnostic fields `candidate_supported_override` and
+  `evidence_priority_selection` for explaining cases where segment residual
+  alone would otherwise select the wrong active product.
+- Updated the decision test map for the Hot6-style regression in
+  `test_decision_engine.py`.
+
+## [2026-06-01] maintenance | Segment-first loadcell matching
+
+- Documented `removal_segment_targets` and
+  `vision_required_segment_targets` as trace metadata derived from stable
+  loadcell movement history.
+- Recorded the segment-first decision branch that matches separated removal
+  segments before aggregate strict matching, while keeping forced final
+  fallback as the last no-none guard.
+- Updated test maps for loadcell segment target extraction and decision-engine
+  segment-first regressions.
+
+## [2026-06-01] maintenance | Stable loadcell history and no-none fallback
+
+- Documented stable plateau history as the basis for `decision_delta`, including
+  paired remove-return/press-release suppression and ignored micro movements.
+- Recorded that trace metadata now preserves both `net_delta_weight` and
+  `decision_delta_weight` plus purchase-delta candidates and pairing details.
+- Documented the forced final fallback that returns a low-confidence `PARTIAL`
+  active-product guess instead of `none` for chargeable negative deltas when
+  active products exist.
+- Updated test maps for loadcell history regressions and forced fallback
+  decision-engine coverage.
+
+## [2026-06-01] maintenance | Rapid same-zone failure remediation
+
+- Recorded that Top/Side FFmpeg gamma and contrast defaults are now all `1.0`
+  because field comparison favored the unadjusted image path.
+- Documented compound loadcell segment detection for merged removal/return
+  payloads and the `3.0s` recent same-zone trigger context exposed in traces.
+- Updated decision/weight notes for motion-aware strict combination ranking and
+  returned-weight hints that down-rank likely just-returned products during
+  negative follow-up triggers.
+- Added regression coverage for compound loadcell segments, recent same-zone
+  trace metadata, motion-supported ambiguous strict matches, and returned
+  weight hint ranking.
+
+## [2026-05-29] maintenance | Candidate-inclusive stage fallback and weight repair
+
+- Changed stage-count strict fallback ordering so any valid combination that
+  includes a final candidate outranks all-stage-count combinations; all-stage
+  combos remain recovery when candidate-inclusive combos are outside tolerance.
+- Applied the same stage-count strict fallback before relaxed combination
+  recovery, keeping final candidates as primary evidence and `stage_counts` as
+  supplements up to 10 total classes.
+- Added product-weight alias parsing and repair diagnostics for active product
+  snapshots, including a narrow class `44`
+  `BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML` fallback to `520.0g`.
+
+## [2026-05-29] maintenance | Return loadcell stabilization
+
+- Added return-only stabilization before committing positive loadcell deltas:
+  the service waits `MODEL__TRIGGER__RETURN_STABILIZATION_WAIT_SECONDS=1.0`
+  and requires stable start/end regions by default.
+- Short first/last fallback return payloads now produce
+  `status=waiting`, `waiting_for=stable_loadcell` instead of silently adding a
+  partial return weight to DoorSession.
+- Added trace diagnostics under `weight_diagnostics.return_stabilization` and
+  regression tests for stable return commit and partial return waiting.
+
+## [2026-05-29] maintenance | Candidate-only combination priority
+
+- Added a candidate-only strict combination pass inside relaxed combination
+  matching before any `stage_counts_by_class` expansion.
+- Reordered stage-count fallback selections so final-candidate-only
+  combinations beat combinations that include `source=stage_counts`.
+- Added regressions for the field case where three final candidates match the
+  loadcell delta but two non-candidate stage-count products also match.
+
+## [2026-05-29] maintenance | Confidence and side ROI rescue tightening
+
+- Raised regular Top/Side candidate confidence thresholds to `0.30` after gamma
+  tuning made high-confidence detections more reliable.
+- Increased vision ranking weights to `top=0.60`, `side=0.65`,
+  `top_only=0.55`, `side_only=0.60`, and common-class bonus `0.20`.
+- Tightened side ROI from `center_x <= 440` to `center_x <= 400`.
+- Limited `source=roi_rescue` to moving side detections near the ROI boundary:
+  `side_motion_passed=true` and `roi_x_avg <= roi_x_limit + 20px`.
+- Added regression coverage for static/far-right ROI-filtered detections so
+  they stay out of final candidates and weight-gated rescue votes.
+
+## [2026-05-29] maintenance | Vision-source candidate priority
+
+- Changed final candidate merge ordering so regular `source=vision` candidates
+  rank ahead of `roi_rescue` and `threshold_rescue` candidates before `top_k`
+  trimming.
+- Applied the shared ordering to both `TriggerService` and the direct API
+  trigger path through `VideoProcessor.merge_rescue_votes()`.
+- Added regression coverage proving a lower-confidence vision candidate remains
+  first even when rescue candidates have higher weight-gated confidence.
+
+## [2026-05-29] maintenance | Stage-count combination fallback
+
+- Added a fallback strict-combination pass that merges final candidates with
+  `stage_counts_by_class` evidence up to 10 total candidate classes after the
+  final-candidate strict pass misses.
+- Kept final candidates first, then fills remaining slots from stage-count
+  insertion order so lower-ranked stage evidence can still be considered.
+- The fallback accepts only combinations with total count >= 2; one-item
+  recovery remains handled by detected-single fallback.
+- Added regression coverage for a one-final-candidate miss where the real
+  A+B products are present only in the second and eighth stage-count entries.
+- Verified locally with focused decision/strict/scenario tests (`60 passed`),
+  full model tests (`218 passed`), and `uv tool run ruff check services/model
+  scripts`.
+
+## [2026-05-29] maintenance | Compact vision-first combination selection
+
+- Changed strict combination ranking to prefer the smallest total item count
+  first, then lower weight residual, higher average vision confidence, and
+  fewer product kinds. This keeps A x1 + B x1 ahead of C x4 when both are
+  plausible.
+- Moved same-product repeated-count matching after strict/compact combination
+  matching. Relaxed matching now tries count=1 singles, then combinations, then
+  repeated single-product estimates.
+- Raised general strict weight tolerance to
+  `MODEL__WEIGHT__TOLERANCE_GRAMS=5.0` and added
+  `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` for multi-kind items.
+- Updated the stride-2 env templates and code maps for the 5g tolerance,
+  0.18 confidence floor, 10px motion floor, and same-product x8 settings.
+- Verified locally with focused decision/strict/scenario tests
+  (`59 passed`), full model tests (`217 passed`), `uv tool run ruff check
+  services/model scripts`, and scenario readiness
+  (`verified=924`, `failures=0`, `elapsed_ms=34.7`, `stride2_traces=4`).
+
+## [2026-05-29] maintenance | Motion fail-closed and same-product x8
+
+- Lowered the model-service motion filter floor from 15px to 10px and aligned
+  bbox dynamic threshold floors with the same setting.
+- Removed regular candidate motion fail-open behavior so static products that
+  all fail motion remain filtered instead of being restored as candidates.
+- Kept hand-path and ROI filters unchanged, while retaining low-confidence
+  moving threshold rescue for weight-gated recovery.
+- Added same-product repeated-count controls:
+  `MODEL__WEIGHT__SAME_PRODUCT_COUNT_TOLERANCE_GRAMS=5.0` and
+  `MODEL__WEIGHT__SAME_PRODUCT_MAX_COUNT=8`, leaving general strict matching at
+  `MODEL__WEIGHT__TOLERANCE_GRAMS=3.0` and five total units.
+- Verified locally with `pytest services/model/tests -q` (`212 passed`),
+  `uv tool run ruff check services/model scripts`, and scenario readiness
+  verification (`924` cases, `0` failures, `60.75 ms` engine time, 4 stride-2
+  traces under the 20s video budget).
+
+## [2026-05-29] maintenance | Scenario readiness and explicit 0g branch
+
+- Added an Excel refresh script, committed scenario JSON fixture, and scenario
+  readiness report for 924 expanded cases and 104 checklist rows.
+- Added a scenario verification script/report showing 924/924 model-contract
+  rows passing, 0 failures, 60.75 ms engine decision time, and 4 stride-2 trace
+  files under the 20s video budget.
+- Documented strict matching coverage for five total units, three distinct
+  product kinds, A+B+C, A2+B2, and A5 scenario expectations.
+- Recorded that stride-2 scenario tests enforce the 20-second latency evidence
+  contract shape, while Jetson TensorRT traces remain required for production
+  timing proof.
+- Updated loadcell docs for explicit low-weight payload diagnostics, including
+  all-zero and filtered-all-zero/raw-nonzero reasons.
+- Recorded the code-derived sibling-service diagnosis that the payment path may
+  unlock before Camera recording starts; CRK-model now reports missing/zero
+  loadcell evidence but does not modify sibling services.
+
+## [2026-05-28] maintenance | Loadcell 0g diagnostics
+
+- Documented diagnostics-only handling for `delta_weight=0.0g` cases without
+  changing low-weight skip behavior.
+- Recorded new loadcell payload evidence in traces and OPS logs:
+  `payload_state`, raw/filtered channel counts, invalid/zero/nonzero counts,
+  and first/last raw or filtered zone totals.
+- Clarified that CRK-model receives Camera-packaged `/trigger.loadcells`, so
+  `empty_payload`, `invalid_only`, or `all_zero` should be traced at the
+  Camera/IO Board boundary before treating the event as a vision miss.
+
+## [2026-05-27] maintenance | Loadcell-first trigger cancellation
+
+- Documented the trigger relevance scheduler that skips YOLO for positive
+  return deltas and cancels queued removal triggers when a later return
+  balances them before video starts.
+- Recorded the new CLOSE distinction between all pending triggers and
+  `pendingChargeableVisionCount`, so non-chargeable diagnostics do not block
+  finalization.
+- Added trace interpretation notes for `return_loadcell_only`,
+  `balanced_out`, and `cancelled_by_return` paths.
+- Added regression coverage for single and combination balanced cancellation,
+  return-only DoorSession updates, and non-chargeable pending close behavior.
+
+## [2026-05-27] maintenance | Cross-zone combination repair and active snapshot fallback
+
+- Documented cross-zone repair as local aggregation, global combination repair,
+  then effective net-delta validation.
+- Recorded support for same-product multi-count, multi-product, and
+  multi-source-zone return repair without changing the public response shape.
+- Documented the last-valid `ActiveProductStore` fallback for
+  `missing_active_product_snapshot_fail_closed` traces after repeated
+  judgment/recovery cycles.
+- Added regression coverage for combination returns, repeated recovery before
+  the next trigger, effective CLOSE summary output, and active snapshot fallback
+  TTL behavior.
+
+## [2026-05-27] maintenance | Cross-zone return effective delta
+
+- Documented that cross-zone return repair now runs before effective net-delta
+  validation across active door sessions.
+- Recorded the effective delta rule used by CLOSE summaries:
+  raw trigger delta minus outgoing cross-zone return weight plus incoming
+  cross-zone return weight.
+- Added regression coverage for returning an item to a different zone after
+  removing another item in the source zone, plus CLOSE summary output.
+
+## [2026-05-27] maintenance | Safe release cleanup and static checks
+
+- Recorded the release-cleanup pass that kept public API and runtime behavior
+  unchanged while removing shadowed `TriggerService` loadcell helper code.
+- Documented that loadcell route/service compatibility helpers now delegate to
+  `core/loadcell_stats.py`, preserving existing test imports.
+- Updated code maps for the Ruff-clean import/static-string cleanup and the
+  async frame queue annotation fix.
+- Left raw operational trace JSON files untouched.
+
+## [2026-05-25] maintenance | Top camera direction-aware ROI
+
+- Documented the top-camera ROI rule: removal keeps detections with
+  `center_y >= 200`, return keeps detections with `center_y <= 200`, and
+  zero/unknown delta skips top ROI.
+- Updated video/vision, configuration, product-pipeline, observability, and
+  tests maps for the new top ROI config, trace fields, and regression tests.
+- Left raw operational trace JSON files untouched.
+
+## [2026-05-21] ingest | Existing docs and recent latency work
+
+- Created the initial repo-local wiki under `docs/llm-wiki/`.
+- Ingested all 17 existing files under `docs/` as source-summary pages.
+- Added synthesis pages for system boundaries, runtime flow, product detection,
+  protocols, Jetson/testing, historical risks/fixes, and latency/frame stride.
+- Left raw docs and untracked trace JSON files untouched.
+
+## [2026-05-21] ingest | Codebase-wide module map
+
+- Added `source-code/` as the code/config/test/script layer.
+- Added module-level maps for startup/DI, API routes, configuration, loadcell
+  and trigger flow, video/vision, decision/weight, sessions, observability,
+  tests, scripts, and repo overview.
+- Updated navigation and freshness rules to reflect README-level facts:
+  this Python repo is the legacy/reference TensorRT path, fresh clone-based
+  operation points toward `CRK-model-go`, and current loadcell channel behavior
+  is summed zone total.
+- Continued to exclude untracked trace JSON files from durable wiki ingestion.
+
+## [2026-05-21] maintenance | Active product allowlist guard
+
+- Documented the no-detection failure mode where a zero-stock/zero-weight
+  active-product snapshot creates an empty strict YOLO allowlist.
+- Updated latency/stride guidance to check `active_product_diagnostics` before
+  treating zero raw detections as a frame-stride recall loss.
+- Updated session and observability maps for the multi-zone snapshot guard,
+  store preservation behavior, and empty-allowlist fail-closed trace field.
+
+## [2026-05-21] maintenance | Main branch delivery rule
+
+- Clarified the repo operating rule that final delivery should use `main` and,
+  when requested, commit and push changes to `origin/main`.
+
+## [2026-05-21] maintenance | Jetson stride-2 env template
+
+- Added `docs/jetson-stride2.env.txt` as a Jetson copy/paste `.env` template
+  with `MODEL__ASYNC_STREAMING__FRAME_STRIDE=2`.
+- Documented at the time that the stride-2 template was for field testing and
+  did not replace the then-current `frame_stride=1` recall-safe default policy.
+
+## [2026-05-21] maintenance | CLOSE waits for trigger finalization
+
+- Documented that CLOSE final success must wait until the trigger worker has
+  finished video processing, session storage, door-session aggregation, OPS
+  logging, and trace finalization.
+- Recorded the field trace conclusion: the referenced `1335xx`/`1340xx` traces
+  completed frame processing; `none` came from
+  `missing_active_product_snapshot_fail_closed`, not from CLOSE cutting frames
+  short.
+- Documented the new close diagnostics for pending trigger session ids and the
+  `missing_active_products` final summary reason.
+
+## [2026-05-21] maintenance | Low-weight ignore and same-product counts
+
+- Documented that `abs(delta_weight) <= 5g` is hard-ignored for production
+  judgment and excluded from DoorSession close aggregation.
+- Recorded the field diagnosis that noisy low-confidence multi-kind weight
+  combinations can over-explain a delta and should be rejected unless candidate
+  quality is strong enough.
+- Added the same-product repeated-count rule: active, detected products may use
+  `count * MODEL__WEIGHT__TOLERANCE_GRAMS` residual tolerance for `x2` cases
+  such as Pepero, while respecting stock and count limits.

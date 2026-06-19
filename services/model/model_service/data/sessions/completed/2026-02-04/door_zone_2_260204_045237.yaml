@@ -1,0 +1,43 @@
+door_session_id: door_zone_2_260204_045237
+zone: 2
+status: complete
+triggers:
+- trigger_id: trigger_001
+  session_id: zone_2_260204_045224
+  timestamp: 1770148357.5637553
+  products:
+  - product_id: 14
+    product_idx: '14'
+    name: BAG_CAPRI_SUN_ORANGE_200ML
+    count: 1
+    price: 700
+    confidence: 0.6229980468749999
+  delta_weight: -211.0
+  confidence: 0.6229980468749999
+  video_paths:
+    top: /home/chai/Documents/Edge_Environment/20260204_045214/inference/zone_2/2026-02-03_19-52-21/top.avi
+    side: /home/chai/Documents/Edge_Environment/20260204_045214/inference/zone_2/2026-02-03_19-52-21/side.avi
+  is_return: false
+  processing_time_ms: 12633.912086486816
+aggregated_products:
+  '14':
+    product_id: 14
+    product_idx: '14'
+    name: BAG_CAPRI_SUN_ORANGE_200ML
+    count: 1
+    unit_price: 700
+    weight: 0.0
+    total_price: 700
+    average_confidence: 0.623
+    detection_count: 1
+unmatched_returns: []
+created_at: 1770148357.5637863
+last_trigger_at: 1770148357.5637863
+finalized_at: 1770148398.765311
+summary:
+  trigger_count: 1
+  total_price: 700
+  product_count: 1
+  duration_seconds: 41.2
+  unmatched_returns_count: 0
+  unmatched_returns_weight: 0

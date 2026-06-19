@@ -1,0 +1,78 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+site/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+uv.lock
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local assistant files
+AGENTS.md
+CLAUDE.md
+.claude/
+docs/agent-guides/*
+!docs/agent-guides/build-test.md
+!docs/agent-guides/conventions.md
+!docs/agent-guides/jetson-setup.md
+!docs/agent-guides/architecture.md
+docs/plans/
+docs/REQUIRED_FIXES_REVIEW_*.md
+docs/SEMINAR_*.md
+
+# Tool caches
+.gocache/
+.cache/
+
+# Local runtime outputs
+*.log
+*.log.*
+/data/
+/services/model/logs/
+/services/model/model_service/data/sessions/
+
+# Local model artifacts
+/models/
+
+# Optional local media captures
+*.avi
+*.mp4
+*.mov
+*.mkv

@@ -1,0 +1,5295 @@
+from dataclasses import dataclass
+
+import pytest
+from model_service.core.config import WeightModel, config
+from model_service.engine.decision_engine import ProductDecisionEngine
+from model_service.engine.models import EnsembleResult, JudgmentStatus
+
+
+@dataclass
+class MockActiveProduct:
+    yolo_class_id: int
+    product_name: str
+    product_weight: float
+    stock_qty: int
+    sale_price: int = 3500
+    product_idx: str = "P1"
+    has_loadcell: str = "true"
+
+
+@pytest.fixture(autouse=True)
+def reset_weight_identity_policy(monkeypatch):
+    monkeypatch.setattr(config.weight, "identity_policy", "vision_first")
+
+
+def use_weight_aware_identity(monkeypatch):
+    monkeypatch.setattr(config.weight, "identity_policy", "weight_aware")
+
+
+def test_weight_model_default_segment_grip_limit_is_three():
+    assert WeightModel().max_items_per_segment == 3
+
+
+def test_weight_model_defaults_to_vision_first_identity_policy():
+    settings = WeightModel()
+
+    assert settings.identity_policy == "vision_first"
+    assert settings.fusion_vision_weight == 0.65
+    assert settings.fusion_loadcell_weight == 0.25
+    assert settings.fusion_count_weight == 0.10
+
+
+def make_candidate(
+    class_id: int = 26,
+    name: str = "치킨마요",
+    confidence: float = 1.0,
+) -> EnsembleResult:
+    return EnsembleResult(
+        class_id=class_id,
+        class_name=name,
+        top_confidence=confidence,
+        side_confidence=confidence,
+        combined_confidence=confidence,
+        vote_count=2,
+    )
+
+
+def make_active_product(
+    class_id: int = 26,
+    name: str = "치킨마요",
+    weight: float = 365.0,
+    stock: int = 5,
+    price: int = 3500,
+) -> MockActiveProduct:
+    return MockActiveProduct(
+        yolo_class_id=class_id,
+        product_name=name,
+        product_weight=weight,
+        stock_qty=stock,
+        sale_price=price,
+    )
+
+
+class FakeStageTrace:
+    def __init__(self, entries):
+        self.weight_diagnostics = {}
+        self.stage_counts_by_class = {
+            str(class_id): self._stage_entry(class_id, name, confidence)
+            for class_id, name, confidence in entries
+        }
+
+    @staticmethod
+    def _stage_entry(class_id, name, confidence=0.92):
+        return {
+            "class_id": class_id,
+            "name": name,
+            "raw": 4,
+            "raw_max_confidence": confidence,
+            "motion_passed": True,
+        }
+
+    def record_weight_diagnostics(self, diagnostics):
+        self.weight_diagnostics.update(diagnostics)
+
+
+class FakeLoadcellTrace:
+    def __init__(self, loadcell):
+        self.loadcell = loadcell
+        self.weight_diagnostics = {}
+        self.stage_counts_by_class = {}
+
+    def record_weight_diagnostics(self, diagnostics):
+        self.weight_diagnostics.update(diagnostics)
+
+
+def make_stage_count_entry(
+    class_id: int,
+    name: str,
+    *,
+    confidence: float,
+    raw: int,
+    threshold_passed: int = 0,
+    motion_gate_passed: bool = True,
+    camera: str = "side",
+) -> dict:
+    camera_entry = {
+        "raw": raw,
+        "raw_max_confidence": confidence,
+    }
+    if threshold_passed > 0:
+        camera_entry.update(
+            {
+                "threshold_passed": threshold_passed,
+                "threshold_passed_max_confidence": confidence,
+                "motion_filtered": threshold_passed if motion_gate_passed else 0,
+            }
+        )
+    entry = {
+        "class_id": class_id,
+        "name": name,
+        "raw": raw,
+        "raw_max_confidence": confidence,
+        "threshold_passed": threshold_passed,
+        "threshold_passed_max_confidence": confidence if threshold_passed > 0 else 0.0,
+        "motion_gate_passed": motion_gate_passed,
+        "cameras": {camera: camera_entry},
+    }
+    if motion_gate_passed:
+        entry["motion_passed"] = max(raw, threshold_passed)
+    return entry
+
+
+def test_vision_only_without_product_db_returns_partial():
+    engine = ProductDecisionEngine(product_db=None, strict_mode=True)
+    candidate = make_candidate(confidence=0.95)
+
+    result = engine.judge(
+        vision_candidates=[candidate],
+        delta_weight=0.0,
+        vision_only=True,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 26
+    assert result.products[0].name == candidate.class_name
+
+
+def test_loadcell_only_skips_boolean_no_loadcell_products():
+    engine = ProductDecisionEngine(strict_mode=True)
+    active_product = make_active_product()
+    active_product.has_loadcell = False
+
+    result = engine.judge_by_weight_only(
+        delta_weight=-365.0,
+        active_products=[active_product],
+    )
+
+    assert result.status == JudgmentStatus.NO_DETECTION
+    assert result.products == []
+
+
+def test_loadcell_only_does_not_return_closest_match_outside_tolerance():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge_by_weight_only(
+        delta_weight=-7.6,
+        active_products=[
+            make_active_product(
+                class_id=113,
+                name="STICK_INNON_CONDITION_STICK_18G",
+                weight=19.0,
+                stock=1,
+            )
+        ],
+    )
+
+    assert result.status in {JudgmentStatus.UNCERTAIN, JudgmentStatus.NO_DETECTION}
+    assert result.products == []
+
+
+def test_vision_first_no_vision_loadcell_match_does_not_create_identity():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-365.0,
+        active_products=[make_active_product(weight=365.0)],
+    )
+
+    assert result.status == JudgmentStatus.NO_DETECTION
+    assert result.products == []
+
+
+def test_vision_first_weight_conflict_preserves_strong_vision_identity_as_partial():
+    class Trace:
+        def __init__(self):
+            self.weight_diagnostics = {}
+            self.stage_counts_by_class = {}
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics.update(diagnostics)
+
+    trace = Trace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[make_candidate(class_id=26, name="Vision Product", confidence=0.94)],
+        delta_weight=-430.0,
+        active_products=[
+            make_active_product(26, "Vision Product", weight=365.0, stock=5),
+            make_active_product(99, "Weight Nearest Active", weight=430.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [(26, 1)]
+    assert result.weight_explained == 365.0
+    assert result.weight_residual == 65.0
+    diagnostics = trace.weight_diagnostics["vision_first_identity_validation"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["weight_validation_passed"] is False
+    assert diagnostics["reason"] == "vision_identity_preserved_weight_mismatch"
+    assert diagnostics["selected"]["class_id"] == 26
+
+
+def test_vision_first_missing_weight_preserves_strong_vision_identity_as_partial():
+    class Trace:
+        def __init__(self):
+            self.weight_diagnostics = {}
+            self.stage_counts_by_class = {}
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics.update(diagnostics)
+
+    trace = Trace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=26, name="Vision Product", confidence=0.94)
+        ],
+        delta_weight=-430.0,
+        active_products=[
+            make_active_product(26, "Vision Product", weight=0.0, stock=5),
+            make_active_product(99, "Weight Nearest Active", weight=430.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [(26, 1)]
+    assert result.weight_explained == 0.0
+    assert result.weight_residual == 430.0
+    diagnostics = trace.weight_diagnostics["vision_first_identity_validation"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["weight_validation_passed"] is False
+    assert diagnostics["reason"] == "vision_identity_preserved_weight_unavailable"
+    assert diagnostics["selected"]["weight_status"] == "unavailable"
+
+
+def test_loadcell_only_returns_nearest_single_within_5g():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge_by_weight_only(
+        delta_weight=-57.0,
+        active_products=[
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=58.0,
+                stock=1,
+                price=1700,
+            )
+        ],
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 115
+    assert result.products[0].count == 1
+    assert result.weight_residual == 1.0
+
+
+def test_no_vision_forced_final_fallback_rejects_nearest_active_mismatch(monkeypatch):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-200.0,
+        active_products=[
+            make_active_product(101, "Nearest Active Product", weight=250.0, stock=3),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    assert result.weight_residual == 50.0
+    assert trace.weight_diagnostics["decision_branch"] == "forced_final_fallback"
+    assert trace.weight_diagnostics["forced_final_fallback"]["inside_tolerance"] is False
+    assert trace.weight_diagnostics["final_weight_mismatch_guard"]["accepted"] is False
+
+
+def test_ranked_candidate_repeat_beats_same_weight_unseen_active_repeat():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                0.402,
+            ),
+            make_candidate(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                0.185,
+            ),
+        ],
+        delta_weight=-1048.8,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                weight=523.0,
+                stock=10,
+                price=1600,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                weight=520.0,
+                stock=10,
+                price=2000,
+            ),
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                weight=520.0,
+                stock=10,
+                price=2300,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 2)
+    ]
+    assert result.weight_residual == pytest.approx(2.8)
+
+
+def test_no_final_candidates_stage_combo_runs_before_active_forced_fallback():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "31": make_stage_count_entry(
+            31,
+            "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+            confidence=0.402,
+            raw=20,
+            threshold_passed=8,
+        ),
+        "119": make_stage_count_entry(
+            119,
+            "BOTTLE_FANTA_ORANGE_600ML",
+            confidence=0.4,
+            raw=20,
+            threshold_passed=8,
+        ),
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-1157.0,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                weight=523.0,
+                stock=10,
+                price=1600,
+            ),
+            make_active_product(
+                119,
+                "BOTTLE_FANTA_ORANGE_600ML",
+                weight=634.0,
+                stock=10,
+                price=2000,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                weight=520.0,
+                stock=10,
+                price=2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {(product.product_id, product.count) for product in result.products} == {
+        (31, 1),
+        (119, 1),
+    }
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["stage_candidates_added"] == 2
+    assert trace.weight_diagnostics["decision_branch"] == "stage_count_combination_match"
+    assert "forced_final_fallback" not in trace.weight_diagnostics
+
+
+def test_no_final_candidates_rescue_combo_runs_before_active_forced_fallback():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.threshold_rescue_candidates = [
+        {
+            "class_id": 31,
+            "name": "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+            "confidence": 0.402,
+            "votes": 8,
+            "side": True,
+            "side_motion_passed": True,
+            "motion_gate_passed": True,
+            "weight_gate_passed": True,
+        },
+        {
+            "class_id": 119,
+            "name": "BOTTLE_FANTA_ORANGE_600ML",
+            "confidence": 0.4,
+            "votes": 8,
+            "side": True,
+            "side_motion_passed": True,
+            "motion_gate_passed": True,
+            "weight_gate_passed": True,
+        },
+    ]
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-1157.0,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                weight=523.0,
+                stock=10,
+                price=1600,
+            ),
+            make_active_product(
+                119,
+                "BOTTLE_FANTA_ORANGE_600ML",
+                weight=634.0,
+                stock=10,
+                price=2000,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                weight=520.0,
+                stock=10,
+                price=2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {(product.product_id, product.count) for product in result.products} == {
+        (31, 1),
+        (119, 1),
+    }
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["rescue_candidates_added"] == 2
+    assert trace.weight_diagnostics["decision_branch"] == "stage_count_combination_match"
+    assert "forced_final_fallback" not in trace.weight_diagnostics
+
+
+def test_no_final_candidates_diagnostic_combo_runs_before_active_forced_fallback():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.diagnostic_detections = [
+        {
+            "class_id": class_id,
+            "name": name,
+            "confidence": confidence,
+        }
+        for class_id, name, confidence in (
+            (31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 0.402),
+            (119, "BOTTLE_FANTA_ORANGE_600ML", 0.4),
+        )
+        for _ in range(5)
+    ]
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-1157.0,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                weight=523.0,
+                stock=10,
+                price=1600,
+            ),
+            make_active_product(
+                119,
+                "BOTTLE_FANTA_ORANGE_600ML",
+                weight=634.0,
+                stock=10,
+                price=2000,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                weight=520.0,
+                stock=10,
+                price=2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {(product.product_id, product.count) for product in result.products} == {
+        (31, 1),
+        (119, 1),
+    }
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["diagnostic_candidates_added"] == 2
+    assert trace.weight_diagnostics["decision_branch"] == "stage_count_combination_match"
+    assert "forced_final_fallback" not in trace.weight_diagnostics
+
+
+@pytest.mark.parametrize("delta_weight", [-6.0, -10.0])
+def test_no_vision_low_weight_noise_does_not_force_condition_stick(
+    delta_weight,
+    monkeypatch,
+):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=delta_weight,
+        active_products=[
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                weight=19.0,
+                stock=10,
+                price=3000,
+            ),
+            make_active_product(
+                118,
+                "BAG_CJ_CHICKEN_BREAST_STEAK_100G",
+                weight=107.0,
+                stock=10,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    diagnostics = trace.weight_diagnostics["forced_final_fallback"]
+    assert diagnostics["accepted"] is False
+    assert diagnostics["reason"] == "active_only_low_weight_noise"
+
+
+def test_no_vision_real_condition_stick_weight_still_matches_loadcell(monkeypatch):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-18.0,
+        active_products=[
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                weight=19.0,
+                stock=10,
+                price=3000,
+            )
+        ],
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 113
+    assert result.weight_residual == 1.0
+
+
+def test_full_purchase_delta_candidate_matches_full_delta(monkeypatch):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "purchase_delta_candidates": [
+                {"weight": 200.0, "source": "last_unpaired_negative_segment"}
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-200.0,
+        active_products=[
+            make_active_product(101, "Aggregate Miss Candidate", weight=150.0, stock=3),
+            make_active_product(102, "History Candidate", weight=200.0, stock=3),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 102
+    assert result.weight_residual == 0.0
+    assert trace.weight_diagnostics["final_weight_mismatch_guard"]["accepted"] is True
+
+
+def test_forced_final_fallback_rejects_partial_purchase_delta_target(monkeypatch):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "purchase_delta_candidates": [
+                {"weight": 503.0, "source": "net_stable_delta"},
+                {"weight": 51.9, "source": "last_unpaired_negative_segment"},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-503.0,
+        active_products=[
+            make_active_product(57, "BAG_HAITAI_JAGABEE_45G", weight=52.0, stock=3),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    rejected = trace.weight_diagnostics["forced_fallback_rejected_partial_target"]
+    assert rejected["accepted"] is False
+    assert rejected["rejected"][0]["source"] == "last_unpaired_negative_segment"
+    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
+    assert guard["accepted"] is False
+    assert guard["explained_weight"] == 52.0
+
+
+def test_forced_final_fallback_tries_detected_plus_active_pair_after_single_miss(
+    monkeypatch,
+):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[make_candidate(101, "Detected Candidate", confidence=0.65)],
+        delta_weight=-250.0,
+        active_products=[
+            make_active_product(101, "Detected Candidate", weight=100.0, stock=3),
+            make_active_product(102, "Unseen Active Product", weight=150.0, stock=3),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert {product.product_id: product.count for product in result.products} == {
+        101: 1,
+        102: 1,
+    }
+    assert result.weight_residual == 0.0
+    assert trace.weight_diagnostics["forced_final_fallback"]["mode"] == (
+        "detected_plus_active_pair"
+    )
+
+
+def test_forced_final_fallback_prefers_supported_detected_repeat_over_weak_pair(
+    monkeypatch,
+):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({"purchase_delta_candidates": [{"weight": 1047.0}]})
+    trace.stage_counts_by_class = {
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 34,
+            "raw_max_confidence": 0.2018,
+            "threshold_passed": 3,
+            "threshold_passed_max_confidence": 0.2018,
+            "roi_filtered": 3,
+            "roi_filtered_max_confidence": 0.2018,
+            "cameras": {
+                "side": {
+                    "raw": 34,
+                    "raw_max_confidence": 0.2018,
+                    "threshold_passed": 3,
+                    "threshold_passed_max_confidence": 0.2018,
+                    "roi_filtered": 3,
+                    "roi_filtered_max_confidence": 0.2018,
+                }
+            },
+        },
+        "54": {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "raw": 2,
+            "raw_max_confidence": 0.0231,
+            "threshold_filtered": 2,
+            "threshold_filtered_max_confidence": 0.0231,
+            "cameras": {
+                "side": {
+                    "raw": 2,
+                    "raw_max_confidence": 0.0231,
+                    "threshold_filtered": 2,
+                    "threshold_filtered_max_confidence": 0.0231,
+                }
+            },
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-1047.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                weight=520.0,
+                stock=581,
+                price=2300,
+            ),
+            make_active_product(
+                54,
+                "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                weight=530.0,
+                stock=584,
+                price=1600,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert {product.product_id: product.count for product in result.products} == {75: 2}
+    assert result.weight_explained == 1040.0
+    assert result.weight_residual == 7.0
+    diagnostics = trace.weight_diagnostics["forced_final_fallback"]
+    assert diagnostics["mode"] == "detected_same_product_pair"
+    assert diagnostics["pair_support_rank"] == 0
+
+
+def test_stage_count_supported_mixed_pair_runs_before_forced_repeat():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({"purchase_delta_candidates": [{"weight": 205.0}]})
+    trace.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "Detected Product",
+            "raw": 12,
+            "raw_max_confidence": 0.45,
+            "cameras": {"side": {"raw": 12, "raw_max_confidence": 0.45}},
+        },
+        "102": {
+            "class_id": 102,
+            "name": "Also Supported Product",
+            "raw": 10,
+            "raw_max_confidence": 0.40,
+            "cameras": {"side": {"raw": 10, "raw_max_confidence": 0.40}},
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-205.0,
+        active_products=[
+            make_active_product(101, "Detected Product", weight=100.0, stock=3),
+            make_active_product(102, "Also Supported Product", weight=105.0, stock=3),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {product.product_id: product.count for product in result.products} == {
+        101: 1,
+        102: 1,
+    }
+    assert result.weight_residual == 0.0
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["accepted"] is True
+    assert trace.weight_diagnostics["decision_branch"] == "stage_count_combination_match"
+    assert "forced_final_fallback" not in trace.weight_diagnostics
+
+
+def test_segment_first_matching_prefers_split_same_product_over_single_aggregate():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 210.0, "segment_index": 0},
+                {"weight": 105.0, "segment_index": 1},
+                {"weight": 103.0, "segment_index": 2},
+                {"weight": 107.0, "segment_index": 3},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(201, "Coca Cola 530", confidence=0.95),
+            make_candidate(101, "Haneul Bori", confidence=0.82),
+        ],
+        delta_weight=-530.0,
+        active_products=[
+            make_active_product(101, "Haneul Bori", weight=105.0, stock=10),
+            make_active_product(201, "Coca Cola 530", weight=530.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 5)
+    ]
+    assert result.weight_residual == 4.0
+    assert trace.weight_diagnostics["decision_branch"] == "segment_weight_matching"
+
+
+def test_aggregate_matching_still_uses_single_product_without_segment_targets():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(201, "Coca Cola 530", confidence=0.95),
+            make_candidate(101, "Haneul Bori", confidence=0.82),
+        ],
+        delta_weight=-530.0,
+        active_products=[
+            make_active_product(101, "Haneul Bori", weight=105.0, stock=10),
+            make_active_product(201, "Coca Cola 530", weight=530.0, stock=10),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (201, 1)
+    ]
+
+
+def test_no_vision_segment_match_returns_partial_instead_of_none():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 210.0, "segment_index": 0},
+                {"weight": 105.0, "segment_index": 1},
+                {"weight": 103.0, "segment_index": 2},
+                {"weight": 107.0, "segment_index": 3},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-530.0,
+        active_products=[
+            make_active_product(101, "Haneul Bori", weight=105.0, stock=10),
+            make_active_product(201, "Coca Cola 530", weight=530.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 5)
+    ]
+
+
+def test_segment_matching_prefers_candidate_supported_repeat_over_active_only_residual():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 743.4, "segment_index": 0},
+                {"weight": 373.6, "segment_index": 1},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                8,
+                "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                confidence=0.2371,
+            )
+        ],
+        delta_weight=-1117.0,
+        active_products=[
+            make_active_product(
+                8,
+                "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                weight=367.0,
+                stock=10,
+                price=1300,
+            ),
+            make_active_product(
+                26,
+                "CAN_WELCHS_ZERO_GRAPE_355ML",
+                weight=371.0,
+                stock=10,
+                price=1000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (8, 3)
+    ]
+    assert result.weight_residual == 16.0
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["candidate_supported_override"]["accepted"] is True
+    assert diagnostics["candidate_supported_override"]["aggregate_residual"] == 16.0
+    assert diagnostics["candidate_supported_override"]["allowed_residual"] == 20.0
+
+
+def test_segment_matching_prefers_rank1_sky_repeat_over_supported_small_fragments():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 38.0, "segment_index": 0},
+                {"weight": 734.0, "segment_index": 1},
+                {"weight": 265.4, "segment_index": 2},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "113": {
+            "class_id": 113,
+            "name": "STICK_INNON_CONDITION_STICK_18G",
+            "raw": 20,
+            "raw_max_confidence": 0.45,
+            "motion_passed": True,
+            "final_rank": 5,
+        },
+        "40": {
+            "class_id": 40,
+            "name": "BOX_LOTTE_BINCH_102G",
+            "raw": 20,
+            "raw_max_confidence": 0.42,
+            "motion_passed": True,
+            "final_rank": 6,
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 1.0),
+            make_candidate(35, "BAG_NONGSHIM_CHAPAGETTI_140G", 0.447),
+            make_candidate(8, "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML", 0.433),
+            make_candidate(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 0.417),
+        ],
+        delta_weight=-1037.4,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                523.0,
+                stock=10,
+                price=1200,
+            ),
+            make_active_product(
+                35,
+                "BAG_NONGSHIM_CHAPAGETTI_140G",
+                149.0,
+                stock=10,
+                price=4000,
+            ),
+            make_active_product(
+                8,
+                "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                367.0,
+                stock=10,
+                price=1300,
+            ),
+            make_active_product(
+                54,
+                "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                530.0,
+                stock=10,
+                price=1600,
+            ),
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                19.0,
+                stock=10,
+                price=3000,
+            ),
+            make_active_product(
+                40,
+                "BOX_LOTTE_BINCH_102G",
+                130.0,
+                stock=10,
+                price=1500,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 2)
+    ]
+    assert result.weight_explained == 1046.0
+    assert result.weight_residual == pytest.approx(8.6)
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    override = diagnostics["aggregate_evidence_override"]
+    assert override["accepted"] is True
+    assert isinstance(override["selected_has_unsupported_small_fragments"], bool)
+    assert override["selected"]["class_id"] == 31
+
+
+def test_segment_matching_prefers_evidenced_trevi_and_king_rush_over_active_only_and_bibigo_override():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 523.0, "segment_index": 0},
+                {"weight": 371.8, "segment_index": 1},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "54": {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "raw": 318,
+            "raw_max_confidence": 0.8568,
+            "threshold_passed": 224,
+            "threshold_passed_max_confidence": 0.8568,
+            "roi_passed": 3,
+            "motion_gate_passed": True,
+            "threshold_rescue_candidate": True,
+        },
+        "8": {
+            "class_id": 8,
+            "name": "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+            "raw": 95,
+            "raw_max_confidence": 0.295,
+            "threshold_passed": 1,
+            "threshold_passed_max_confidence": 0.295,
+            "roi_passed": 1,
+            "motion_gate_passed": True,
+            "threshold_rescue_candidate": True,
+        },
+        "120": {
+            "class_id": 120,
+            "name": "CUP_BIBIGO_TTEOKBOKKI_110G",
+            "raw": 7,
+            "raw_max_confidence": 0.4177,
+            "threshold_passed": 3,
+            "threshold_passed_max_confidence": 0.4177,
+            "roi_passed": 3,
+            "motion_gate_passed": True,
+            "threshold_rescue_candidate": True,
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-894.0,
+        active_products=[
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+            make_active_product(
+                8,
+                "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                367.0,
+                10,
+            ),
+            make_active_product(120, "CUP_BIBIGO_TTEOKBOKKI_110G", 144.0, 10),
+            make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+            make_active_product(26, "CAN_WELCHS_ZERO_GRAPE_355ML", 371.0, 10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (54, 1),
+        (8, 1),
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["aggregate_evidence_override"]["accepted"] is False
+    assert diagnostics["selections"][0]["class_id"] == 54
+    assert diagnostics["selections"][1]["class_id"] == 8
+    rejected_by_id = {
+        candidate["class_id"]: candidate
+        for candidate in diagnostics["aggregate_evidence_override"]["candidates"]
+    }
+    assert rejected_by_id[120]["reason"] == "insufficient_aggregate_evidence"
+
+
+def test_segment_matching_keeps_clean_supported_segments_over_aggregate_repeat():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 129.6, "segment_index": 0},
+                {"weight": 219.3, "segment_index": 1},
+                {"weight": 229.5, "segment_index": 2},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "35": {
+            "class_id": 35,
+            "name": "BAG_NONGSHIM_CHAPAGETTI_140G",
+            "raw": 142,
+            "raw_max_confidence": 0.5889,
+            "threshold_passed": 55,
+            "threshold_passed_max_confidence": 0.5889,
+            "roi_passed": 55,
+            "motion_gate_passed": True,
+            "cameras": {
+                "side": {
+                    "raw": 102,
+                    "raw_max_confidence": 0.5889,
+                    "threshold_passed": 55,
+                    "threshold_passed_max_confidence": 0.5889,
+                    "roi_passed": 55,
+                    "motion_filtered": 55,
+                },
+                "top": {
+                    "raw": 40,
+                    "raw_max_confidence": 0.2516,
+                },
+            },
+        },
+        "40": {
+            "class_id": 40,
+            "name": "BOX_LOTTE_BINCH_102G",
+            "raw": 179,
+            "raw_max_confidence": 0.4668,
+            "threshold_passed": 2,
+            "threshold_passed_max_confidence": 0.4668,
+            "roi_passed": 1,
+            "motion_gate_passed": True,
+            "cameras": {
+                "top": {
+                    "raw": 156,
+                    "raw_max_confidence": 0.4668,
+                    "threshold_passed": 1,
+                    "threshold_passed_max_confidence": 0.4668,
+                    "roi_filtered": 1,
+                },
+                "side": {
+                    "raw": 23,
+                    "raw_max_confidence": 0.3757,
+                    "threshold_passed": 1,
+                    "threshold_passed_max_confidence": 0.3757,
+                    "roi_passed": 1,
+                    "motion_filtered": 1,
+                },
+            },
+        },
+        "95": {
+            "class_id": 95,
+            "name": "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+            "raw": 258,
+            "raw_max_confidence": 0.8661,
+            "threshold_passed": 120,
+            "threshold_passed_max_confidence": 0.8661,
+            "roi_passed": 120,
+            "motion_passed": 120,
+            "motion_gate_passed": True,
+            "cameras": {
+                "side": {
+                    "raw": 137,
+                    "raw_max_confidence": 0.8661,
+                    "threshold_passed": 120,
+                    "threshold_passed_max_confidence": 0.8661,
+                    "roi_passed": 120,
+                    "motion_passed": 120,
+                },
+                "top": {
+                    "raw": 121,
+                    "raw_max_confidence": 0.2415,
+                },
+            },
+        },
+        "12": {
+            "class_id": 12,
+            "name": "CAN_LOTTE_LETSBE_MILD_COFFEE_175ML",
+            "raw": 34,
+            "raw_max_confidence": 0.3337,
+            "threshold_passed": 1,
+            "threshold_passed_max_confidence": 0.3337,
+            "motion_gate_passed": True,
+            "cameras": {
+                "top": {
+                    "raw": 25,
+                    "raw_max_confidence": 0.3337,
+                    "threshold_passed": 1,
+                    "threshold_passed_max_confidence": 0.3337,
+                    "roi_filtered": 1,
+                },
+                "side": {
+                    "raw": 9,
+                    "raw_max_confidence": 0.2024,
+                },
+            },
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                confidence=0.5197,
+            )
+        ],
+        delta_weight=-580.0,
+        active_products=[
+            make_active_product(35, "BAG_NONGSHIM_CHAPAGETTI_140G", 149.0, 10, 4000),
+            make_active_product(40, "BOX_LOTTE_BINCH_102G", 130.0, 10, 1500),
+            make_active_product(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                220.0,
+                10,
+                2000,
+            ),
+            make_active_product(
+                12,
+                "CAN_LOTTE_LETSBE_MILD_COFFEE_175ML",
+                228.0,
+                10,
+                1500,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (40, 1),
+        (95, 1),
+        (12, 1),
+    ]
+    assert result.weight_residual == 2.6
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["aggregate_evidence_override"]["accepted"] is False
+    assert (
+        diagnostics["aggregate_evidence_override"]["reason"]
+        == "clean_supported_segment_match_preferred"
+    )
+    assert diagnostics["aggregate_evidence_override"]["candidate_aggregate_residual"] == 17.6
+    assert diagnostics["selected_segment_all_supported"] is True
+    assert (
+        diagnostics["aggregate_evidence_override"]["selected_segment_summary"][
+            "all_segment_residuals_within_tolerance"
+        ]
+        is True
+    )
+
+
+def test_segment_stage_recovery_matches_full_haluyache_letsbe_jagabee_delta():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "purchase_delta_candidates": [
+                {"weight": 503.0, "source": "net_stable_delta"},
+                {"weight": 502.8, "source": "unpaired_negative_total"},
+                {"weight": 51.9, "source": "last_unpaired_negative_segment"},
+            ],
+            "removal_segment_targets": [
+                {
+                    "source": "unpaired_negative_segment",
+                    "weight": 220.9,
+                    "delta": -220.9,
+                    "segment_index": 0,
+                },
+                {
+                    "source": "unpaired_negative_segment",
+                    "weight": 230.0,
+                    "delta": -230.0,
+                    "segment_index": 1,
+                },
+                {
+                    "source": "unpaired_negative_segment",
+                    "weight": 51.9,
+                    "delta": -51.9,
+                    "segment_index": 2,
+                },
+            ],
+            "channel_removal_segment_targets": [
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 220.0,
+                    "delta": -220.0,
+                    "segment_index": 0,
+                    "channel_index": 0,
+                    "evidence_required": True,
+                },
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 282.4,
+                    "delta": -282.4,
+                    "segment_index": 1,
+                    "channel_index": 1,
+                    "evidence_required": True,
+                },
+            ],
+        }
+    )
+    trace.stage_counts_by_class = {
+        "12": make_stage_count_entry(
+            12,
+            "CAN_LOTTE_LETSBE_MILD_COFFEE_175ML",
+            confidence=0.3234,
+            raw=8,
+            threshold_passed=1,
+            motion_gate_passed=True,
+        ),
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=95,
+                class_name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                top_confidence=0.0,
+                side_confidence=0.5577,
+                combined_confidence=0.5577,
+                vote_count=3,
+                source="vision",
+                motion_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=40,
+                class_name="BOX_LOTTE_BINCH_102G",
+                top_confidence=0.0,
+                side_confidence=0.3903,
+                combined_confidence=0.3903,
+                vote_count=2,
+                source="vision",
+                motion_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=57,
+                class_name="BAG_HAITAI_JAGABEE_45G",
+                top_confidence=0.1565,
+                side_confidence=0.0,
+                combined_confidence=0.1565,
+                vote_count=2,
+                source="vision",
+                motion_gate_passed=True,
+            ),
+        ],
+        delta_weight=-503.0,
+        active_products=[
+            make_active_product(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                220.0,
+                10,
+                2000,
+            ),
+            make_active_product(
+                12,
+                "CAN_LOTTE_LETSBE_MILD_COFFEE_175ML",
+                228.0,
+                10,
+                1500,
+            ),
+            make_active_product(57, "BAG_HAITAI_JAGABEE_45G", 52.0, 10, 2500),
+            make_active_product(40, "BOX_LOTTE_BINCH_102G", 130.0, 10, 1500),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {product.product_id: product.count for product in result.products} == {
+        95: 1,
+        12: 1,
+        57: 1,
+    }
+    assert result.weight_explained == 500.0
+    assert result.weight_residual == 3.0
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["target_source"] == "removal_segment_targets"
+    assert trace.weight_diagnostics["channel_segment_weight_matching"]["reason"] == (
+        "segment_without_valid_option"
+    )
+    assert trace.weight_diagnostics["final_weight_mismatch_guard"]["accepted"] is True
+    assert "forced_final_fallback" not in trace.weight_diagnostics
+
+
+def test_stage_count_prefers_letsbe_repeat_over_condition_fragment():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "12": make_stage_count_entry(
+            12,
+            "CAN_LOTTE_LETSBE_MILD_COFFEE_175ML",
+            confidence=0.3337,
+            raw=72,
+            threshold_passed=24,
+            motion_gate_passed=True,
+        ),
+        "113": make_stage_count_entry(
+            113,
+            "STICK_INNON_CONDITION_STICK_18G",
+            confidence=0.12,
+            raw=8,
+            motion_gate_passed=False,
+        ),
+    }
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[
+            make_candidate(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                confidence=0.546,
+            )
+        ],
+        delta_weight=-460.0,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                211.0,
+                10,
+                2000,
+            ),
+            make_active_product(
+                12,
+                "CAN_LOTTE_LETSBE_MILD_COFFEE_175ML",
+                228.0,
+                10,
+                1500,
+            ),
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                19.0,
+                10,
+                3000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (12, 2)
+    ]
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["accepted"] is True
+    selected_items = diagnostics["selected"]["items"]
+    assert len(selected_items) == 1
+    assert selected_items[0]["class_id"] == 12
+    assert selected_items[0]["count"] == 2
+    assert selected_items[0]["source"] == "stage_counts"
+    assert (
+        diagnostics["strict_diagnostics"]["rejected_combination_counts"][
+            "unsupported_small_repeat_fragment"
+        ]
+        >= 1
+    )
+
+
+def test_weak_condition_repeat_fragment_does_not_complete_basket():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "113": make_stage_count_entry(
+            113,
+            "STICK_INNON_CONDITION_STICK_18G",
+            confidence=0.12,
+            raw=8,
+            motion_gate_passed=False,
+        ),
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                confidence=0.546,
+            )
+        ],
+        delta_weight=-460.0,
+        active_products=[
+            make_active_product(
+                95,
+                "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                211.0,
+                10,
+                2000,
+            ),
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                19.0,
+                10,
+                3000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert all(product.product_id != 113 for product in result.products)
+    assert not (
+        result.status == JudgmentStatus.COMPLETE
+        and {product.product_id for product in result.products} == {95, 113}
+    )
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["accepted"] is False
+    assert (
+        diagnostics["strict_diagnostics"]["rejected_combination_counts"][
+            "unsupported_small_repeat_fragment"
+        ]
+        >= 1
+    )
+
+
+def test_strong_stage_condition_repeat_is_still_allowed():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "113": make_stage_count_entry(
+            113,
+            "STICK_INNON_CONDITION_STICK_18G",
+            confidence=0.55,
+            raw=50,
+            threshold_passed=25,
+            motion_gate_passed=True,
+        ),
+    }
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[],
+        delta_weight=-38.0,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                19.0,
+                10,
+                3000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (113, 2)
+    ]
+
+
+def test_segment_matching_splits_merged_bottle_segment_before_small_repeats():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 1163.9, "segment_index": 0},
+                {"weight": 540.9, "segment_index": 1},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "119": {
+            "class_id": 119,
+            "name": "BOTTLE_FANTA_ORANGE_600ML",
+            "raw": 8,
+            "raw_max_confidence": 0.7592,
+            "threshold_passed": 5,
+            "threshold_passed_max_confidence": 0.7592,
+            "roi_passed": 5,
+            "motion_passed": 5,
+            "motion_gate_passed": True,
+            "final_rank": 1,
+            "cameras": {
+                "side": {
+                    "raw": 8,
+                    "raw_max_confidence": 0.7592,
+                    "threshold_passed": 5,
+                    "threshold_passed_max_confidence": 0.7592,
+                    "roi_passed": 5,
+                    "motion_passed": 5,
+                }
+            },
+        },
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 123,
+            "raw_max_confidence": 0.1097,
+            "cameras": {
+                "side": {
+                    "raw": 121,
+                    "raw_max_confidence": 0.1097,
+                    "threshold_filtered": 121,
+                    "threshold_filtered_max_confidence": 0.1097,
+                },
+                "top": {
+                    "raw": 2,
+                    "raw_max_confidence": 0.0169,
+                },
+            },
+        },
+        "29": {
+            "class_id": 29,
+            "name": "BOTTLE_NONGSHIM_BAKSANSOO_500ML_V2",
+            "raw": 8,
+            "raw_max_confidence": 0.1132,
+            "motion_gate_passed": True,
+            "cameras": {
+                "side": {
+                    "raw": 7,
+                    "raw_max_confidence": 0.1132,
+                },
+                "top": {
+                    "raw": 1,
+                    "raw_max_confidence": 0.0801,
+                },
+            },
+        },
+        "23": {
+            "class_id": 23,
+            "name": "BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML",
+            "raw": 1462,
+            "raw_max_confidence": 0.5107,
+            "threshold_passed": 16,
+            "threshold_passed_max_confidence": 0.5107,
+            "roi_passed": 5,
+            "motion_passed": 5,
+            "motion_gate_passed": True,
+            "final_rank": 2,
+            "cameras": {
+                "side": {
+                    "raw": 44,
+                    "raw_max_confidence": 0.5107,
+                    "threshold_passed": 5,
+                    "threshold_passed_max_confidence": 0.5107,
+                    "roi_passed": 5,
+                    "motion_passed": 5,
+                },
+                "top": {
+                    "raw": 1418,
+                    "raw_max_confidence": 0.4766,
+                    "threshold_passed": 11,
+                    "threshold_passed_max_confidence": 0.4766,
+                    "hand_path_passed": 1,
+                },
+            },
+        },
+        "114": {
+            "class_id": 114,
+            "name": "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+            "raw": 6,
+            "raw_max_confidence": 0.7853,
+            "threshold_passed": 4,
+            "threshold_passed_max_confidence": 0.7853,
+            "roi_passed": 2,
+            "motion_passed": 2,
+            "motion_gate_passed": True,
+            "final_rank": 3,
+            "cameras": {
+                "side": {
+                    "raw": 3,
+                    "raw_max_confidence": 0.7853,
+                    "threshold_passed": 2,
+                    "roi_passed": 2,
+                    "motion_passed": 2,
+                }
+            },
+        },
+        "35": {
+            "class_id": 35,
+            "name": "BAG_NONGSHIM_CHAPAGETTI_140G",
+            "raw": 28,
+            "raw_max_confidence": 0.4766,
+            "threshold_passed": 9,
+            "threshold_passed_max_confidence": 0.4766,
+            "motion_gate_passed": True,
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                119,
+                "BOTTLE_FANTA_ORANGE_600ML",
+                confidence=0.4555,
+            ),
+            make_candidate(
+                23,
+                "BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML",
+                confidence=0.3064,
+            ),
+            make_candidate(
+                114,
+                "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                confidence=0.2103,
+            ),
+        ],
+        delta_weight=-1705.0,
+        active_products=[
+            make_active_product(119, "BOTTLE_FANTA_ORANGE_600ML", 634.0, 10, 2000),
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(
+                29,
+                "BOTTLE_NONGSHIM_BAKSANSOO_500ML_V2",
+                539.0,
+                10,
+                1000,
+            ),
+            make_active_product(
+                23,
+                "BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML",
+                639.0,
+                10,
+                6000,
+            ),
+            make_active_product(35, "BAG_NONGSHIM_CHAPAGETTI_140G", 149.0, 10, 4000),
+            make_active_product(114, "BOX_LOTTE_PEPERO_ORIGINAL_46G", 66.0, 10, 2500),
+        ],
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (119, 1),
+        (75, 1),
+        (29, 1),
+    ]
+    assert result.weight_residual == 11.8
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["selections"][0]["option_kind"] == "compound"
+    assert [
+        (item["class_id"], item["count"])
+        for item in diagnostics["selections"][0]["items"]
+    ] == [(119, 1), (75, 1)]
+    assert diagnostics["selections"][0]["selection_reason"] == (
+        "trusted_compound_segment_split"
+    )
+    assert diagnostics["selections"][1]["class_id"] == 29
+    rejected_small_repeats = [
+        option
+        for segment in diagnostics["segment_options"]
+        for option in segment["top_options"] + segment.get("rejected_options", [])
+        if option.get("rejected_reason")
+        in {
+            "trusted_or_single_item_segment_preferred",
+            "count_exceeds_segment_grip_limit",
+        }
+    ]
+    assert {option["class_id"] for option in rejected_small_repeats} >= {35, 114}
+
+
+def test_segment_grip_limit_rejects_single_segment_pepero_x8_candidate():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 528.0, "segment_index": 0},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                114,
+                "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                confidence=0.72,
+            )
+        ],
+        delta_weight=-528.0,
+        active_products=[
+            make_active_product(114, "BOX_LOTTE_PEPERO_ORIGINAL_46G", 66.0, 20, 2500),
+            make_active_product(29, "BOTTLE_NONGSHIM_BAKSANSOO_500ML_V2", 530.0, 10, 1000),
+        ],
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] != [
+        (114, 8)
+    ]
+    diagnostics = trace.weight_diagnostics["same_product_count_match"]
+    assert diagnostics["segment_grip_limit"] == 3
+    pepero_diag = next(
+        candidate
+        for candidate in diagnostics["candidates"]
+        if candidate["class_id"] == 114
+    )
+    assert pepero_diag["nearest_count"] == 8
+    assert pepero_diag["reason"] == "count_exceeds_segment_grip_limit"
+
+
+def test_segment_grip_limit_allows_three_items_per_detected_segment():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 198.0, "segment_index": 0},
+                {"weight": 198.0, "segment_index": 1},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-396.0,
+        active_products=[
+            make_active_product(114, "BOX_LOTTE_PEPERO_ORIGINAL_46G", 66.0, 20, 2500),
+        ],
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (114, 6)
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["max_items_per_segment"] == 3
+    assert [selection["count"] for selection in diagnostics["selections"]] == [3, 3]
+
+
+def test_segment_aggregate_override_respects_total_grip_limit():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 264.0, "segment_index": 0},
+                {"weight": 264.0, "segment_index": 1},
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                114,
+                "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                confidence=0.72,
+            )
+        ],
+        delta_weight=-528.0,
+        active_products=[
+            make_active_product(114, "BOX_LOTTE_PEPERO_ORIGINAL_46G", 66.0, 20, 2500),
+            make_active_product(201, "BOTTLE_TEST_264G", 264.0, 10, 1000),
+        ],
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (201, 2)
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    override = diagnostics["aggregate_evidence_override"]
+    assert override["accepted"] is False
+    assert override["segment_grip_limit"] == 6
+    pepero_diag = next(
+        candidate
+        for candidate in override["candidates"]
+        if candidate["class_id"] == 114
+    )
+    assert pepero_diag["nearest_count"] == 8
+    assert pepero_diag["reason"] == "count_exceeds_segment_grip_limit"
+
+
+def test_segment_matching_uses_camera_aware_stage_score_for_welchs_over_top_raw_cupban():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 370.7, "segment_index": 0},
+                {"weight": 374.1, "segment_index": 1},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "26": {
+            "class_id": 26,
+            "name": "CAN_WELCHS_ZERO_GRAPE_355ML",
+            "raw": 10,
+            "raw_max_confidence": 0.3748,
+            "threshold_passed": 2,
+            "threshold_passed_max_confidence": 0.3748,
+            "roi_filtered": 1,
+            "roi_filtered_max_confidence": 0.3007,
+            "cameras": {
+                "side": {
+                    "raw": 10,
+                    "raw_max_confidence": 0.3748,
+                    "threshold_passed": 2,
+                    "threshold_passed_max_confidence": 0.3748,
+                    "roi_filtered": 1,
+                    "roi_filtered_max_confidence": 0.3007,
+                    "motion_filtered": 1,
+                }
+            },
+        },
+        "100": {
+            "class_id": 100,
+            "name": "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+            "raw": 43,
+            "raw_max_confidence": 0.0927,
+            "threshold_filtered": 43,
+            "threshold_filtered_max_confidence": 0.0927,
+            "cameras": {
+                "top": {
+                    "raw": 43,
+                    "raw_max_confidence": 0.0927,
+                    "threshold_filtered": 43,
+                    "threshold_filtered_max_confidence": 0.0927,
+                }
+            },
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-744.4,
+        active_products=[
+            make_active_product(26, "CAN_WELCHS_ZERO_GRAPE_355ML", 371.0, 10),
+            make_active_product(
+                100,
+                "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                365.0,
+                10,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (26, 2)
+    ]
+    assert result.weight_residual == 3.4
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert [selection["class_id"] for selection in diagnostics["selections"]] == [
+        26,
+        26,
+    ]
+    welchs_option = next(
+        option
+        for option in diagnostics["segment_options"][0]["top_options"]
+        if option["class_id"] == 26
+    )
+    cupban_option = next(
+        option
+        for option in diagnostics["segment_options"][0]["top_options"]
+        if option["class_id"] == 100
+    )
+    assert welchs_option["stage_score"] > cupban_option["stage_score"]
+    assert welchs_option["side_confidence"] > cupban_option["side_confidence"]
+
+
+def _fragmented_trevi_trace() -> FakeLoadcellTrace:
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 243.3, "segment_index": 0},
+                {"weight": 276.5, "segment_index": 1},
+                {"weight": 522.3, "segment_index": 2},
+                {"weight": 533.9, "segment_index": 3},
+                {"weight": 523.0, "segment_index": 4},
+                {"weight": 184.7, "segment_index": 5},
+                {"weight": 340.8, "segment_index": 6},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "54": {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "raw": 203,
+            "raw_max_confidence": 0.7295,
+            "threshold_passed": 90,
+            "threshold_passed_max_confidence": 0.7295,
+            "roi_passed": 5,
+            "roi_filtered": 85,
+            "roi_filtered_max_confidence": 0.6689,
+            "motion_gate_passed": True,
+        },
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 54,
+            "raw_max_confidence": 0.5651,
+            "threshold_passed": 48,
+            "threshold_passed_max_confidence": 0.5651,
+            "roi_passed": 40,
+            "motion_gate_passed": True,
+        },
+        "44": {
+            "class_id": 44,
+            "name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+            "raw": 155,
+            "raw_max_confidence": 0.5458,
+            "threshold_passed": 104,
+            "threshold_passed_max_confidence": 0.5458,
+            "threshold_rescue_candidate": True,
+            "motion_gate_passed": False,
+        },
+    }
+    trace.diagnostic_detections = [
+        {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "confidence": 0.4388,
+            "camera": "side",
+            "frame_index": index,
+        }
+        for index in range(7)
+    ] + [
+        {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "confidence": 0.5564,
+            "camera": "side",
+            "frame_index": index,
+        }
+        for index in range(3)
+    ]
+    return trace
+
+
+def _fragmented_trevi_active_products() -> list[MockActiveProduct]:
+    return [
+        make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10, 1600),
+        make_active_product(
+            75,
+            "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            520.0,
+            10,
+            2300,
+        ),
+        make_active_product(
+            44,
+            "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+            520.0,
+            10,
+            2000,
+        ),
+        make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+        make_active_product(38, "BAG_HAITAI_HOME_RUN_BALL_41G", 64.0, 10),
+        make_active_product(40, "BOX_LOTTE_BINCH_102G", 130.0, 10),
+        make_active_product(57, "BAG_HAITAI_JAGABEE_45G", 52.0, 10),
+        make_active_product(113, "STICK_INNON_CONDITION_STICK_18G", 19.0, 10),
+        make_active_product(114, "BOX_LOTTE_PEPERO_ORIGINAL_46G", 66.0, 10),
+    ]
+
+
+def test_segment_matching_prefers_strong_aggregate_evidence_for_collision_fragments():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = _fragmented_trevi_trace()
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-2625.0,
+        active_products=_fragmented_trevi_active_products(),
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (54, 5)
+    ]
+    assert result.weight_residual == 25.5
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["aggregate_evidence_override"]["accepted"] is True
+    assert diagnostics["aggregate_evidence_override"]["selected"]["class_id"] == 54
+    assert (
+        diagnostics["aggregate_evidence_override"]["selected"]["aggregate_residual"]
+        == 25.5
+    )
+    assert (
+        diagnostics["aggregate_evidence_override"]["selected"]["allowed_residual"]
+        == 30.0
+    )
+    rejected_by_id = {
+        candidate["class_id"]: candidate
+        for candidate in diagnostics["aggregate_evidence_override"]["candidates"]
+    }
+    assert rejected_by_id[44]["reason"] == "insufficient_aggregate_evidence"
+
+
+def test_segment_matching_does_not_use_low_diagnostic_evidence_for_aggregate_override():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = _fragmented_trevi_trace()
+    trace.stage_counts_by_class = {}
+    trace.diagnostic_detections = [
+        {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "confidence": 0.29,
+            "camera": "side",
+            "frame_index": index,
+        }
+        for index in range(4)
+    ]
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-2625.0,
+        active_products=_fragmented_trevi_active_products(),
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] != [
+        (54, 5)
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["aggregate_evidence_override"]["accepted"] is False
+
+
+def test_segment_matching_uses_strong_diagnostic_only_aggregate_as_partial():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = _fragmented_trevi_trace()
+    trace.stage_counts_by_class = {}
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-2625.0,
+        active_products=_fragmented_trevi_active_products(),
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (54, 5)
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["aggregate_evidence_override"]["accepted"] is True
+    assert diagnostics["aggregate_evidence_override"]["selected"]["status"] == "partial"
+
+
+def test_segment_matching_prefers_active_bottle_over_weak_small_item_repeats():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 521.0, "segment_index": 0},
+                {"weight": 521.0, "segment_index": 1},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "114": {
+            "class_id": 114,
+            "name": "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+            "raw": 2,
+            "raw_max_confidence": 0.019,
+            "cameras": {"top": {"raw": 2, "raw_max_confidence": 0.019}},
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-1042.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                stock=10,
+                price=2300,
+            ),
+            make_active_product(
+                114,
+                "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                66.0,
+                stock=20,
+                price=2500,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 2)
+    ]
+    assert result.weight_explained == 1040.0
+    assert result.weight_residual == 2.0
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["products"] == [
+        {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "count": 2,
+            "unit_weight": 520.0,
+        }
+    ]
+
+
+def test_segment_matching_prefers_active_sky_barley_over_weak_binch_repeats():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 522.7, "segment_index": 0},
+                {"weight": 522.7, "segment_index": 1},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "40": {
+            "class_id": 40,
+            "name": "BOX_LOTTE_BINCH_102G",
+            "raw": 20,
+            "raw_max_confidence": 0.1694,
+            "cameras": {"top": {"raw": 20, "raw_max_confidence": 0.1694}},
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-1045.4,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                523.0,
+                stock=10,
+                price=2000,
+            ),
+            make_active_product(
+                40,
+                "BOX_LOTTE_BINCH_102G",
+                130.0,
+                stock=20,
+                price=1500,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 2)
+    ]
+    assert result.weight_explained == 1046.0
+    assert result.weight_residual == 0.6
+
+
+def test_strict_single_match_prefers_regular_rank1_over_rescue_residual_edge():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 0.417),
+            make_candidate(23, "BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML", 0.336),
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.0,
+                side_confidence=0.082,
+                combined_confidence=0.082,
+                vote_count=3,
+                source="threshold_rescue",
+                raw_vote_count=3,
+                side_motion_passed=True,
+            ),
+        ],
+        delta_weight=-527.0,
+        active_products=[
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                523.0,
+                10,
+                1200,
+            ),
+            make_active_product(
+                23,
+                "BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML",
+                639.0,
+                10,
+                6000,
+            ),
+            make_active_product(
+                54,
+                "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                530.0,
+                10,
+                1600,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 1)
+    ]
+    assert result.weight_residual == 4.0
+
+
+def test_same_weight_candidate_guard_prefers_regular_pepsi_over_rescue_and_active_collision():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                0.235,
+            ),
+            EnsembleResult(
+                class_id=31,
+                class_name="BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.068,
+                combined_confidence=0.068,
+                vote_count=2,
+                source="threshold_rescue",
+                raw_vote_count=2,
+                side_motion_passed=True,
+            ),
+        ],
+        delta_weight=-524.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                523.0,
+                10,
+                1200,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 1)
+    ]
+    assert result.weight_residual == 4.0
+    diagnostics = trace.weight_diagnostics["same_weight_candidate_collision"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["selected"]["class_id"] == 75
+    assert diagnostics["rejected_best_strict"]["class_id"] == 31
+
+
+def test_single_regular_pepsi_outside_strict_does_not_override_trevi_weight_gate_rescue():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=75,
+                class_name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                top_confidence=0.0,
+                side_confidence=0.32,
+                combined_confidence=0.32,
+                vote_count=12,
+                source="vision",
+                raw_vote_count=12,
+            ),
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.1446,
+                side_confidence=0.1446,
+                combined_confidence=0.1446,
+                vote_count=7,
+                source="threshold_rescue",
+                raw_vote_count=7,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+        ],
+        delta_weight=-529.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(
+                54,
+                "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                530.0,
+                10,
+                1600,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (54, 1)
+    ]
+    assert result.weight_residual == 1.0
+    diagnostics = trace.weight_diagnostics["same_weight_candidate_collision"]
+    assert diagnostics["accepted"] is False
+    pepsi_diag = next(
+        candidate for candidate in diagnostics["candidates"]
+        if candidate["class_id"] == 75
+    )
+    assert pepsi_diag["residual"] == 9.0
+    assert pepsi_diag["allowed_residual"] == 5.0
+    assert pepsi_diag["reason"] == "residual_exceeds_candidate_guard_tolerance"
+
+
+def test_single_regular_trevi_outside_strict_does_not_override_corn_weight_gate_rescue():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.0,
+                side_confidence=0.527,
+                combined_confidence=0.527,
+                vote_count=14,
+                source="vision",
+                raw_vote_count=14,
+                side_motion_passed=True,
+            ),
+            EnsembleResult(
+                class_id=44,
+                class_name="BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.097,
+                combined_confidence=0.097,
+                vote_count=4,
+                source="threshold_rescue",
+                raw_vote_count=4,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+        ],
+        delta_weight=-521.0,
+        active_products=[
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (44, 1)
+    ]
+    assert result.weight_residual == 1.0
+    diagnostics = trace.weight_diagnostics["same_weight_candidate_collision"]
+    assert diagnostics["accepted"] is False
+    trevi_diag = next(
+        candidate for candidate in diagnostics["candidates"]
+        if candidate["class_id"] == 54
+    )
+    assert trevi_diag["residual"] == 9.0
+    assert trevi_diag["allowed_residual"] == 5.0
+
+
+def test_same_weight_candidate_guard_keeps_true_pepsi_x2_without_return_hint():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                0.235,
+            ),
+            EnsembleResult(
+                class_id=31,
+                class_name="BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.068,
+                combined_confidence=0.068,
+                vote_count=2,
+                source="threshold_rescue",
+                raw_vote_count=2,
+                side_motion_passed=True,
+            ),
+        ],
+        delta_weight=-1046.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+            make_active_product(
+                31,
+                "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                523.0,
+                10,
+                1200,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 2)
+    ]
+    assert result.weight_residual == 6.0
+
+
+def test_stage_weight_gate_does_not_override_higher_rank_strict_single_candidate():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 211,
+            "raw_max_confidence": 0.2173,
+            "threshold_filtered": 211,
+            "threshold_filtered_max_confidence": 0.2173,
+            "cameras": {
+                "side": {
+                    "raw": 148,
+                    "raw_max_confidence": 0.2173,
+                    "threshold_filtered": 148,
+                    "threshold_filtered_max_confidence": 0.2173,
+                },
+                "top": {
+                    "raw": 63,
+                    "raw_max_confidence": 0.0781,
+                    "threshold_filtered": 63,
+                    "threshold_filtered_max_confidence": 0.0781,
+                },
+            },
+            "weight_gate_passed": True,
+            "motion_gate_passed": True,
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=31,
+                class_name="BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.18,
+                combined_confidence=0.18,
+                vote_count=75,
+                source="threshold_rescue",
+                raw_vote_count=75,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=44,
+                class_name="BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.0573,
+                combined_confidence=0.0573,
+                vote_count=7,
+                source="threshold_rescue",
+                raw_vote_count=7,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+        ],
+        delta_weight=-523.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 1)
+    ]
+    assert result.weight_residual == 0.0
+    diagnostics = trace.weight_diagnostics["stage_weight_gate_candidates"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["candidates"][0]["class_id"] == 75
+    priority = trace.weight_diagnostics["strict_candidate_priority_selection"]
+    assert priority["reason"] == "strict_match"
+    assert priority["selected"]["items"][0]["class_id"] == 31
+
+
+def test_stage_weight_gate_recovers_when_no_higher_rank_strict_single_candidate():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 211,
+            "raw_max_confidence": 0.2173,
+            "threshold_filtered": 211,
+            "threshold_filtered_max_confidence": 0.2173,
+            "cameras": {
+                "side": {
+                    "raw": 148,
+                    "raw_max_confidence": 0.2173,
+                    "threshold_filtered": 148,
+                    "threshold_filtered_max_confidence": 0.2173,
+                },
+                "top": {
+                    "raw": 63,
+                    "raw_max_confidence": 0.0781,
+                    "threshold_filtered": 63,
+                    "threshold_filtered_max_confidence": 0.0781,
+                },
+            },
+            "weight_gate_passed": True,
+            "motion_gate_passed": True,
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=8,
+                class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                top_confidence=0.0,
+                side_confidence=0.451,
+                combined_confidence=0.451,
+                vote_count=1,
+                source="vision",
+                raw_vote_count=212,
+                side_motion_passed=True,
+            )
+        ],
+        delta_weight=-523.0,
+        active_products=[
+            make_active_product(8, "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML", 367.0, 10),
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 1)
+    ]
+    assert result.weight_residual == 3.0
+    diagnostics = trace.weight_diagnostics["stage_weight_gate_candidates"]
+    assert diagnostics["accepted"] is True
+    priority = trace.weight_diagnostics["strict_candidate_priority_selection"]
+    assert priority["selected"]["items"][0]["class_id"] == 75
+
+
+def test_ranked_single_candidate_priority_keeps_sky_over_lower_rank_stage_trevi():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "54": {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "raw": 12,
+            "raw_max_confidence": 0.1624,
+            "threshold_filtered": 12,
+            "threshold_filtered_max_confidence": 0.1624,
+            "weight_gate_passed": True,
+            "motion_gate_passed": True,
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=8,
+                class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                top_confidence=0.0,
+                side_confidence=0.4512,
+                combined_confidence=0.4512,
+                vote_count=1,
+                source="vision",
+                raw_vote_count=212,
+                side_motion_passed=True,
+            ),
+            EnsembleResult(
+                class_id=31,
+                class_name="BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.1694,
+                combined_confidence=0.1694,
+                vote_count=1,
+                source="threshold_rescue",
+                raw_vote_count=2,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.1624,
+                side_confidence=0.1624,
+                combined_confidence=0.1624,
+                vote_count=12,
+                source="threshold_rescue",
+                raw_vote_count=12,
+                top_motion_passed=True,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=44,
+                class_name="BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.048,
+                combined_confidence=0.048,
+                vote_count=1,
+                source="threshold_rescue",
+                raw_vote_count=12,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+        ],
+        delta_weight=-525.0,
+        active_products=[
+            make_active_product(8, "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML", 367.0, 10),
+            make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 1)
+    ]
+    assert result.weight_residual == 2.0
+    diagnostics = trace.weight_diagnostics["stage_weight_gate_candidates"]
+    trevi_diag = next(
+        candidate for candidate in diagnostics["candidates"]
+        if candidate["class_id"] == 54
+    )
+    assert trevi_diag["reason"] == "upgraded_existing_candidate"
+    priority = trace.weight_diagnostics["strict_candidate_priority_selection"]
+    assert priority["selected"]["items"][0]["class_id"] == 31
+
+
+def test_regular_pepsi_candidate_beats_same_weight_stage_gate_corn_collision():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "44": {
+            "class_id": 44,
+            "name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+            "raw": 18,
+            "raw_max_confidence": 0.1476,
+            "threshold_filtered": 18,
+            "threshold_filtered_max_confidence": 0.1476,
+            "cameras": {
+                "top": {
+                    "raw": 18,
+                    "raw_max_confidence": 0.1476,
+                    "threshold_filtered": 18,
+                    "threshold_filtered_max_confidence": 0.1476,
+                }
+            },
+            "weight_gate_passed": True,
+            "motion_gate_passed": True,
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=75,
+                class_name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                top_confidence=0.0,
+                side_confidence=0.2691,
+                combined_confidence=0.2691,
+                vote_count=6,
+                source="vision",
+                raw_vote_count=653,
+                side_motion_passed=True,
+            )
+        ],
+        delta_weight=-520.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["stage_weight_gate_candidates"]
+    assert diagnostics["accepted"] is True
+    same_weight = trace.weight_diagnostics["same_weight_candidate_collision"]
+    assert same_weight["accepted"] is True
+    assert same_weight["selected"]["class_id"] == 75
+
+
+def test_rank1_sky_plus_fanta_beats_lower_rank_corn_plus_fanta_residual_edge():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=31,
+                class_name="BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+                top_confidence=0.406,
+                side_confidence=0.0,
+                combined_confidence=0.406,
+                vote_count=5,
+                source="vision",
+                top_motion_passed=True,
+            ),
+            EnsembleResult(
+                class_id=44,
+                class_name="BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                top_confidence=0.0,
+                side_confidence=0.369,
+                combined_confidence=0.369,
+                vote_count=5,
+                source="vision",
+                side_motion_passed=True,
+            ),
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.368,
+                side_confidence=0.0,
+                combined_confidence=0.368,
+                vote_count=5,
+                source="vision",
+                top_motion_passed=True,
+            ),
+            EnsembleResult(
+                class_id=119,
+                class_name="BOTTLE_FANTA_ORANGE_600ML",
+                top_confidence=0.0,
+                side_confidence=0.365,
+                combined_confidence=0.365,
+                vote_count=5,
+                source="vision",
+                side_motion_passed=True,
+            ),
+        ],
+        delta_weight=-1151.0,
+        active_products=[
+            make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+            ),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+            make_active_product(119, "BOTTLE_FANTA_ORANGE_600ML", 634.0, 10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (31, 1),
+        (119, 1),
+    ]
+    assert result.weight_explained == 1157.0
+    assert result.weight_residual == 6.0
+    diagnostics = trace.weight_diagnostics["candidate_priority_combination_grace"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["selected"]["items"][0]["class_id"] == 31
+
+
+def test_regular_pepsi_x2_beats_trevi_rescue_repeat_residual_edge():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=75,
+                class_name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                top_confidence=0.0,
+                side_confidence=0.472,
+                combined_confidence=0.472,
+                vote_count=12,
+                source="vision",
+                raw_vote_count=12,
+                side_motion_passed=True,
+            ),
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.0,
+                side_confidence=0.20,
+                combined_confidence=0.20,
+                vote_count=20,
+                source="threshold_rescue",
+                raw_vote_count=20,
+                side_motion_passed=True,
+                weight_gate_passed=True,
+            ),
+        ],
+        delta_weight=-1058.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 2)
+    ]
+    assert result.weight_explained == 1040.0
+    assert result.weight_residual == 18.0
+    diagnostics = trace.weight_diagnostics["same_weight_candidate_collision"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["selected"]["class_id"] == 75
+    assert diagnostics["selected"]["count"] == 2
+
+
+def test_forced_final_fallback_prefers_regular_pepsi_repeat_over_active_trevi_pair(
+    monkeypatch,
+):
+    use_weight_aware_identity(monkeypatch)
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=75,
+                class_name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                top_confidence=0.0,
+                side_confidence=0.472,
+                combined_confidence=0.472,
+                vote_count=12,
+                source="vision",
+                raw_vote_count=12,
+                side_motion_passed=True,
+            )
+        ],
+        delta_weight=-1058.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 2)
+    ]
+    assert result.weight_explained == 1040.0
+    assert result.weight_residual == 18.0
+    diagnostics = trace.weight_diagnostics["forced_final_fallback"]
+    assert diagnostics["mode"] == "detected_same_product_pair"
+    assert diagnostics["pair_support_rank"] == 0
+
+
+def test_segment_matching_rejects_top_only_trevi_reuse_for_pepsi_repeat():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 519.5, "segment_index": 0},
+                {"weight": 526.3, "segment_index": 1},
+                {"weight": 521.9, "segment_index": 2},
+                {"weight": 523.0, "segment_index": 3},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 195,
+            "raw_max_confidence": 0.148,
+            "threshold_filtered": 195,
+            "threshold_filtered_max_confidence": 0.148,
+            "cameras": {
+                "side": {
+                    "raw": 19,
+                    "raw_max_confidence": 0.0639,
+                    "threshold_filtered": 19,
+                    "threshold_filtered_max_confidence": 0.0639,
+                },
+                "top": {
+                    "raw": 176,
+                    "raw_max_confidence": 0.148,
+                    "threshold_filtered": 176,
+                    "threshold_filtered_max_confidence": 0.148,
+                },
+            },
+            "motion_gate_passed": True,
+        },
+        "54": {
+            "class_id": 54,
+            "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            "raw": 15,
+            "raw_max_confidence": 0.6514,
+            "threshold_passed": 2,
+            "threshold_passed_max_confidence": 0.6514,
+            "roi_passed": 2,
+            "cameras": {
+                "side": {"raw": 2, "raw_max_confidence": 0.0759},
+                "top": {
+                    "raw": 13,
+                    "raw_max_confidence": 0.6514,
+                    "threshold_passed": 2,
+                    "threshold_passed_max_confidence": 0.6514,
+                    "roi_passed": 2,
+                },
+            },
+            "motion_gate_passed": True,
+            "final_rank": 1,
+        },
+        "31": {
+            "class_id": 31,
+            "name": "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML",
+            "raw": 242,
+            "raw_max_confidence": 0.1907,
+            "threshold_filtered": 242,
+            "threshold_filtered_max_confidence": 0.1907,
+            "cameras": {
+                "side": {
+                    "raw": 242,
+                    "raw_max_confidence": 0.1907,
+                    "threshold_filtered": 242,
+                    "threshold_filtered_max_confidence": 0.1907,
+                }
+            },
+            "motion_gate_passed": True,
+        },
+        "44": {
+            "class_id": 44,
+            "name": "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+            "raw": 18,
+            "raw_max_confidence": 0.0573,
+            "threshold_filtered": 18,
+            "threshold_filtered_max_confidence": 0.0573,
+            "cameras": {
+                "side": {
+                    "raw": 18,
+                    "raw_max_confidence": 0.0573,
+                    "threshold_filtered": 18,
+                    "threshold_filtered_max_confidence": 0.0573,
+                }
+            },
+            "motion_gate_passed": True,
+        },
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.6514,
+                side_confidence=0.0759,
+                combined_confidence=0.3582,
+                vote_count=2,
+                source="vision",
+                raw_vote_count=15,
+                top_motion_passed=True,
+            )
+        ],
+        delta_weight=-2091.0,
+        active_products=[
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10, 1600),
+            make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 4)
+    ]
+    assert result.weight_explained == 2080.0
+    assert result.weight_residual == 11.7
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["same_weight_bottle_collision"]["accepted"] is True
+    assert diagnostics["same_weight_bottle_collision"]["selected"]["class_id"] == 75
+    assert (
+        diagnostics["repeated_segment_reuse_guard"]["rejected"][0]["reason"]
+        == "repeated_segment_evidence_insufficient"
+    )
+
+
+def test_segment_matching_prefers_stage_supported_pepsi_repeat_over_mixed_fragments():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {"weight": 523.0, "segment_index": 0},
+                {"weight": 523.0, "segment_index": 1},
+                {"weight": 530.0, "segment_index": 2},
+                {"weight": 523.0, "segment_index": 3},
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "75": {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "raw": 80,
+            "raw_max_confidence": 0.56,
+            "threshold_passed": 32,
+            "threshold_passed_max_confidence": 0.56,
+            "motion_gate_passed": True,
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-2099.0,
+        active_products=[
+            make_active_product(31, "BOTTLE_WOONGIN_SKY_BARLEY_TEA_500ML", 523.0, 10),
+            make_active_product(
+                75,
+                "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                520.0,
+                10,
+                2300,
+            ),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (75, 4)
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["aggregate_evidence_override"]["accepted"] is False
+    assert (
+        diagnostics["aggregate_evidence_override"]["reason"]
+        == "clean_supported_segment_match_preferred"
+    )
+    assert diagnostics["products"] == [
+        {
+            "class_id": 75,
+            "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            "count": 4,
+            "unit_weight": 520.0,
+        }
+    ]
+
+
+def test_vision_required_segment_targets_do_not_use_active_only_fallback():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "vision_required_segment_targets": [
+                {"weight": 200.0, "segment_index": 1}
+            ]
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=0.0,
+        active_products=[
+            make_active_product(101, "Pressure Candidate", weight=200.0, stock=10)
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.NO_DETECTION
+    assert result.products == []
+
+
+def test_same_product_count_accepts_dedicated_per_item_tolerance_for_pepero_x2():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                confidence=0.65,
+            )
+        ],
+        delta_weight=-141.0,
+        active_products=[
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=66.0,
+                stock=3,
+                price=1700,
+            )
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].name == "BOX_LOTTE_PEPERO_ALMOND_37G"
+    assert result.products[0].count == 2
+    assert result.weight_explained == 132.0
+    assert result.weight_residual == 9.0
+
+
+def test_compound_return_hint_downranks_previously_returned_weight_candidate():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({"compound_positive_weights_g": [60.0]})
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Returned Candidate A", confidence=0.95),
+            make_candidate(102, "Next Extraction B", confidence=0.60),
+        ],
+        delta_weight=-64.0,
+        active_products=[
+            make_active_product(101, "Returned Candidate A", weight=60.0, stock=5),
+            make_active_product(102, "Next Extraction B", weight=68.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 102
+    assert result.products[0].name == "Next Extraction B"
+
+
+def test_same_product_count_respects_stock_limit():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                confidence=0.65,
+            )
+        ],
+        delta_weight=-138.0,
+        active_products=[
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=66.0,
+                stock=1,
+                price=1700,
+            )
+        ],
+    )
+
+    assert not (
+        result.status == JudgmentStatus.COMPLETE
+        and result.products
+        and result.products[0].count == 2
+    )
+
+
+def test_same_product_count_accepts_scenario_a5():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=101,
+                name="Scenario Product A",
+                confidence=0.8,
+            )
+        ],
+        delta_weight=-505.0,
+        active_products=[
+            make_active_product(
+                class_id=101,
+                name="Scenario Product A",
+                weight=101.0,
+                stock=10,
+                price=1000,
+            )
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 101
+    assert result.products[0].count == 5
+    assert result.total_price == 5000
+
+
+def test_same_product_count_accepts_scenario_a8():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=101,
+                name="Scenario Product A",
+                confidence=0.8,
+            )
+        ],
+        delta_weight=-808.0,
+        active_products=[
+            make_active_product(
+                class_id=101,
+                name="Scenario Product A",
+                weight=101.0,
+                stock=10,
+                price=1000,
+            )
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 101
+    assert result.products[0].count == 8
+    assert result.total_price == 8000
+
+
+def test_same_product_count_rejects_scenario_a9_over_limit():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=101,
+                name="Scenario Product A",
+                confidence=0.8,
+            )
+        ],
+        delta_weight=-909.0,
+        active_products=[
+            make_active_product(
+                class_id=101,
+                name="Scenario Product A",
+                weight=101.0,
+                stock=10,
+                price=1000,
+            )
+        ],
+    )
+
+    assert not (
+        result.status == JudgmentStatus.COMPLETE
+        and result.products
+        and result.products[0].count == 9
+    )
+
+
+def test_high_confidence_three_kind_combo_accepts_scenario_abc():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Scenario Product A", 0.9),
+            make_candidate(102, "Scenario Product B", 0.88),
+            make_candidate(103, "Scenario Product C", 0.86),
+        ],
+        delta_weight=-683.0,
+        active_products=[
+            make_active_product(101, "Scenario Product A", 101.0, stock=10, price=1000),
+            make_active_product(102, "Scenario Product B", 223.0, stock=10, price=2000),
+            make_active_product(103, "Scenario Product C", 359.0, stock=10, price=3000),
+        ],
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {101: 1, 102: 1, 103: 1}
+    assert result.total_price == 6000
+
+
+def test_high_confidence_two_kind_four_unit_combo_accepts_scenario_a2_b2():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Scenario Product A", 0.9),
+            make_candidate(102, "Scenario Product B", 0.88),
+        ],
+        delta_weight=-648.0,
+        active_products=[
+            make_active_product(101, "Scenario Product A", 101.0, stock=10, price=1000),
+            make_active_product(102, "Scenario Product B", 223.0, stock=10, price=2000),
+        ],
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {101: 2, 102: 2}
+    assert result.total_price == 6000
+
+
+def test_compact_two_item_combo_beats_same_product_repeat():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Scenario Product A", 0.23),
+            make_candidate(102, "Scenario Product B", 0.22),
+            make_candidate(103, "Scenario Product C", 0.24),
+        ],
+        delta_weight=-77.0,
+        active_products=[
+            make_active_product(101, "Scenario Product A", 50.0, stock=10, price=1000),
+            make_active_product(102, "Scenario Product B", 26.0, stock=10, price=2000),
+            make_active_product(103, "Scenario Product C", 19.0, stock=10, price=3000),
+        ],
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {101: 1, 102: 1}
+    assert result.weight_residual == 1.0
+
+
+def test_low_confidence_two_kind_combo_uses_relaxed_floor_and_5g_tolerance():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Scenario Product A", 0.20),
+            make_candidate(102, "Scenario Product B", 0.23),
+        ],
+        delta_weight=-81.0,
+        active_products=[
+            make_active_product(101, "Scenario Product A", 58.0, stock=10, price=1000),
+            make_active_product(102, "Scenario Product B", 19.0, stock=10, price=2000),
+        ],
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {101: 1, 102: 1}
+    assert result.weight_residual == 4.0
+
+
+def test_same_product_repeat_can_win_when_compact_combo_is_outside_tolerance():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Scenario Product A", 0.23),
+            make_candidate(102, "Scenario Product B", 0.22),
+            make_candidate(103, "Scenario Product C", 0.24),
+        ],
+        delta_weight=-88.0,
+        active_products=[
+            make_active_product(101, "Scenario Product A", 58.0, stock=10, price=1000),
+            make_active_product(102, "Scenario Product B", 19.0, stock=10, price=2000),
+            make_active_product(103, "Scenario Product C", 22.0, stock=10, price=3000),
+        ],
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {103: 4}
+    assert result.weight_residual == 0.0
+
+
+def test_candidate_same_product_repeat_preempts_stage_count_combo():
+    trace = FakeStageTrace(
+        [
+            (113, "STICK_INNON_CONDITION_STICK_18G", 0.45),
+            (100, "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G", 0.42),
+        ]
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(26, "CAN_WELCHS_ZERO_GRAPE_355ML", 0.449),
+        ],
+        delta_weight=-753.0,
+        active_products=[
+            make_active_product(
+                26,
+                "CAN_WELCHS_ZERO_GRAPE_355ML",
+                371.0,
+                stock=10,
+                price=1000,
+            ),
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                19.0,
+                stock=10,
+                price=3000,
+            ),
+            make_active_product(
+                100,
+                "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                365.0,
+                stock=10,
+                price=1100,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (26, 2)
+    ]
+    assert result.weight_residual == 11.0
+    assert "stage_count_combination_match" not in trace.weight_diagnostics
+    diagnostics = trace.weight_diagnostics["same_product_count_match"]
+    assert diagnostics["accepted"] is True
+    assert diagnostics["stage_count_preempted"] is True
+    assert diagnostics["selected"]["allowed_residual"] == 15.0
+
+
+def test_stage_count_combo_runs_when_candidate_repeat_is_outside_tolerance():
+    trace = FakeStageTrace(
+        [
+            (113, "STICK_INNON_CONDITION_STICK_18G", 0.45),
+            (100, "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G", 0.42),
+        ]
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(26, "CAN_WELCHS_ZERO_GRAPE_355ML", 0.449),
+        ],
+        delta_weight=-760.0,
+        active_products=[
+            make_active_product(
+                26,
+                "CAN_WELCHS_ZERO_GRAPE_355ML",
+                371.0,
+                stock=10,
+                price=1000,
+            ),
+            make_active_product(
+                113,
+                "STICK_INNON_CONDITION_STICK_18G",
+                24.0,
+                stock=10,
+                price=3000,
+            ),
+            make_active_product(
+                100,
+                "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                365.0,
+                stock=10,
+                price=1100,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {26: 1, 113: 1, 100: 1}
+    assert trace.weight_diagnostics["stage_count_combination_match"]["accepted"] is True
+
+
+def test_channel_split_prefers_tteokbokki_and_welchs_over_aggregate_rescue():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {
+                    "source": "unpaired_negative_segment",
+                    "weight": 518.0,
+                    "delta": -518.0,
+                    "segment_index": 0,
+                    "reason": "unpaired_removal_segment",
+                }
+            ],
+            "channel_removal_segment_targets": [
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 144.0,
+                    "delta": -144.0,
+                    "segment_index": 0,
+                    "channel_index": 0,
+                    "reason": "simultaneous_channel_removal",
+                    "evidence_required": True,
+                },
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 375.0,
+                    "delta": -375.0,
+                    "segment_index": 1,
+                    "channel_index": 1,
+                    "reason": "simultaneous_channel_removal",
+                    "evidence_required": True,
+                },
+            ],
+        }
+    )
+    trace.stage_counts_by_class = {
+        "26": {
+            "class_id": 26,
+            "name": "CAN_WELCHS_ZERO_GRAPE_355ML",
+            "raw": 10,
+            "raw_max_confidence": 0.7759,
+            "threshold_filtered": 6,
+            "threshold_filtered_max_confidence": 0.1813,
+            "threshold_passed": 4,
+            "threshold_passed_max_confidence": 0.7759,
+            "cameras": {
+                "top": {
+                    "raw": 9,
+                    "raw_max_confidence": 0.7759,
+                    "threshold_passed": 4,
+                    "threshold_passed_max_confidence": 0.7759,
+                    "roi_filtered": 4,
+                    "roi_filtered_max_confidence": 0.7759,
+                },
+                "side": {
+                    "raw": 1,
+                    "raw_max_confidence": 0.1813,
+                },
+            },
+            "motion_gate_passed": True,
+        }
+    }
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=120,
+                class_name="CUP_BIBIGO_TTEOKBOKKI_110G",
+                top_confidence=0.0,
+                side_confidence=0.5328,
+                combined_confidence=0.5328,
+                vote_count=7,
+                source="vision",
+                motion_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=54,
+                class_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                top_confidence=0.3882,
+                side_confidence=0.0,
+                combined_confidence=0.3882,
+                vote_count=3,
+                source="vision",
+                motion_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=113,
+                class_name="STICK_INNON_CONDITION_STICK_18G",
+                top_confidence=0.0,
+                side_confidence=0.1736,
+                combined_confidence=0.1736,
+                vote_count=2,
+                source="vision",
+                motion_gate_passed=True,
+            ),
+            EnsembleResult(
+                class_id=44,
+                class_name="BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                top_confidence=0.028,
+                side_confidence=0.0685,
+                combined_confidence=0.028,
+                vote_count=5,
+                source="threshold_rescue",
+                raw_vote_count=5,
+                top_motion_passed=True,
+                side_motion_passed=True,
+                motion_gate_passed=True,
+                weight_gate_passed=True,
+            ),
+        ],
+        delta_weight=-519.0,
+        active_products=[
+            make_active_product(120, "CUP_BIBIGO_TTEOKBOKKI_110G", 144.0, 10, 5600),
+            make_active_product(26, "CAN_WELCHS_ZERO_GRAPE_355ML", 371.0, 10, 1000),
+            make_active_product(54, "BOTTLE_LOTTE_TREVI_LEMON_500ML", 530.0, 10, 1600),
+            make_active_product(113, "STICK_INNON_CONDITION_STICK_18G", 19.0, 10, 3000),
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (120, 1),
+        (26, 1),
+    ]
+    assert result.weight_explained == 515.0
+    assert result.weight_residual == 4.0
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["target_source"] == "channel_removal_segment_targets"
+    assert diagnostics["reason"] == "channel_supported_split_preferred"
+    assert diagnostics["rejected_aggregate_rescue"]["class_id"] == 44
+
+
+def test_channel_split_without_evidence_falls_back_to_aggregate_strict_match():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace(
+        {
+            "removal_segment_targets": [
+                {
+                    "source": "unpaired_negative_segment",
+                    "weight": 520.0,
+                    "delta": -520.0,
+                    "segment_index": 0,
+                }
+            ],
+            "channel_removal_segment_targets": [
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 260.0,
+                    "delta": -260.0,
+                    "segment_index": 0,
+                    "channel_index": 0,
+                    "evidence_required": True,
+                },
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 260.0,
+                    "delta": -260.0,
+                    "segment_index": 1,
+                    "channel_index": 1,
+                    "evidence_required": True,
+                },
+            ],
+        }
+    )
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=44,
+                class_name="BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                top_confidence=0.2,
+                side_confidence=0.2,
+                combined_confidence=0.2,
+                vote_count=5,
+                source="threshold_rescue",
+                raw_vote_count=5,
+                top_motion_passed=True,
+                side_motion_passed=True,
+                motion_gate_passed=True,
+                weight_gate_passed=True,
+            )
+        ],
+        delta_weight=-520.0,
+        active_products=[
+            make_active_product(
+                44,
+                "BOTTLE_KWANGDONG_CORN_SILK_TEA_500ML",
+                520.0,
+                10,
+                2000,
+            ),
+            make_active_product(201, "ACTIVE_ONLY_HALF_WEIGHT_A", 260.0, 10, 1000),
+            make_active_product(202, "ACTIVE_ONLY_HALF_WEIGHT_B", 260.0, 10, 1000),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (44, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["segment_weight_matching"]
+    assert diagnostics["accepted"] is False
+    assert diagnostics["target_source"] == "channel_removal_segment_targets"
+    assert diagnostics["reason"] == "segment_without_valid_option"
+
+
+def test_regular_single_candidate_priority_beats_tiny_residual_gap():
+    engine = ProductDecisionEngine(strict_mode=True)
+    trace = FakeLoadcellTrace({})
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=100,
+                class_name="CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                top_confidence=1.0,
+                side_confidence=1.0,
+                combined_confidence=1.0,
+                vote_count=2,
+                source="vision",
+            ),
+            EnsembleResult(
+                class_id=38,
+                class_name="BAG_HAITAI_HOME_RUN_BALL_41G",
+                top_confidence=0.585,
+                side_confidence=0.585,
+                combined_confidence=0.585,
+                vote_count=2,
+                source="vision",
+            ),
+            EnsembleResult(
+                class_id=8,
+                class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                top_confidence=0.0,
+                side_confidence=0.287,
+                combined_confidence=0.287,
+                vote_count=1,
+                source="vision",
+            ),
+        ],
+        delta_weight=-368.0,
+        active_products=[
+            make_active_product(
+                100,
+                "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                365.0,
+                stock=10,
+                price=5600,
+            ),
+            make_active_product(
+                38,
+                "BAG_HAITAI_HOME_RUN_BALL_41G",
+                64.0,
+                stock=10,
+                price=1200,
+            ),
+            make_active_product(
+                8,
+                "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                367.0,
+                stock=10,
+                price=1300,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (100, 1)
+    ]
+    assert result.weight_residual == 3.0
+
+    diagnostics = trace.weight_diagnostics["strict_candidate_priority_selection"]
+    assert diagnostics["reason"] == "regular_single_candidate_priority"
+    assert diagnostics["selected"]["items"][0]["class_id"] == 100
+    assert diagnostics["post_sort_top_combinations"][0]["items"][0]["class_id"] == 100
+    assert trace.weight_diagnostics["valid_combinations"][0]["items"][0]["class_id"] == 8
+
+
+def test_rank1_single_candidate_outside_tolerance_does_not_block_tighter_match():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=100,
+                class_name="CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                top_confidence=1.0,
+                side_confidence=1.0,
+                combined_confidence=1.0,
+                vote_count=2,
+                source="vision",
+            ),
+            EnsembleResult(
+                class_id=8,
+                class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                top_confidence=0.0,
+                side_confidence=0.287,
+                combined_confidence=0.287,
+                vote_count=1,
+                source="vision",
+            ),
+        ],
+        delta_weight=-368.0,
+        active_products=[
+            make_active_product(
+                100,
+                "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                360.0,
+                stock=10,
+                price=5600,
+            ),
+            make_active_product(
+                8,
+                "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                367.0,
+                stock=10,
+                price=1300,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (8, 1)
+    ]
+    assert result.weight_residual == 1.0
+
+
+def test_stage_counts_combination_recovers_when_final_candidates_miss_combo():
+    class FakeTrace:
+        def __init__(self):
+            self.weight_diagnostics = {}
+            self.stage_counts_by_class = {
+                "201": self._stage_entry(201, "Stage Filler 1"),
+                "101": self._stage_entry(101, "Scenario Product A"),
+                "202": self._stage_entry(202, "Stage Filler 2"),
+                "203": self._stage_entry(203, "Stage Filler 3"),
+                "204": self._stage_entry(204, "Stage Filler 4"),
+                "205": self._stage_entry(205, "Stage Filler 5"),
+                "206": self._stage_entry(206, "Stage Filler 6"),
+                "102": self._stage_entry(102, "Scenario Product B", confidence=0.21),
+                "207": self._stage_entry(207, "Stage Filler 7"),
+            }
+
+        @staticmethod
+        def _stage_entry(class_id, name, confidence=0.22):
+            return {
+                "class_id": class_id,
+                "name": name,
+                "raw": 3,
+                "raw_max_confidence": confidence,
+                "cameras": {
+                    "side": {
+                        "raw": 3,
+                        "raw_max_confidence": confidence,
+                    }
+                },
+            }
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics = diagnostics
+
+    trace = FakeTrace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(103, "Scenario Product C", 0.92),
+        ],
+        delta_weight=-77.0,
+        active_products=[
+            make_active_product(101, "Scenario Product A", 58.0, stock=10, price=1000),
+            make_active_product(102, "Scenario Product B", 19.0, stock=10, price=2000),
+            make_active_product(103, "Scenario Product C", 200.0, stock=10, price=3000),
+        ],
+        trace_context=trace,
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {101: 1, 102: 1}
+    assert result.weight_residual == 0.0
+    assert diagnostics["accepted"] is True
+    assert diagnostics["merged_candidate_count"] == 10
+    assert diagnostics["stage_candidates_added"] == 9
+
+
+def test_stage_count_expansion_uses_camera_aware_score_before_limit():
+    trace = FakeLoadcellTrace({})
+    for offset in range(9):
+        class_id = 300 + offset
+        trace.stage_counts_by_class[str(class_id)] = {
+            "class_id": class_id,
+            "name": f"Top Raw Filler {offset}",
+            "raw": 50,
+            "raw_max_confidence": 0.05,
+            "cameras": {
+                "top": {
+                    "raw": 50,
+                    "raw_max_confidence": 0.05,
+                }
+            },
+        }
+    trace.stage_counts_by_class["100"] = {
+        "class_id": 100,
+        "name": "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+        "raw": 43,
+        "raw_max_confidence": 0.0927,
+        "cameras": {
+            "top": {
+                "raw": 43,
+                "raw_max_confidence": 0.0927,
+            }
+        },
+    }
+    trace.stage_counts_by_class["26"] = {
+        "class_id": 26,
+        "name": "CAN_WELCHS_ZERO_GRAPE_355ML",
+        "raw": 10,
+        "raw_max_confidence": 0.3748,
+        "threshold_passed": 2,
+        "threshold_passed_max_confidence": 0.3748,
+        "roi_filtered": 1,
+        "roi_filtered_max_confidence": 0.3007,
+        "cameras": {
+            "side": {
+                "raw": 10,
+                "raw_max_confidence": 0.3748,
+                "threshold_passed": 2,
+                "threshold_passed_max_confidence": 0.3748,
+                "roi_filtered": 1,
+                "roi_filtered_max_confidence": 0.3007,
+                "motion_filtered": 1,
+            }
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[make_candidate(999, "Irrelevant Candidate", 0.91)],
+        delta_weight=-744.4,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(26, "CAN_WELCHS_ZERO_GRAPE_355ML", 371.0, 10),
+            make_active_product(
+                100,
+                "CUP_CJ_HATBAN_CUPBAN_CHICKEN_MAYO_313G",
+                365.0,
+                10,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (26, 2)
+    ]
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert diagnostics["stage_candidates"][0]["class_id"] == 26
+    assert any(
+        candidate["class_id"] == 100
+        and diagnostics["stage_candidates"][0]["stage_score"]
+        > candidate["stage_score"]
+        for candidate in diagnostics["stage_candidates"]
+    )
+
+
+def test_relaxed_combination_prefers_three_final_candidates_over_stage_count_pair():
+    class FakeTrace:
+        def __init__(self):
+            self.weight_diagnostics = {}
+            self.stage_counts_by_class = {
+                "201": self._stage_entry(201, "Stage Product D"),
+                "202": self._stage_entry(202, "Stage Product E"),
+            }
+
+        @staticmethod
+        def _stage_entry(class_id, name, confidence=0.92):
+            return {
+                "class_id": class_id,
+                "name": name,
+                "raw": 4,
+                "raw_max_confidence": confidence,
+                "motion_passed": True,
+            }
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics.update(diagnostics)
+
+    trace = FakeTrace()
+    engine = ProductDecisionEngine(strict_mode=False)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "Candidate Product A", 0.91),
+            make_candidate(102, "Candidate Product B", 0.90),
+            make_candidate(103, "Candidate Product C", 0.89),
+        ],
+        delta_weight=-340.0,
+        active_products=[
+            make_active_product(101, "Candidate Product A", 100.0, stock=10),
+            make_active_product(102, "Candidate Product B", 110.0, stock=10),
+            make_active_product(103, "Candidate Product C", 130.0, stock=10),
+            make_active_product(201, "Stage Product D", 170.0, stock=10),
+            make_active_product(202, "Stage Product E", 170.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    counts = {product.product_id: product.count for product in result.products}
+    assert result.status == JudgmentStatus.COMPLETE
+    assert counts == {101: 1, 102: 1, 103: 1}
+    assert result.weight_residual == 0.0
+    assert "relaxed_stage_count_combination_match" not in trace.weight_diagnostics
+    assert (
+        trace.weight_diagnostics[
+            "relaxed_candidate_only_strict_combination_match"
+        ]["selected"]["total_count"]
+        == 3
+    )
+
+
+def test_stage_count_strict_fallback_prefers_final_candidate_combo_when_available():
+    class FakeTrace:
+        def __init__(self):
+            self.weight_diagnostics = {}
+            self.stage_counts_by_class = {
+                "201": self._stage_entry(201, "Stage Product D"),
+                "202": self._stage_entry(202, "Stage Product E"),
+            }
+
+        @staticmethod
+        def _stage_entry(class_id, name, confidence=0.92):
+            return {
+                "class_id": class_id,
+                "name": name,
+                "raw": 4,
+                "raw_max_confidence": confidence,
+                "motion_passed": True,
+            }
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics.update(diagnostics)
+
+    trace = FakeTrace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[
+            make_candidate(101, "Candidate Product A", 0.91),
+            make_candidate(102, "Candidate Product B", 0.90),
+            make_candidate(103, "Candidate Product C", 0.89),
+        ],
+        delta_weight=-340.0,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(101, "Candidate Product A", 100.0, stock=10),
+            make_active_product(102, "Candidate Product B", 110.0, stock=10),
+            make_active_product(103, "Candidate Product C", 130.0, stock=10),
+            make_active_product(201, "Stage Product D", 170.0, stock=10),
+            make_active_product(202, "Stage Product E", 170.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    counts = {product.product_id: product.count for product in result.products}
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert counts == {101: 1, 102: 1, 103: 1}
+    assert diagnostics["selected"]["total_count"] == 3
+    assert {
+        item["class_id"] for item in diagnostics["selected"]["items"]
+    } == {101, 102, 103}
+
+
+def test_stage_count_combo_prefers_candidate_inclusive_over_all_stage_combo():
+    trace = FakeStageTrace(
+        [
+            (102, "Stage Product B", 0.82),
+            (201, "Stage Product C", 0.94),
+            (202, "Stage Product D", 0.94),
+        ]
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[
+            make_candidate(101, "Candidate Product A", 0.61),
+        ],
+        delta_weight=-199.0,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(101, "Candidate Product A", 50.0, stock=1),
+            make_active_product(102, "Stage Product B", 149.0, stock=1),
+            make_active_product(201, "Stage Product C", 100.0, stock=1),
+            make_active_product(202, "Stage Product D", 99.0, stock=1),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    counts = {product.product_id: product.count for product in result.products}
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert counts == {101: 1, 102: 1}
+    assert diagnostics["selected"]["weight_error"] == 0.0
+
+
+def test_stage_count_combo_keeps_candidate_inclusive_with_slightly_higher_residual():
+    trace = FakeStageTrace(
+        [
+            (102, "Stage Product B", 0.82),
+            (201, "Stage Product C", 0.94),
+            (202, "Stage Product D", 0.94),
+        ]
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[
+            make_candidate(101, "Candidate Product A", 0.61),
+        ],
+        delta_weight=-199.0,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(101, "Candidate Product A", 50.0, stock=1),
+            make_active_product(102, "Stage Product B", 145.0, stock=1),
+            make_active_product(201, "Stage Product C", 100.0, stock=1),
+            make_active_product(202, "Stage Product D", 99.0, stock=1),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    counts = {product.product_id: product.count for product in result.products}
+    diagnostics = trace.weight_diagnostics["stage_count_combination_match"]
+    assert counts == {101: 1, 102: 1}
+    assert diagnostics["selected"]["weight_error"] == 4.0
+
+
+def test_stage_count_combo_uses_all_stage_when_candidate_inclusive_invalid():
+    trace = FakeStageTrace(
+        [
+            (102, "Stage Product B", 0.82),
+            (201, "Stage Product C", 0.94),
+            (202, "Stage Product D", 0.94),
+        ]
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine._try_stage_count_combination_match(
+        vision_candidates=[
+            make_candidate(101, "Candidate Product A", 0.61),
+        ],
+        delta_weight=-199.0,
+        timestamp=123.0,
+        active_products=[
+            make_active_product(101, "Candidate Product A", 50.0, stock=1),
+            make_active_product(102, "Stage Product B", 130.0, stock=1),
+            make_active_product(201, "Stage Product C", 100.0, stock=1),
+            make_active_product(202, "Stage Product D", 99.0, stock=1),
+        ],
+        trace_context=trace,
+    )
+
+    assert result is not None
+    counts = {product.product_id: product.count for product in result.products}
+    assert counts == {201: 1, 202: 1}
+
+
+def test_low_confidence_three_item_weight_combo_is_not_completed():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(113, "STICK_INNON_CONDITION_STICK_18G", 0.192),
+            make_candidate(118, "BAG_CJ_CHICKEN_BREAST_STEAK_100G", 0.169),
+            make_candidate(119, "BAG_NONGSHIM_SAEUKKANG_90G", 0.135),
+        ],
+        delta_weight=-220.4,
+        active_products=[
+            make_active_product(113, "STICK_INNON_CONDITION_STICK_18G", 19.0, stock=10),
+            make_active_product(118, "BAG_CJ_CHICKEN_BREAST_STEAK_100G", 107.0, stock=10),
+            make_active_product(119, "BAG_NONGSHIM_SAEUKKANG_90G", 97.0, stock=10),
+        ],
+    )
+
+    assert result.status != JudgmentStatus.COMPLETE
+    assert sum(product.count for product in result.products) != 3
+
+
+def test_forced_final_fallback_rejects_active_product_weight_mismatch(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    use_weight_aware_identity(monkeypatch)
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                confidence=0.55,
+            )
+        ],
+        delta_weight=-7.6,
+        active_products=[
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=58.0,
+                stock=1,
+            ),
+            make_active_product(
+                class_id=113,
+                name="STICK_INNON_CONDITION_STICK_18G",
+                weight=19.0,
+                stock=1,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    assert result.weight_residual == 11.4
+
+
+def test_forced_final_fallback_uses_unseen_active_single_nearest(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    use_weight_aware_identity(monkeypatch)
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                confidence=0.55,
+            )
+        ],
+        delta_weight=-18.0,
+        active_products=[
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=58.0,
+                stock=1,
+            ),
+            make_active_product(
+                class_id=113,
+                name="STICK_INNON_CONDITION_STICK_18G",
+                weight=19.0,
+                stock=1,
+                price=3000,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 113
+    assert result.weight_residual == 1.0
+
+
+def test_loadcell_only_rejects_ambiguous_nearest_single():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge_by_weight_only(
+        delta_weight=-516.8,
+        active_products=[
+            make_active_product(
+                class_id=75,
+                name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                weight=516.8,
+                stock=1,
+            ),
+            make_active_product(
+                class_id=112,
+                name="BOTTLE_PULMUONE_SPRING_WATER_500ML",
+                weight=518.0,
+                stock=1,
+            ),
+        ],
+    )
+
+    assert result.status in {JudgmentStatus.UNCERTAIN, JudgmentStatus.NO_DETECTION}
+    assert result.products == []
+
+
+def test_threshold_rescue_candidate_can_complete_strict_match(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=75,
+                class_name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                top_confidence=0.19,
+                side_confidence=0.16,
+                combined_confidence=0.18,
+                vote_count=2,
+                source="threshold_rescue",
+                raw_vote_count=9,
+                top_motion_passed=True,
+                side_motion_passed=True,
+            )
+        ],
+        delta_weight=-516.8,
+        active_products=[
+            make_active_product(
+                class_id=75,
+                name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                weight=516.8,
+                stock=1,
+                price=2000,
+            ),
+            make_active_product(
+                class_id=112,
+                name="BOTTLE_PULMUONE_SPRING_WATER_500ML",
+                weight=518.0,
+                stock=1,
+                price=500,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 75
+    assert result.products[0].name == "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML"
+    assert result.weight_residual == 0.0
+
+
+def test_roi_rescue_candidate_can_complete_strict_match(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        False,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=38,
+                class_name="BAG_HAITAI_HOME_RUN_BALL_41G",
+                top_confidence=0.39,
+                side_confidence=0.0,
+                combined_confidence=0.39,
+                vote_count=2,
+                source="vision",
+            ),
+            EnsembleResult(
+                class_id=8,
+                class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                top_confidence=0.0,
+                side_confidence=0.18,
+                combined_confidence=0.18,
+                vote_count=9,
+                source="roi_rescue",
+                raw_vote_count=93,
+            ),
+        ],
+        delta_weight=-369.0,
+        active_products=[
+            make_active_product(
+                class_id=38,
+                name="BAG_HAITAI_HOME_RUN_BALL_41G",
+                weight=64.0,
+                stock=5,
+                price=1200,
+            ),
+            make_active_product(
+                class_id=8,
+                name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                weight=369.0,
+                stock=1,
+                price=2000,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 8
+    assert result.products[0].name == "CAN_LOTTE_HOT6_THE_KING_RUSH_355ML"
+    assert result.weight_residual == 0.0
+
+
+def test_roi_rescue_candidate_uses_rescue_only_tolerance(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "tolerance_grams",
+        3.0,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "rescue_tolerance_grams",
+        5.0,
+        raising=False,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=38,
+                class_name="BAG_HAITAI_HOME_RUN_BALL_41G",
+                top_confidence=0.39,
+                side_confidence=0.0,
+                combined_confidence=0.39,
+                vote_count=1,
+                source="vision",
+            ),
+            EnsembleResult(
+                class_id=26,
+                class_name="CAN_WELCHS_ZERO_GRAPE_355ML",
+                top_confidence=0.0,
+                side_confidence=0.18,
+                combined_confidence=0.18,
+                vote_count=7,
+                source="roi_rescue",
+                raw_vote_count=57,
+            ),
+        ],
+        delta_weight=-374.8,
+        active_products=[
+            make_active_product(
+                class_id=38,
+                name="BAG_HAITAI_HOME_RUN_BALL_41G",
+                weight=64.0,
+                stock=5,
+                price=1200,
+            ),
+            make_active_product(
+                class_id=26,
+                name="CAN_WELCHS_ZERO_GRAPE_355ML",
+                weight=371.0,
+                stock=1,
+                price=1800,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 26
+    assert result.products[0].name == "CAN_WELCHS_ZERO_GRAPE_355ML"
+    assert result.weight_residual == 3.8
+
+
+def test_no_motion_threshold_rescue_uses_tight_weight_gate(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "tolerance_grams",
+        3.0,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "rescue_tolerance_grams",
+        5.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.vision,
+        "weight_rescue_no_motion_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.vision,
+        "weight_rescue_no_motion_min_raw_votes",
+        8,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.vision,
+        "weight_rescue_no_motion_max_residual_grams",
+        2.0,
+        raising=False,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=95,
+                class_name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                top_confidence=0.13,
+                side_confidence=0.0,
+                combined_confidence=0.13,
+                vote_count=1,
+                source="threshold_rescue",
+                raw_vote_count=18,
+                top_motion_passed=False,
+                side_motion_passed=False,
+            )
+        ],
+        delta_weight=-221.0,
+        active_products=[
+            make_active_product(
+                class_id=95,
+                name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                weight=220.0,
+                stock=1,
+                price=1800,
+            )
+        ],
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 95
+    assert result.products[0].name == "BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2"
+    assert result.weight_residual == 1.0
+
+
+def test_no_motion_threshold_rescue_rejects_weight_residual_above_tight_gate(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "tolerance_grams",
+        3.0,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "rescue_tolerance_grams",
+        5.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.vision,
+        "weight_rescue_no_motion_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.vision,
+        "weight_rescue_no_motion_min_raw_votes",
+        8,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        decision_engine_module.config.vision,
+        "weight_rescue_no_motion_max_residual_grams",
+        2.0,
+        raising=False,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=95,
+                class_name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                top_confidence=0.13,
+                side_confidence=0.0,
+                combined_confidence=0.13,
+                vote_count=1,
+                source="threshold_rescue",
+                raw_vote_count=18,
+                top_motion_passed=False,
+                side_motion_passed=False,
+            )
+        ],
+        delta_weight=-221.0,
+        active_products=[
+            make_active_product(
+                class_id=95,
+                name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                weight=217.0,
+                stock=1,
+                price=1800,
+            )
+        ],
+    )
+
+    assert result.status in {JudgmentStatus.UNCERTAIN, JudgmentStatus.NO_DETECTION}
+    assert result.products == []
+
+
+def test_strict_mismatch_rejects_active_nearest_at_5g_or_more(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    use_weight_aware_identity(monkeypatch)
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                confidence=0.55,
+            )
+        ],
+        delta_weight=-14.0,
+        active_products=[
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=58.0,
+                stock=1,
+            ),
+            make_active_product(
+                class_id=113,
+                name="STICK_INNON_CONDITION_STICK_18G",
+                weight=19.0,
+                stock=1,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 113
+    assert result.weight_residual == 5.0
+
+
+def test_strict_mismatch_partial_fallback_rejected_when_weight_mismatch(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    use_weight_aware_identity(monkeypatch)
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[make_candidate()],
+        delta_weight=-370.1,
+        active_products=[make_active_product()],
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    assert result.weight_residual == 5.1
+
+
+def test_strict_mismatch_default_vision_first_preserves_identity_as_partial():
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[make_candidate()],
+        delta_weight=-370.1,
+        active_products=[make_active_product()],
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (26, 1)
+    ]
+    assert result.weight_residual == 5.1
+
+
+def test_strict_mismatch_can_still_hard_fail(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        False,
+    )
+
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[make_candidate()],
+        delta_weight=-370.1,
+        active_products=[make_active_product()],
+    )
+
+    assert result.status == JudgmentStatus.NO_DETECTION
+    assert result.products == []
+
+
+def test_decision_engine_records_strict_weight_diagnostics(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    class FakeTrace:
+        def __init__(self):
+            self.weight_diagnostics = None
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics = diagnostics
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+
+    trace = FakeTrace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    engine.judge(
+        vision_candidates=[make_candidate()],
+        delta_weight=-365.0,
+        active_products=[make_active_product()],
+        trace_context=trace,
+    )
+
+    assert trace.weight_diagnostics["target_weight"] == 365.0
+    assert trace.weight_diagnostics["candidate_products"][0]["class_id"] == 26
+    assert trace.weight_diagnostics["valid_combinations"][0]["total_weight"] == 365.0
+
+
+def test_detected_single_fallback_uses_stage_evidence_within_8g(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    use_weight_aware_identity(monkeypatch)
+
+    class FakeTrace:
+        def __init__(self):
+            self.stage_counts_by_class = {
+                "11": {
+                    "class_id": 11,
+                    "name": "BOTTLE_DONGA_BACCHUS_F_120ML",
+                    "threshold_filtered": 37,
+                    "threshold_filtered_max_confidence": 0.1307,
+                }
+            }
+            self.diagnostic_detections = []
+            self.detected_single_fallback = None
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics = diagnostics
+
+        def record_detected_single_fallback(self, diagnostics):
+            self.detected_single_fallback = diagnostics
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+    trace = FakeTrace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=57,
+                name="BAG_HAITAI_JAGABEE_45G",
+                confidence=0.92,
+            )
+        ],
+        delta_weight=-264.0,
+        active_products=[
+            make_active_product(
+                class_id=57,
+                name="BAG_HAITAI_JAGABEE_45G",
+                weight=80.0,
+                stock=21,
+            ),
+            make_active_product(
+                class_id=11,
+                name="BOTTLE_DONGA_BACCHUS_F_120ML",
+                weight=260.0,
+                stock=20,
+                price=500,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 11
+    assert result.products[0].name == "BOTTLE_DONGA_BACCHUS_F_120ML"
+    assert result.products[0].count == 1
+    assert result.weight_residual == 4.0
+    assert trace.detected_single_fallback["reason"] == "detected_single_item_fallback"
+
+
+def test_detected_single_fallback_does_not_use_unseen_active_nearest(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    use_weight_aware_identity(monkeypatch)
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=57,
+                name="BAG_HAITAI_JAGABEE_45G",
+                confidence=0.92,
+            )
+        ],
+        delta_weight=-264.0,
+        active_products=[
+            make_active_product(
+                class_id=57,
+                name="BAG_HAITAI_JAGABEE_45G",
+                weight=80.0,
+                stock=21,
+            ),
+            make_active_product(
+                class_id=11,
+                name="BOTTLE_DONGA_BACCHUS_F_120ML",
+                weight=260.0,
+                stock=20,
+            ),
+        ],
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert result.products[0].product_id == 11
+    assert result.weight_residual == 4.0
+
+
+def test_vision_first_suppresses_low_confidence_mismatch_identity(monkeypatch):
+    import model_service.engine.decision_engine as decision_engine_module
+
+    class FakeTrace:
+        stage_counts_by_class = {
+            "114": {
+                "class_id": 114,
+                "name": "BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                "threshold_filtered": 10,
+                "threshold_filtered_max_confidence": 0.1854,
+            }
+        }
+        diagnostic_detections = []
+
+        def record_weight_diagnostics(self, diagnostics):
+            self.weight_diagnostics = diagnostics
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                confidence=0.23,
+            )
+        ],
+        delta_weight=-75.1,
+        active_products=[
+            make_active_product(
+                class_id=114,
+                name="BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                weight=66.0,
+                stock=25,
+            ),
+            make_active_product(
+                class_id=115,
+                name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                weight=58.0,
+                stock=21,
+            ),
+        ],
+        trace_context=FakeTrace(),
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    assert result.weight_explained == 0.0
+    assert result.weight_residual == 75.1
+
+
+class SingleBottleFallbackTrace:
+    def __init__(
+        self,
+        *,
+        pepsi_side_confidence: float = 0.7311,
+        pepsi_motion: bool = True,
+        trevi_side_confidence: float = 0.0,
+        trevi_side_votes: int = 0,
+        trevi_weight_gate_passed: bool = True,
+    ):
+        pepsi_side = {
+            "raw": 278,
+            "raw_max_confidence": pepsi_side_confidence,
+            "threshold_passed": 72,
+            "roi_passed": 72,
+        }
+        if pepsi_motion:
+            pepsi_side["motion_filtered"] = 72
+        trevi_camera = {
+            "top": {
+                "raw": 18,
+                "raw_max_confidence": 0.0447,
+            }
+        }
+        trevi_raw = 18
+        trevi_confidence = 0.0447
+        if trevi_side_votes > 0:
+            trevi_camera["side"] = {
+                "raw": trevi_side_votes,
+                "raw_max_confidence": trevi_side_confidence,
+                "threshold_passed": trevi_side_votes,
+                "motion_filtered": trevi_side_votes,
+            }
+            trevi_raw = max(trevi_raw, trevi_side_votes)
+            trevi_confidence = max(trevi_confidence, trevi_side_confidence)
+
+        self.stage_counts_by_class = {
+            "75": {
+                "class_id": 75,
+                "name": "BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                "raw": 470,
+                "raw_max_confidence": pepsi_side_confidence,
+                "threshold_passed": 72,
+                "roi_passed": 72,
+                "motion_gate_passed": pepsi_motion,
+                "threshold_rescue_candidate": True,
+                "weight_gate_passed": False,
+                "weight_residual_g": 11.4,
+                "cameras": {
+                    "top": {
+                        "raw": 192,
+                        "raw_max_confidence": 0.2043,
+                    },
+                    "side": pepsi_side,
+                },
+            },
+            "54": {
+                "class_id": 54,
+                "name": "BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                "raw": trevi_raw,
+                "raw_max_confidence": trevi_confidence,
+                "weight_gate_passed": trevi_weight_gate_passed,
+                "weight_residual_g": 1.4,
+                "motion_gate_passed": trevi_side_votes > 0,
+                "cameras": trevi_camera,
+            },
+        }
+        self.diagnostic_detections = []
+        self.weight_diagnostics = {}
+        self.detected_single_fallback = None
+
+    def record_weight_diagnostics(self, diagnostics):
+        self.weight_diagnostics.update(diagnostics)
+
+    def record_detected_single_fallback(self, diagnostics):
+        self.detected_single_fallback = diagnostics
+
+
+def pepsi_trevi_single_bottle_products():
+    return [
+        make_active_product(
+            class_id=75,
+            name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+            weight=520.0,
+            stock=6,
+            price=2300,
+        ),
+        make_active_product(
+            class_id=54,
+            name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+            weight=530.0,
+            stock=6,
+            price=1600,
+        ),
+        make_active_product(
+            class_id=112,
+            name="BOTTLE_PULMUONE_SPRING_WATER_500ML",
+            weight=529.0,
+            stock=6,
+            price=900,
+        ),
+    ]
+
+
+def test_detected_single_fallback_prefers_strong_pepsi_identity_over_weak_trevi():
+    trace = SingleBottleFallbackTrace()
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-531.4,
+        active_products=pepsi_trevi_single_bottle_products(),
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    assert result.weight_residual == 11.4
+    assert trace.weight_diagnostics["final_weight_mismatch_guard"]["accepted"] is False
+
+    diagnostics = trace.detected_single_fallback
+    assert diagnostics["accepted"]["single_bottle_identity_override"] is True
+    override = diagnostics["single_bottle_identity_override"]
+    assert override["accepted"] is True
+    assert override["reason"] == "strong_identity_over_weak_weight_single"
+    assert override["candidate"]["class_id"] == 75
+    assert override["replaced"]["class_id"] == 54
+
+
+def test_detected_single_fallback_keeps_trevi_when_pepsi_identity_is_weak():
+    trace = SingleBottleFallbackTrace(pepsi_side_confidence=0.31)
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-531.4,
+        active_products=pepsi_trevi_single_bottle_products(),
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 54
+    assert result.weight_residual == 1.4
+    assert trace.detected_single_fallback["accepted"][
+        "single_bottle_identity_override"
+    ] is False
+    assert trace.detected_single_fallback["single_bottle_identity_override"][
+        "accepted"
+    ] is False
+
+
+def test_detected_single_fallback_keeps_trevi_when_trevi_identity_is_also_strong():
+    trace = SingleBottleFallbackTrace(
+        trevi_side_confidence=0.62,
+        trevi_side_votes=28,
+        trevi_weight_gate_passed=False,
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-531.4,
+        active_products=pepsi_trevi_single_bottle_products(),
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 54
+    assert result.weight_residual == 1.4
+    assert trace.detected_single_fallback["single_bottle_identity_override"][
+        "reason"
+    ] == "current_single_identity_strong"

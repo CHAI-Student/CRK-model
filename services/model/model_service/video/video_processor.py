@@ -1,0 +1,2717 @@
+"""
+Video Processor for AVI-based YOLO Inference.
+
+Processes entire AVI videos frame-by-frame with YOLO inference
+and aggregates results using voting-based ensemble.
+
+Memory-efficient design for Jetson Orin Nano:
+- FFmpeg subprocess with NVDEC hardware decoding
+- Streaming frame extraction (one frame at a time)
+- Immediate memory release after inference
+- Only vote counts are accumulated (not images)
+
+v5.3 추가:
+- Async streaming video processing (process_videos_async)
+- Top/Side 프레임 인터리빙으로 I/O 병렬화
+- 단일 YOLO 인스턴스로 순차 추론 (GPU 메모리 제약)
+
+v4.6 추가:
+- HandPathTracker: 손 경로 추적 기반 상품 필터링
+- product_weights 파라미터 추가 (로그용)
+
+v4.1 추가:
+- Bounding box 중심점 이동 추적 (Motion Tracking)
+- 이동이 감지된 객체만 후보에 포함
+
+Usage:
+    processor = VideoProcessor(yolo=yolo_wrapper)
+    results = processor.process_videos(
+        top_path="/path/to/top.avi",
+        side_path="/path/to/side.avi"
+    )
+
+    # Async streaming (v5.3)
+    results = await processor.process_videos_async(
+        top_path="/path/to/top.avi",
+        side_path="/path/to/side.avi"
+    )
+"""
+
+import asyncio
+import logging
+import math
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+from model_service.core.config import config
+from model_service.vision import YOLODetection, YOLOWrapper
+from model_service.vision.hand_path_tracker import HandPathTracker
+
+from .frame_extractor import create_frame_extractor
+from .frame_trace import TriggerTraceContext
+from .voting_ensemble import VoteResult, VotingEnsemble
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BboxTracker:
+    """
+    Bounding box 중심점 이동 추적.
+
+    각 class_id별로 첫 번째/마지막 bbox 중심점과 최대 이동 거리를 추적.
+
+    Attributes:
+        first_center: 첫 번째 감지 시 중심점 (x, y)
+        last_center: 마지막 감지 시 중심점 (x, y)
+        max_distance: 관찰된 최대 이동 거리 (픽셀)
+        detection_count: 총 감지 횟수
+        frame_indices: 감지된 프레임 인덱스 목록
+        dynamic_threshold: bbox 크기 기반 동적 임계값 (픽셀)
+    """
+    first_center: Optional[Tuple[float, float]] = None
+    last_center: Optional[Tuple[float, float]] = None
+    max_distance: float = 0.0
+    detection_count: int = 0
+    frame_indices: List[int] = field(default_factory=list)
+    dynamic_threshold: float = 0.0  # bbox 크기 기반 동적 임계값
+
+    def update(self, center: Tuple[float, float], frame_idx: int) -> None:
+        """bbox 중심점 업데이트."""
+        if self.first_center is None:
+            self.first_center = center
+
+        # 이전 중심점과의 거리 계산
+        if self.last_center is not None:
+            distance = math.sqrt(
+                (center[0] - self.last_center[0]) ** 2 +
+                (center[1] - self.last_center[1]) ** 2
+            )
+            self.max_distance = max(self.max_distance, distance)
+
+        self.last_center = center
+        self.detection_count += 1
+        self.frame_indices.append(frame_idx)
+
+    @property
+    def total_displacement(self) -> float:
+        """첫 번째와 마지막 위치 간 총 이동 거리."""
+        if self.first_center is None or self.last_center is None:
+            return 0.0
+        return math.sqrt(
+            (self.last_center[0] - self.first_center[0]) ** 2 +
+            (self.last_center[1] - self.first_center[1]) ** 2
+        )
+
+    def has_motion(self, min_displacement: float = 30.0) -> bool:
+        """
+        이동이 있었는지 여부.
+
+        Args:
+            min_displacement: 최소 이동 거리 임계값 (픽셀)
+
+        Returns:
+            이동이 감지되었으면 True
+        """
+        # 동적 임계값이 설정되어 있으면 사용, 아니면 기본값 사용
+        threshold = self.dynamic_threshold if self.dynamic_threshold > 0 else min_displacement
+        return self.total_displacement >= threshold or self.max_distance >= threshold
+
+
+@dataclass
+class VideoProcessingStats:
+    """
+    Video processing statistics.
+
+    Attributes:
+        top_frames: Number of frames processed from top camera
+        side_frames: Number of frames processed from side camera
+        top_detections: Total detections from top camera
+        side_detections: Total detections from side camera
+        processing_time_ms: Total processing time in milliseconds
+        motion_filtered_classes: Number of classes filtered out due to no motion
+        hand_path_filtered_classes: Number of classes filtered out due to hand path (v4.6)
+    """
+    top_frames: int = 0
+    side_frames: int = 0
+    top_original_frames: int = 0
+    side_original_frames: int = 0
+    frame_stride: int = 2
+    top_raw_detections: int = 0
+    side_raw_detections: int = 0
+    top_threshold_filtered: int = 0
+    side_threshold_filtered: int = 0
+    top_detections: int = 0
+    side_detections: int = 0
+    processing_time_ms: float = 0.0
+    yolo_inference_count: int = 0
+    yolo_total_time_ms: float = 0.0
+    yolo_avg_time_ms: float = 0.0
+    roi_filtered_detections: int = 0
+    side_roi_soft_passed_detections: int = 0
+    side_roi_soft_filtered_detections: int = 0
+    motion_filtered_classes: int = 0
+    hand_path_filtered_classes: int = 0
+
+    @property
+    def original_frames(self) -> int:
+        top_original = self.top_original_frames or self.top_frames
+        side_original = self.side_original_frames or self.side_frames
+        return top_original + side_original
+
+    @property
+    def processed_frames(self) -> int:
+        return self.top_frames + self.side_frames
+
+    @property
+    def skipped_frames(self) -> int:
+        return max(0, self.original_frames - self.processed_frames)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "top_frames": self.top_frames,
+            "side_frames": self.side_frames,
+            "top_original_frames": self.top_original_frames or self.top_frames,
+            "side_original_frames": self.side_original_frames or self.side_frames,
+            "original_frames": self.original_frames,
+            "processed_frames": self.processed_frames,
+            "skipped_frames": self.skipped_frames,
+            "frame_stride": self.frame_stride,
+            "top_raw_detections": self.top_raw_detections,
+            "side_raw_detections": self.side_raw_detections,
+            "top_threshold_filtered": self.top_threshold_filtered,
+            "side_threshold_filtered": self.side_threshold_filtered,
+            "top_detections": self.top_detections,
+            "side_detections": self.side_detections,
+            "total_frames": self.top_frames + self.side_frames,
+            "total_detections": self.top_detections + self.side_detections,
+            "processing_time_ms": round(self.processing_time_ms, 1),
+            "yolo_inference_count": self.yolo_inference_count,
+            "yolo_total_time_ms": round(self.yolo_total_time_ms, 1),
+            "yolo_avg_time_ms": round(self.yolo_avg_time_ms, 1),
+            "roi_filtered_detections": self.roi_filtered_detections,
+            "side_roi_soft_passed_detections": self.side_roi_soft_passed_detections,
+            "side_roi_soft_filtered_detections": self.side_roi_soft_filtered_detections,
+            "motion_filtered_classes": self.motion_filtered_classes,
+            "hand_path_filtered_classes": self.hand_path_filtered_classes,
+        }
+
+
+@dataclass
+class ThresholdRescueCandidate:
+    """Low-confidence class that can be considered only through weight gating."""
+
+    class_id: int
+    class_name: str
+    vote_count: int
+    max_confidence: float
+    avg_confidence: float
+    top_detected: bool = False
+    side_detected: bool = False
+    top_vote_count: int = 0
+    side_vote_count: int = 0
+    top_max_confidence: float = 0.0
+    side_max_confidence: float = 0.0
+    top_motion_passed: bool = False
+    side_motion_passed: bool = False
+    top_total_displacement: float = 0.0
+    side_total_displacement: float = 0.0
+    top_max_distance: float = 0.0
+    side_max_distance: float = 0.0
+    roi_x_min: Optional[float] = None
+    roi_x_max: Optional[float] = None
+    roi_x_avg: Optional[float] = None
+    roi_x_limit: Optional[float] = None
+    sample_frames: List[dict] = field(default_factory=list)
+    source: str = "threshold_rescue"
+    motion_gate_passed: bool = True
+    motion_gate_reason: Optional[str] = None
+    weight_gate_passed: Optional[bool] = None
+    rescue_weight_residual_g: Optional[float] = None
+    rescue_tolerance_g: Optional[float] = None
+    roi_conflict: bool = False
+    roi_conflict_reason: Optional[str] = None
+    roi_conflict_side_vote_count: int = 0
+    roi_conflict_side_max_confidence: float = 0.0
+    roi_conflict_side_roi_x_avg: Optional[float] = None
+    roi_conflict_side_roi_x_limit: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        payload = {
+            "class_id": self.class_id,
+            "class_name": self.class_name,
+            "vote_count": self.vote_count,
+            "raw_vote_count": self.vote_count,
+            "max_confidence": round(self.max_confidence, 4),
+            "avg_confidence": round(self.avg_confidence, 4),
+            "confidence": round(self.max_confidence, 4),
+            "top_detected": self.top_detected,
+            "side_detected": self.side_detected,
+            "top_vote_count": self.top_vote_count,
+            "side_vote_count": self.side_vote_count,
+            "top_max_confidence": round(self.top_max_confidence, 4),
+            "side_max_confidence": round(self.side_max_confidence, 4),
+            "top_motion_passed": self.top_motion_passed,
+            "side_motion_passed": self.side_motion_passed,
+            "top_total_displacement": round(self.top_total_displacement, 1),
+            "side_total_displacement": round(self.side_total_displacement, 1),
+            "top_max_distance": round(self.top_max_distance, 1),
+            "side_max_distance": round(self.side_max_distance, 1),
+            "source": self.source,
+            "motion_gate_passed": self.motion_gate_passed,
+            "motion_gate_reason": self.motion_gate_reason,
+            "weight_gate_passed": self.weight_gate_passed,
+            "rescue_weight_residual_g": (
+                round(float(self.rescue_weight_residual_g), 1)
+                if self.rescue_weight_residual_g is not None
+                else None
+            ),
+            "rescue_tolerance_g": self.rescue_tolerance_g,
+            "roi_conflict": self.roi_conflict,
+            "roi_conflict_reason": self.roi_conflict_reason,
+            "roi_conflict_side_vote_count": self.roi_conflict_side_vote_count,
+            "roi_conflict_side_max_confidence": round(
+                float(self.roi_conflict_side_max_confidence),
+                4,
+            ),
+            "roi_conflict_side_roi_x_avg": (
+                round(float(self.roi_conflict_side_roi_x_avg), 1)
+                if self.roi_conflict_side_roi_x_avg is not None
+                else None
+            ),
+            "roi_conflict_side_roi_x_limit": (
+                round(float(self.roi_conflict_side_roi_x_limit), 1)
+                if self.roi_conflict_side_roi_x_limit is not None
+                else None
+            ),
+        }
+        if self.roi_x_min is not None:
+            payload.update(
+                {
+                    "roi_x_min": round(float(self.roi_x_min), 1),
+                    "roi_x_max": round(float(self.roi_x_max or 0.0), 1),
+                    "roi_x_avg": round(float(self.roi_x_avg or 0.0), 1),
+                    "roi_x_limit": round(float(self.roi_x_limit or 0.0), 1),
+                    "sample_frames": list(self.sample_frames),
+                }
+            )
+        return payload
+
+
+@dataclass
+class _LowConfidenceClassStats:
+    class_id: int
+    class_name: str = ""
+    top_vote_count: int = 0
+    side_vote_count: int = 0
+    top_conf_sum: float = 0.0
+    side_conf_sum: float = 0.0
+    top_max_confidence: float = 0.0
+    side_max_confidence: float = 0.0
+    top_tracker: BboxTracker = field(default_factory=BboxTracker)
+    side_tracker: BboxTracker = field(default_factory=BboxTracker)
+
+    def add(self, camera: str, confidence: float, class_name: str, center: Tuple[float, float], frame_idx: int, bbox_size: float) -> None:
+        if class_name and not self.class_name:
+            self.class_name = class_name
+        if camera == "side":
+            self.side_vote_count += 1
+            self.side_conf_sum += confidence
+            self.side_max_confidence = max(self.side_max_confidence, confidence)
+            tracker = self.side_tracker
+        else:
+            self.top_vote_count += 1
+            self.top_conf_sum += confidence
+            self.top_max_confidence = max(self.top_max_confidence, confidence)
+            tracker = self.top_tracker
+
+        tracker.update(center, frame_idx)
+        tracker.dynamic_threshold = max(
+            tracker.dynamic_threshold,
+            max(float(config.vision.motion_min_displacement_px), bbox_size * 0.10),
+        )
+
+    @property
+    def vote_count(self) -> int:
+        return self.top_vote_count + self.side_vote_count
+
+    @property
+    def confidence_sum(self) -> float:
+        return self.top_conf_sum + self.side_conf_sum
+
+    @property
+    def max_confidence(self) -> float:
+        return max(self.top_max_confidence, self.side_max_confidence)
+
+    def to_rescue_candidate(
+        self,
+        min_motion_displacement: float,
+        *,
+        allow_no_motion: bool = False,
+        no_motion_min_votes: int = 0,
+    ) -> ThresholdRescueCandidate | None:
+        if self.vote_count <= 0:
+            return None
+        top_motion = (
+            self.top_vote_count > 0
+            and self.top_tracker.has_motion(min_motion_displacement)
+        )
+        side_motion = (
+            self.side_vote_count > 0
+            and self.side_tracker.has_motion(min_motion_displacement)
+        )
+        motion_passed = top_motion or side_motion
+        motion_gate_reason = None
+        if config.vision.threshold_rescue_require_motion and not motion_passed:
+            if not allow_no_motion or self.vote_count < max(0, no_motion_min_votes):
+                return None
+            motion_gate_reason = "weight_gated_no_motion_candidate"
+
+        return ThresholdRescueCandidate(
+            class_id=self.class_id,
+            class_name=self.class_name,
+            vote_count=self.vote_count,
+            max_confidence=self.max_confidence,
+            avg_confidence=self.confidence_sum / self.vote_count,
+            top_detected=self.top_vote_count > 0,
+            side_detected=self.side_vote_count > 0,
+            top_vote_count=self.top_vote_count,
+            side_vote_count=self.side_vote_count,
+            top_max_confidence=self.top_max_confidence,
+            side_max_confidence=self.side_max_confidence,
+            top_motion_passed=top_motion,
+            side_motion_passed=side_motion,
+            top_total_displacement=self.top_tracker.total_displacement,
+            side_total_displacement=self.side_tracker.total_displacement,
+            top_max_distance=self.top_tracker.max_distance,
+            side_max_distance=self.side_tracker.max_distance,
+            motion_gate_passed=motion_passed,
+            motion_gate_reason=motion_gate_reason,
+        )
+
+
+@dataclass
+class _RoiFilteredClassStats:
+    class_id: int
+    class_name: str = ""
+    vote_count: int = 0
+    conf_sum: float = 0.0
+    max_confidence: float = 0.0
+    side_tracker: BboxTracker = field(default_factory=BboxTracker)
+    center_x_sum: float = 0.0
+    center_x_min: Optional[float] = None
+    center_x_max: Optional[float] = None
+    roi_x_limit: float = 0.0
+    sample_frames: List[dict] = field(default_factory=list)
+
+    def add(
+        self,
+        *,
+        confidence: float,
+        class_name: str,
+        center: Tuple[float, float],
+        frame_idx: int,
+        bbox_size: float,
+        roi_x_limit: float,
+    ) -> None:
+        if class_name and not self.class_name:
+            self.class_name = class_name
+        center_x = float(center[0])
+        center_y = float(center[1])
+        self.vote_count += 1
+        self.conf_sum += confidence
+        self.max_confidence = max(self.max_confidence, confidence)
+        self.center_x_sum += center_x
+        self.center_x_min = center_x if self.center_x_min is None else min(self.center_x_min, center_x)
+        self.center_x_max = center_x if self.center_x_max is None else max(self.center_x_max, center_x)
+        self.roi_x_limit = float(roi_x_limit)
+        self.side_tracker.update(center, frame_idx)
+        self.side_tracker.dynamic_threshold = max(
+            self.side_tracker.dynamic_threshold,
+            max(float(config.vision.motion_min_displacement_px), bbox_size * 0.10),
+        )
+        if len(self.sample_frames) < 5:
+            self.sample_frames.append(
+                {
+                    "frame_index": int(frame_idx),
+                    "confidence": round(float(confidence), 4),
+                    "center_x": round(center_x, 1),
+                    "center_y": round(center_y, 1),
+                }
+            )
+
+    @property
+    def avg_confidence(self) -> float:
+        return self.conf_sum / self.vote_count if self.vote_count > 0 else 0.0
+
+    @property
+    def avg_center_x(self) -> float:
+        return self.center_x_sum / self.vote_count if self.vote_count > 0 else 0.0
+
+    def to_rescue_candidate(self, min_motion_displacement: float) -> ThresholdRescueCandidate | None:
+        if self.vote_count <= 0:
+            return None
+        side_motion = self.side_tracker.has_motion(min_motion_displacement)
+        return ThresholdRescueCandidate(
+            class_id=self.class_id,
+            class_name=self.class_name,
+            vote_count=self.vote_count,
+            max_confidence=self.max_confidence,
+            avg_confidence=self.avg_confidence,
+            side_detected=True,
+            side_vote_count=self.vote_count,
+            side_max_confidence=self.max_confidence,
+            side_motion_passed=side_motion,
+            side_total_displacement=self.side_tracker.total_displacement,
+            side_max_distance=self.side_tracker.max_distance,
+            roi_x_min=self.center_x_min,
+            roi_x_max=self.center_x_max,
+            roi_x_avg=self.avg_center_x,
+            roi_x_limit=self.roi_x_limit,
+            sample_frames=self.sample_frames,
+            source="roi_rescue",
+            motion_gate_passed=side_motion,
+        )
+
+
+@dataclass
+class VideoProcessingResult:
+    """
+    Video processing result.
+
+    Attributes:
+        vote_results: Combined voting results from both cameras
+        top_ensemble: Top camera voting ensemble
+        side_ensemble: Side camera voting ensemble
+        stats: Processing statistics
+    """
+    vote_results: List[VoteResult]
+    top_ensemble: VotingEnsemble
+    side_ensemble: VotingEnsemble
+    stats: VideoProcessingStats
+    threshold_rescue_candidates: List[ThresholdRescueCandidate] = field(default_factory=list)
+    roi_rescue_candidates: List[ThresholdRescueCandidate] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "vote_results": [r.to_dict() for r in self.vote_results],
+            "threshold_rescue_candidates": [
+                candidate.to_dict() for candidate in self.threshold_rescue_candidates
+            ],
+            "roi_rescue_candidates": [
+                candidate.to_dict() for candidate in self.roi_rescue_candidates
+            ],
+            "stats": self.stats.to_dict(),
+        }
+
+
+class VideoProcessor:
+    """
+    AVI video processor with YOLO inference and voting ensemble.
+
+    Processes videos frame-by-frame to minimize memory usage,
+    suitable for Jetson Orin Nano deployment.
+
+    Uses FFmpeg with NVDEC hardware acceleration when available.
+    """
+    _field_tuning_warning_emitted = False
+
+    def __init__(
+        self,
+        yolo: YOLOWrapper,
+        min_vote_ratio: Optional[float] = None,
+        confidence_threshold: Optional[float] = None,
+        top_confidence_threshold: Optional[float] = None,
+        side_confidence_threshold: Optional[float] = None,
+        use_hwaccel: bool = True,
+        motion_filter_enabled: bool = True,
+        min_motion_displacement: Optional[float] = None,
+        side_roi_x_max: Optional[float] = None,
+        top_roi_enabled: Optional[bool] = None,
+        top_roi_y_split: Optional[float] = None,
+        hand_path_filter_enabled: bool = True,
+        min_vote_count: Optional[int] = None,
+    ):
+        """
+        Initialize video processor.
+
+        Args:
+            yolo: YOLOWrapper instance for inference
+            min_vote_ratio: Minimum vote ratio to include in results (default: 5%)
+            confidence_threshold: Backward-compatible shared confidence threshold
+            top_confidence_threshold: Minimum confidence for top camera detections
+            side_confidence_threshold: Minimum confidence for side camera detections
+            use_hwaccel: Use hardware acceleration for video decoding (default: True)
+            motion_filter_enabled: Enable motion-based filtering (default: True)
+            min_motion_displacement: Minimum bbox center displacement to consider as motion (default: 10 pixels)
+            side_roi_x_max: Side camera ROI max X coordinate (default: 400px)
+            top_roi_enabled: Enable top camera vertical ROI filtering when trigger direction is known
+            top_roi_y_split: Top camera Y split line; top of frame is 0
+            hand_path_filter_enabled: Enable hand path-based filtering (v4.6, default: True)
+        """
+        self.yolo = yolo
+        self.min_vote_ratio = (
+            config.vision.min_vote_ratio
+            if min_vote_ratio is None
+            else min_vote_ratio
+        )
+        if confidence_threshold is not None:
+            default_top_threshold = confidence_threshold
+            default_side_threshold = confidence_threshold
+        else:
+            default_top_threshold = config.vision.top_confidence_threshold
+            default_side_threshold = config.vision.side_confidence_threshold
+        self.top_confidence_threshold = (
+            top_confidence_threshold
+            if top_confidence_threshold is not None
+            else default_top_threshold
+        )
+        self.side_confidence_threshold = (
+            side_confidence_threshold
+            if side_confidence_threshold is not None
+            else default_side_threshold
+        )
+        self.confidence_threshold = min(
+            self.top_confidence_threshold,
+            self.side_confidence_threshold,
+        )
+        self.use_hwaccel = use_hwaccel
+        self.motion_filter_enabled = motion_filter_enabled
+        self.min_motion_displacement = (
+            config.vision.motion_min_displacement_px
+            if min_motion_displacement is None
+            else min_motion_displacement
+        )
+        self.side_roi_x_max = (
+            config.vision.side_roi_x_max
+            if side_roi_x_max is None
+            else side_roi_x_max
+        )
+        self.side_roi_soft_margin_px = max(
+            0.0,
+            float(config.vision.side_roi_soft_margin_px),
+        )
+        self.top_roi_enabled = (
+            config.vision.top_roi_enabled
+            if top_roi_enabled is None
+            else top_roi_enabled
+        )
+        self.top_roi_y_split = (
+            config.vision.top_roi_y_split
+            if top_roi_y_split is None
+            else top_roi_y_split
+        )
+        self.hand_path_filter_enabled = hand_path_filter_enabled
+        self.min_vote_count = (
+            config.vision.min_vote_count
+            if min_vote_count is None
+            else min_vote_count
+        )
+        self._warn_if_field_tuning_not_loaded()
+
+    @classmethod
+    def _warn_if_field_tuning_not_loaded(cls) -> None:
+        if cls._field_tuning_warning_emitted:
+            return
+        cls._field_tuning_warning_emitted = True
+        if (
+            config.vision.top_crop_policy != "left"
+            or config.vision.side_crop_policy != "left"
+            or not config.vision.diagnostic_all_class_trace
+        ):
+            logger.warning(
+                "[VIDEO][config] field tuning may not be loaded: "
+                f"top_crop_policy={config.vision.top_crop_policy}, "
+                f"side_crop_policy={config.vision.side_crop_policy}, "
+                f"diagnostic_all_class_trace={config.vision.diagnostic_all_class_trace}"
+            )
+
+    def _threshold_for_camera(self, camera_type: str) -> float:
+        if camera_type == "side":
+            return self.side_confidence_threshold
+        return self.top_confidence_threshold
+
+    def _top_roi_direction(self, delta_weight: Optional[float]) -> Optional[str]:
+        if not self.top_roi_enabled or delta_weight is None or delta_weight == 0.0:
+            return None
+        if delta_weight < 0.0:
+            return "removal"
+        return "return"
+
+    def _top_roi_accepts(
+        self,
+        detection: YOLODetection,
+        delta_weight: Optional[float],
+    ) -> tuple[bool, Optional[str]]:
+        direction = self._top_roi_direction(delta_weight)
+        if direction is None:
+            return True, None
+
+        center_y = detection.center[1]
+        return center_y >= self.top_roi_y_split, direction
+
+    def _side_roi_soft_limit(self) -> float:
+        return float(self.side_roi_x_max) + float(self.side_roi_soft_margin_px)
+
+    def _side_roi_accepts(self, center_x: float) -> tuple[bool, bool]:
+        if center_x <= self.side_roi_x_max:
+            return True, False
+        if center_x <= self._side_roi_soft_limit():
+            return True, True
+        return False, False
+
+    def _detect_frame(
+        self,
+        frame,
+        allowed_class_ids: Optional[List[int]],
+        camera_type: str,
+    ):
+        try:
+            return self.yolo.detect(
+                frame,
+                allowed_class_ids=allowed_class_ids,
+                camera_type=camera_type,
+            )
+        except TypeError as exc:
+            if "camera_type" not in str(exc):
+                raise
+            return self.yolo.detect(frame, allowed_class_ids=allowed_class_ids)
+
+    @staticmethod
+    def _candidate_source_rank(vote: VoteResult) -> int:
+        source = getattr(vote, "source", "vision") or "vision"
+        if source == "vision":
+            return 0
+        if source in {"roi_rescue", "threshold_rescue"}:
+            return 1
+        return 2
+
+    @classmethod
+    def rank_candidates_by_source_priority(
+        cls,
+        candidates: List[VoteResult],
+    ) -> List[VoteResult]:
+        return sorted(
+            candidates,
+            key=lambda vote: (
+                cls._candidate_source_rank(vote),
+                -float(getattr(vote, "weighted_confidence", 0.0) or 0.0),
+                -int(getattr(vote, "vote_count", 0) or 0),
+                int(getattr(vote, "class_id", 0) or 0),
+            ),
+        )
+
+    @classmethod
+    def merge_rescue_votes(
+        cls,
+        vote_results: List[VoteResult],
+        rescue_votes: List[VoteResult],
+        candidate_limit: Optional[int] = None,
+    ) -> List[VoteResult]:
+        if not rescue_votes:
+            return vote_results
+
+        seen_class_ids = {vote.class_id for vote in vote_results}
+        merged = list(vote_results)
+        for rescue_vote in rescue_votes:
+            if rescue_vote.class_id in seen_class_ids:
+                continue
+            merged.append(rescue_vote)
+            seen_class_ids.add(rescue_vote.class_id)
+
+        limit = max(
+            1,
+            int(config.vision.top_k if candidate_limit is None else candidate_limit),
+        )
+        return cls.rank_candidates_by_source_priority(merged)[:limit]
+
+    @staticmethod
+    def _roi_rescue_rejection_reason(
+        candidate: ThresholdRescueCandidate,
+    ) -> Optional[str]:
+        if candidate.source != "roi_rescue":
+            return None
+
+        if config.vision.roi_rescue_require_motion and not candidate.side_motion_passed:
+            return "roi_rescue_no_motion"
+
+        if candidate.roi_x_avg is None or candidate.roi_x_limit is None:
+            return "roi_rescue_missing_roi"
+
+        max_over_limit_px = float(config.vision.roi_rescue_max_over_limit_px)
+        if max_over_limit_px >= 0.0:
+            max_allowed_x = float(candidate.roi_x_limit) + max_over_limit_px
+            if float(candidate.roi_x_avg) > max_allowed_x:
+                return "roi_rescue_too_far_right"
+
+        return None
+
+    @staticmethod
+    def _record_stage(
+        trace_context: Optional[TriggerTraceContext],
+        *,
+        class_id: int,
+        class_name: str,
+        stage: str,
+        camera: str,
+        amount: int = 1,
+        confidence: Optional[float] = None,
+        center: Optional[Tuple[float, float]] = None,
+        roi_x_limit: Optional[float] = None,
+        roi_y_limit: Optional[float] = None,
+        roi_direction: Optional[str] = None,
+    ) -> None:
+        if trace_context is not None:
+            trace_context.record_stage_count(
+                class_id=class_id,
+                class_name=class_name,
+                stage=stage,
+                camera=camera,
+                amount=amount,
+                confidence=confidence,
+                center=center,
+                roi_x_limit=roi_x_limit,
+                roi_y_limit=roi_y_limit,
+                roi_direction=roi_direction,
+            )
+
+    @staticmethod
+    def _record_low_confidence_detection(
+        low_confidence_stats: Dict[int, _LowConfidenceClassStats],
+        *,
+        class_id: int,
+        class_name: str,
+        confidence: float,
+        camera: str,
+        center: Tuple[float, float],
+        frame_idx: int,
+        bbox_size: float,
+        roi_eligible: bool = True,
+    ) -> None:
+        if not config.vision.threshold_rescue_enabled or not roi_eligible:
+            return
+        stats = low_confidence_stats.setdefault(
+            class_id,
+            _LowConfidenceClassStats(class_id=class_id, class_name=class_name),
+        )
+        stats.add(camera, confidence, class_name, center, frame_idx, bbox_size)
+
+    @staticmethod
+    def _record_roi_filtered_detection(
+        roi_filtered_stats: Dict[int, _RoiFilteredClassStats],
+        *,
+        class_id: int,
+        class_name: str,
+        confidence: float,
+        center: Tuple[float, float],
+        frame_idx: int,
+        bbox_size: float,
+        roi_x_limit: float,
+    ) -> None:
+        if not config.vision.threshold_rescue_enabled:
+            return
+        stats = roi_filtered_stats.setdefault(
+            class_id,
+            _RoiFilteredClassStats(class_id=class_id, class_name=class_name),
+        )
+        stats.add(
+            confidence=confidence,
+            class_name=class_name,
+            center=center,
+            frame_idx=frame_idx,
+            bbox_size=bbox_size,
+            roi_x_limit=roi_x_limit,
+        )
+
+    def _build_threshold_rescue_candidates(
+        self,
+        low_confidence_stats: Dict[int, _LowConfidenceClassStats],
+        roi_filtered_stats: Dict[int, _RoiFilteredClassStats],
+        allowed_class_ids: Optional[List[int]],
+        log_prefix: str,
+    ) -> List[ThresholdRescueCandidate]:
+        if not config.vision.threshold_rescue_enabled:
+            return []
+        allowed_set = set(allowed_class_ids) if allowed_class_ids is not None else None
+        candidates: List[ThresholdRescueCandidate] = []
+        for class_id, stats in low_confidence_stats.items():
+            if allowed_set is not None and class_id not in allowed_set:
+                continue
+            candidate = stats.to_rescue_candidate(
+                self.min_motion_displacement,
+                allow_no_motion=config.vision.weight_rescue_no_motion_enabled,
+                no_motion_min_votes=config.vision.weight_rescue_no_motion_min_raw_votes,
+            )
+            if candidate is not None:
+                self._mark_threshold_rescue_roi_conflict(
+                    candidate,
+                    roi_filtered_stats.get(class_id),
+                )
+                candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda candidate: (
+                int(candidate.top_detected) + int(candidate.side_detected),
+                candidate.vote_count,
+                candidate.max_confidence,
+            ),
+            reverse=True,
+        )
+        limit = max(0, int(config.vision.threshold_rescue_max_candidates))
+        limited = candidates[:limit]
+        if limited:
+            logger.info(
+                f"[{log_prefix}][THRESHOLD-RESCUE] candidates={len(limited)} "
+                f"before_limit={len(candidates)}"
+            )
+        return limited
+
+    @staticmethod
+    def _mark_threshold_rescue_roi_conflict(
+        candidate: ThresholdRescueCandidate,
+        roi_stats: Optional[_RoiFilteredClassStats],
+    ) -> None:
+        if roi_stats is None or roi_stats.vote_count <= 0:
+            return
+        if roi_stats.max_confidence < float(config.vision.side_confidence_threshold):
+            return
+        candidate.roi_conflict = True
+        candidate.roi_conflict_reason = "side_roi_filtered_stronger_evidence"
+        candidate.roi_conflict_side_vote_count = int(roi_stats.vote_count)
+        candidate.roi_conflict_side_max_confidence = float(roi_stats.max_confidence)
+        candidate.roi_conflict_side_roi_x_avg = roi_stats.avg_center_x
+        candidate.roi_conflict_side_roi_x_limit = float(roi_stats.roi_x_limit)
+
+    @staticmethod
+    def _threshold_rescue_roi_conflict_rejection_reason(
+        candidate: ThresholdRescueCandidate,
+    ) -> Optional[str]:
+        if candidate.source != "threshold_rescue" or not candidate.roi_conflict:
+            return None
+        strong_inside_evidence = (
+            candidate.max_confidence >= float(config.weight.multi_kind_min_confidence)
+            and candidate.vote_count >= max(
+                1,
+                int(config.weight.detected_single_fallback_min_votes),
+            )
+        )
+        if strong_inside_evidence:
+            return None
+        return candidate.roi_conflict_reason or "side_roi_filtered_stronger_evidence"
+
+    def _build_roi_rescue_candidates(
+        self,
+        roi_filtered_stats: Dict[int, _RoiFilteredClassStats],
+        allowed_class_ids: Optional[List[int]],
+        log_prefix: str,
+    ) -> List[ThresholdRescueCandidate]:
+        if not config.vision.threshold_rescue_enabled:
+            return []
+        allowed_set = set(allowed_class_ids) if allowed_class_ids is not None else None
+        candidates: List[ThresholdRescueCandidate] = []
+        for class_id, stats in roi_filtered_stats.items():
+            if allowed_set is not None and class_id not in allowed_set:
+                continue
+            candidate = stats.to_rescue_candidate(self.min_motion_displacement)
+            if candidate is None:
+                continue
+            reason = self._roi_rescue_rejection_reason(candidate)
+            if reason is not None:
+                logger.info(
+                    f"[{log_prefix}][ROI-RESCUE] rejected class={candidate.class_id} "
+                    f"reason={reason} roi_x_avg={candidate.roi_x_avg} "
+                    f"roi_x_limit={candidate.roi_x_limit} "
+                    f"side_motion_passed={candidate.side_motion_passed}"
+                )
+                continue
+            candidates.append(candidate)
+
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.vote_count,
+                candidate.max_confidence,
+                candidate.side_max_distance,
+            ),
+            reverse=True,
+        )
+        limit = max(0, int(config.vision.threshold_rescue_max_candidates))
+        limited = candidates[:limit]
+        if limited:
+            logger.info(
+                f"[{log_prefix}][ROI-RESCUE] candidates={len(limited)} "
+                f"before_limit={len(candidates)}"
+            )
+        return limited
+
+    @staticmethod
+    def build_weight_gated_rescue_votes(
+        rescue_candidates: List[ThresholdRescueCandidate],
+        active_products: Optional[List[object]],
+        delta_weight: float,
+        *,
+        diagnostics: Optional[dict] = None,
+        existing_class_ids: Optional[set[int]] = None,
+    ) -> List[VoteResult]:
+        if not rescue_candidates or not active_products:
+            if diagnostics is not None:
+                diagnostics.update(
+                    {
+                        "target_weight": round(abs(float(delta_weight)), 1),
+                        "considered": len(rescue_candidates or []),
+                        "accepted": 0,
+                        "rejections": {"no_roi_votes": 0},
+                        "candidates": [],
+                    }
+                )
+            return []
+
+        active_map = {
+            int(product.yolo_class_id): product
+            for product in active_products
+            if getattr(product, "yolo_class_id", None) is not None
+        }
+        target_weight = abs(delta_weight)
+        rescue_tolerance = float(config.weight.rescue_tolerance_grams)
+        no_motion_tolerance = float(
+            config.vision.weight_rescue_no_motion_max_residual_grams
+        )
+        cap = float(config.vision.threshold_rescue_confidence_cap)
+        rescue_votes: List[VoteResult] = []
+        existing_class_ids = existing_class_ids or set()
+        rejections: Dict[str, int] = {
+            "duplicate_vision_candidate": 0,
+            "not_active": 0,
+            "invalid_weight": 0,
+            "zero_stock": 0,
+            "weight_mismatch": 0,
+            "rescue_weight_mismatch": 0,
+            "motion_rejected_but_weight_matched": 0,
+            "roi_rescue_no_motion": 0,
+            "roi_rescue_missing_roi": 0,
+            "roi_rescue_too_far_right": 0,
+            "threshold_rescue_roi_conflict": 0,
+        }
+        diagnostic_candidates: List[dict] = []
+
+        for candidate in rescue_candidates:
+            residual: Optional[float] = None
+            reason: Optional[str] = None
+            product_weight = 0.0
+            stock_qty = 0
+            motion_gate_passed = bool(
+                getattr(
+                    candidate,
+                    "motion_gate_passed",
+                    candidate.top_motion_passed or candidate.side_motion_passed,
+                )
+            )
+            product = active_map.get(candidate.class_id)
+            if candidate.class_id in existing_class_ids:
+                reason = "duplicate_vision_candidate"
+            if reason is None and candidate.source == "roi_rescue":
+                reason = VideoProcessor._roi_rescue_rejection_reason(candidate)
+            if reason is None and product is None:
+                reason = "not_active"
+            if reason is None and product is not None:
+                product_weight = float(getattr(product, "product_weight", 0.0) or 0.0)
+                stock_qty = int(getattr(product, "stock_qty", 0) or 0)
+                residual = abs(target_weight - product_weight) if product_weight > 0 else None
+                if product_weight <= 0:
+                    reason = "invalid_weight"
+                elif stock_qty <= 0:
+                    reason = "zero_stock"
+                elif residual is None or residual > rescue_tolerance:
+                    reason = "rescue_weight_mismatch"
+                elif (
+                    candidate.source == "threshold_rescue"
+                    and not motion_gate_passed
+                    and (
+                        not config.vision.weight_rescue_no_motion_enabled
+                        or candidate.vote_count < config.vision.weight_rescue_no_motion_min_raw_votes
+                        or residual > no_motion_tolerance
+                    )
+                ):
+                    reason = "motion_rejected_but_weight_matched"
+                elif (
+                    threshold_roi_conflict_reason
+                    := VideoProcessor._threshold_rescue_roi_conflict_rejection_reason(
+                        candidate,
+                    )
+                ) is not None:
+                    reason = "threshold_rescue_roi_conflict"
+
+            candidate.weight_gate_passed = reason is None and residual is not None
+            candidate.rescue_weight_residual_g = residual
+            candidate.rescue_tolerance_g = rescue_tolerance
+
+            if reason is not None:
+                rejections[reason] = rejections.get(reason, 0) + 1
+                if reason == "rescue_weight_mismatch":
+                    rejections["weight_mismatch"] = rejections.get("weight_mismatch", 0) + 1
+                diagnostic_candidates.append(
+                    {
+                        "class_id": candidate.class_id,
+                        "name": candidate.class_name,
+                        "source": candidate.source,
+                        "raw_vote_count": candidate.vote_count,
+                        "max_confidence": round(candidate.max_confidence, 4),
+                        "unit_weight_g": round(product_weight, 1) if product_weight > 0 else None,
+                        "stock_qty": stock_qty,
+                        "weight_residual_g": (
+                            round(float(residual), 1) if residual is not None else None
+                        ),
+                        "rescue_weight_residual_g": (
+                            round(float(residual), 1) if residual is not None else None
+                        ),
+                        "rescue_tolerance_g": rescue_tolerance,
+                        "weight_gate_passed": False,
+                        "motion_gate_passed": motion_gate_passed,
+                        "side_motion_passed": candidate.side_motion_passed,
+                        "roi_x_avg": (
+                            round(float(candidate.roi_x_avg), 1)
+                            if candidate.roi_x_avg is not None
+                            else None
+                        ),
+                        "roi_x_limit": (
+                            round(float(candidate.roi_x_limit), 1)
+                            if candidate.roi_x_limit is not None
+                            else None
+                        ),
+                        "roi_conflict": candidate.roi_conflict,
+                        "roi_conflict_reason": candidate.roi_conflict_reason,
+                        "roi_conflict_side_vote_count": candidate.roi_conflict_side_vote_count,
+                        "roi_conflict_side_max_confidence": round(
+                            float(candidate.roi_conflict_side_max_confidence),
+                            4,
+                        ),
+                        "roi_conflict_side_roi_x_avg": (
+                            round(float(candidate.roi_conflict_side_roi_x_avg), 1)
+                            if candidate.roi_conflict_side_roi_x_avg is not None
+                            else None
+                        ),
+                        "roi_conflict_side_roi_x_limit": (
+                            round(float(candidate.roi_conflict_side_roi_x_limit), 1)
+                            if candidate.roi_conflict_side_roi_x_limit is not None
+                            else None
+                        ),
+                        "threshold_rescue_rejected_reason": (
+                            threshold_roi_conflict_reason
+                            if reason == "threshold_rescue_roi_conflict"
+                            else None
+                        ),
+                        "reason": reason,
+                    }
+                )
+                continue
+
+            confidence = min(max(candidate.max_confidence, 0.01), cap)
+            rescue_votes.append(
+                VoteResult(
+                    class_id=candidate.class_id,
+                    class_name=candidate.class_name,
+                    vote_count=candidate.vote_count,
+                    max_confidence=candidate.max_confidence,
+                    avg_confidence=candidate.avg_confidence,
+                    vote_ratio=0.0,
+                    top_detected=candidate.top_detected,
+                    side_detected=candidate.side_detected,
+                    top_vote_count=candidate.top_vote_count,
+                    side_vote_count=candidate.side_vote_count,
+                    top_max_confidence=candidate.top_max_confidence,
+                    side_max_confidence=candidate.side_max_confidence,
+                    weighted_confidence=confidence,
+                    source=candidate.source,
+                    raw_vote_count=candidate.vote_count,
+                    top_motion_passed=candidate.top_motion_passed,
+                    side_motion_passed=candidate.side_motion_passed,
+                    top_total_displacement=candidate.top_total_displacement,
+                    side_total_displacement=candidate.side_total_displacement,
+                    top_max_distance=candidate.top_max_distance,
+                    side_max_distance=candidate.side_max_distance,
+                    roi_x_min=candidate.roi_x_min,
+                    roi_x_max=candidate.roi_x_max,
+                    roi_x_avg=candidate.roi_x_avg,
+                    roi_x_limit=candidate.roi_x_limit,
+                    weight_residual_g=residual,
+                    motion_gate_passed=motion_gate_passed,
+                    weight_gate_passed=True,
+                    rescue_tolerance_g=rescue_tolerance,
+                    rescue_weight_residual_g=residual,
+                )
+            )
+            diagnostic_candidates.append(
+                {
+                    "class_id": candidate.class_id,
+                    "name": candidate.class_name,
+                    "source": candidate.source,
+                    "raw_vote_count": candidate.vote_count,
+                    "max_confidence": round(candidate.max_confidence, 4),
+                    "unit_weight_g": round(product_weight, 1),
+                    "stock_qty": stock_qty,
+                    "weight_residual_g": round(float(residual or 0.0), 1),
+                    "rescue_weight_residual_g": round(float(residual or 0.0), 1),
+                    "rescue_tolerance_g": rescue_tolerance,
+                    "weight_gate_passed": True,
+                    "motion_gate_passed": motion_gate_passed,
+                    "side_motion_passed": candidate.side_motion_passed,
+                    "roi_x_avg": (
+                        round(float(candidate.roi_x_avg), 1)
+                        if candidate.roi_x_avg is not None
+                        else None
+                    ),
+                    "roi_x_limit": (
+                        round(float(candidate.roi_x_limit), 1)
+                        if candidate.roi_x_limit is not None
+                        else None
+                    ),
+                    "roi_conflict": candidate.roi_conflict,
+                    "roi_conflict_reason": candidate.roi_conflict_reason,
+                    "roi_conflict_side_vote_count": candidate.roi_conflict_side_vote_count,
+                    "roi_conflict_side_max_confidence": round(
+                        float(candidate.roi_conflict_side_max_confidence),
+                        4,
+                    ),
+                    "roi_conflict_side_roi_x_avg": (
+                        round(float(candidate.roi_conflict_side_roi_x_avg), 1)
+                        if candidate.roi_conflict_side_roi_x_avg is not None
+                        else None
+                    ),
+                    "roi_conflict_side_roi_x_limit": (
+                        round(float(candidate.roi_conflict_side_roi_x_limit), 1)
+                        if candidate.roi_conflict_side_roi_x_limit is not None
+                        else None
+                    ),
+                    "threshold_rescue_rejected_reason": None,
+                    "reason": "accepted",
+                }
+            )
+
+        if diagnostics is not None:
+            diagnostics.update(
+                {
+                    "target_weight": round(target_weight, 1),
+                    "tolerance": rescue_tolerance,
+                    "rescue_tolerance_g": rescue_tolerance,
+                    "no_motion_rescue_tolerance_g": no_motion_tolerance,
+                    "considered": len(rescue_candidates),
+                    "accepted": len(rescue_votes),
+                    "rejections": rejections,
+                    "candidates": diagnostic_candidates,
+                }
+            )
+        return rescue_votes
+
+    def _record_preprocess(
+        self,
+        trace_context: Optional[TriggerTraceContext],
+        camera_type: str,
+    ) -> None:
+        if trace_context is None:
+            return
+        preprocess = getattr(self.yolo, "last_preprocess", None)
+        if preprocess:
+            trace_context.record_preprocess(camera_type, preprocess)
+
+    def _record_diagnostic_detections(
+        self,
+        trace_context: Optional[TriggerTraceContext],
+        frame,
+        camera_type: str,
+        frame_index: int,
+    ) -> None:
+        if trace_context is None or not config.vision.diagnostic_all_class_trace:
+            return
+        if frame_index >= max(0, int(config.vision.diagnostic_trace_max_frames)):
+            return
+        for det in self._detect_frame(frame, None, camera_type):
+            if det.is_hand:
+                continue
+            trace_context.record_diagnostic_detection(
+                camera=camera_type,
+                frame_index=frame_index,
+                class_id=det.cls,
+                class_name=det.name,
+                confidence=det.conf,
+            )
+
+    def _limit_candidates(
+        self,
+        results: List[VoteResult],
+        log_prefix: str,
+    ) -> List[VoteResult]:
+        candidate_limit = max(1, int(config.vision.top_k))
+        limited = results[:candidate_limit]
+        logger.info(
+            f"[{log_prefix}] candidate_limit={candidate_limit}, "
+            f"before_limit={len(results)}, after_limit={len(limited)}"
+        )
+        return limited
+
+    def _log_candidate_trace(
+        self,
+        log_prefix: str,
+        stats: VideoProcessingStats,
+        results: List[VoteResult],
+    ) -> None:
+        """Write detailed candidate pipeline diagnostics to the file log."""
+        candidate_limit = max(1, int(config.vision.top_k))
+        logger.info(
+            f"[{log_prefix}][CANDIDATE-TRACE] "
+            f"raw_top={stats.top_raw_detections}, raw_side={stats.side_raw_detections}, "
+            f"threshold_filtered_top={stats.top_threshold_filtered}, "
+            f"threshold_filtered_side={stats.side_threshold_filtered}, "
+            f"roi_filtered={stats.roi_filtered_detections}, "
+            f"motion_filtered={stats.motion_filtered_classes}, "
+            f"hand_path_filtered={stats.hand_path_filtered_classes}, "
+            f"final_candidates={len(results)}, candidate_limit={candidate_limit}"
+        )
+        for index, result in enumerate(results[:candidate_limit], start=1):
+            logger.info(
+                f"[{log_prefix}][CANDIDATE-TRACE] rank={index}, "
+                f"class_id={result.class_id}, name={result.class_name}, "
+                f"confidence={result.weighted_confidence:.3f}, "
+                f"top={result.top_detected}, side={result.side_detected}, "
+                f"votes={result.vote_count}"
+            )
+
+    def _inference_allowed_class_ids(
+        self,
+        allowed_class_ids: Optional[List[int]],
+        log_prefix: str,
+    ) -> Optional[List[int]]:
+        if allowed_class_ids is None:
+            logger.warning(
+                f"[{log_prefix}] active_products snapshot missing; "
+                "inference_classes=none fail_closed=true"
+            )
+            return []
+
+        normalized_ids = list(dict.fromkeys(allowed_class_ids))
+        if normalized_ids:
+            logger.info(
+                f"[{log_prefix}] strict_active_products allowed_classes={len(normalized_ids)} "
+                "inference_classes=allowed"
+            )
+        else:
+            logger.warning(
+                f"[{log_prefix}] active_products has no stock-positive classes; "
+                "inference_classes=none fail_closed=true"
+            )
+        return normalized_ids
+
+    @staticmethod
+    def _filter_results_by_allowed_class_ids(
+        results: List[VoteResult],
+        allowed_class_ids: Optional[List[int]],
+        log_prefix: str,
+    ) -> List[VoteResult]:
+        if allowed_class_ids is None:
+            return results
+
+        allowed_set = set(allowed_class_ids)
+        filtered = [result for result in results if result.class_id in allowed_set]
+        removed_count = len(results) - len(filtered)
+        if removed_count > 0:
+            logger.warning(
+                f"[{log_prefix}] active_product_filtered={removed_count} "
+                f"allowed_classes={len(allowed_set)}"
+            )
+        return filtered
+
+    def _apply_hand_path_filter(
+        self,
+        results: List[VoteResult],
+        hand_path_tracker: HandPathTracker,
+        log_prefix: str,
+    ) -> Tuple[List[VoteResult], int]:
+        candidate_class_ids = [r.class_id for r in results]
+        valid_class_ids = hand_path_tracker.filter_products_by_path(candidate_class_ids)
+        valid_class_ids_set = set(valid_class_ids)
+
+        filtered_results = [r for r in results if r.class_id in valid_class_ids_set]
+        removed_count = len(results) - len(filtered_results)
+        if removed_count > 0:
+            logger.info(f"[{log_prefix}] hand_path_filtered={removed_count}")
+        if results and not filtered_results:
+            logger.warning(
+                f"[{log_prefix}] fallback=kept_candidates "
+                "reason=hand_path_removed_all"
+            )
+            return results, 0
+        return filtered_results, removed_count
+
+    def process_videos(
+        self,
+        top_path: Optional[str] = None,
+        side_path: Optional[str] = None,
+        allowed_class_ids: Optional[List[int]] = None,
+        product_weights: Optional[Dict[int, float]] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
+        delta_weight: Optional[float] = None,
+    ) -> VideoProcessingResult:
+        """
+        Process top and side camera videos.
+
+        Args:
+            top_path: Path to top camera AVI file (optional)
+            side_path: Path to side camera AVI file (optional)
+            allowed_class_ids: 허용된 YOLO 클래스 ID 리스트 (v4.4)
+                               None이면 모든 클래스 탐지
+                               리스트가 있으면 해당 클래스만 탐지
+            product_weights: {class_id: weight_in_grams} for logging (v4.6)
+
+        Returns:
+            VideoProcessingResult with combined voting results
+        """
+        start_time = time.time()
+        stats = VideoProcessingStats()
+
+        logger.info("[VIDEO] ========== 비디오 처리 시작 ==========")
+        logger.info(f"[VIDEO] top_path={top_path}")
+        logger.info(f"[VIDEO] side_path={side_path}")
+        logger.info(
+            f"[VIDEO] thresholds: top={self.top_confidence_threshold:.2f}, "
+            f"side={self.side_confidence_threshold:.2f}"
+        )
+        inference_allowed_class_ids = self._inference_allowed_class_ids(
+            allowed_class_ids,
+            "VIDEO",
+        )
+
+        top_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
+        side_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
+        low_confidence_stats: Dict[int, _LowConfidenceClassStats] = {}
+        roi_filtered_stats: Dict[int, _RoiFilteredClassStats] = {}
+
+        # v4.6: 손 경로 추적기 생성 (Top 카메라에서만 사용)
+        top_hand_tracker: Optional[HandPathTracker] = None
+        if self.hand_path_filter_enabled:
+            top_hand_tracker = HandPathTracker()
+
+        # Process top camera video
+        if top_path:
+            logger.info("[VIDEO] Top 카메라 처리 시작...")
+            top_stats = self._process_single_video(
+                top_path, top_ensemble, "top", inference_allowed_class_ids,
+                hand_path_tracker=top_hand_tracker,
+                trace_context=trace_context,
+                low_confidence_stats=low_confidence_stats,
+                roi_filtered_stats=roi_filtered_stats,
+                delta_weight=delta_weight,
+            )
+            stats.top_frames = top_stats["frames"]
+            stats.top_raw_detections = top_stats.get("raw_detections", 0)
+            stats.top_threshold_filtered = top_stats.get("threshold_filtered", 0)
+            stats.top_detections = top_stats["detections"]
+            stats.yolo_inference_count += top_stats.get("yolo_inference_count", 0)
+            stats.yolo_total_time_ms += top_stats.get("yolo_total_time_ms", 0.0)
+            stats.roi_filtered_detections += top_stats.get("roi_filtered", 0)
+            stats.side_roi_soft_passed_detections += top_stats.get(
+                "side_roi_soft_passed",
+                0,
+            )
+            stats.side_roi_soft_filtered_detections += top_stats.get(
+                "side_roi_soft_filtered",
+                0,
+            )
+            stats.motion_filtered_classes += top_stats.get("motion_filtered", 0)
+            logger.info(
+                f"[VIDEO] Top 완료: 총 {stats.top_frames}프레임, "
+                f"탐지={stats.top_detections}개, 고유클래스={len(top_ensemble.votes)}개"
+            )
+
+        # Process side camera video
+        if side_path:
+            logger.info("[VIDEO] Side 카메라 처리 시작...")
+            side_stats = self._process_single_video(
+                side_path, side_ensemble, "side", inference_allowed_class_ids,
+                hand_path_tracker=None,  # Side 카메라에서는 손 경로 필터링 안 함
+                trace_context=trace_context,
+                low_confidence_stats=low_confidence_stats,
+                roi_filtered_stats=roi_filtered_stats,
+                delta_weight=delta_weight,
+            )
+            stats.side_frames = side_stats["frames"]
+            stats.side_raw_detections = side_stats.get("raw_detections", 0)
+            stats.side_threshold_filtered = side_stats.get("threshold_filtered", 0)
+            stats.side_detections = side_stats["detections"]
+            stats.yolo_inference_count += side_stats.get("yolo_inference_count", 0)
+            stats.yolo_total_time_ms += side_stats.get("yolo_total_time_ms", 0.0)
+            stats.roi_filtered_detections += side_stats.get("roi_filtered", 0)
+            stats.side_roi_soft_passed_detections += side_stats.get(
+                "side_roi_soft_passed",
+                0,
+            )
+            stats.side_roi_soft_filtered_detections += side_stats.get(
+                "side_roi_soft_filtered",
+                0,
+            )
+            stats.motion_filtered_classes += side_stats.get("motion_filtered", 0)
+            logger.info(
+                f"[VIDEO] Side 완료: 총 {stats.side_frames}프레임, "
+                f"탐지={stats.side_detections}개, 고유클래스={len(side_ensemble.votes)}개"
+            )
+
+        # Combine results with config weights (v4.6: product_weights 전달)
+        combined_results = VotingEnsemble.combine(
+            top_ensemble=top_ensemble,
+            side_ensemble=side_ensemble,
+            top_weight=config.top_weight,
+            side_weight=config.side_weight,
+            common_class_bonus=config.common_class_bonus,
+            product_weights=product_weights,
+            top_only_weight=config.top_only_weight,
+            side_only_weight=config.side_only_weight,
+        )
+        combined_results = self._filter_results_by_allowed_class_ids(
+            combined_results,
+            inference_allowed_class_ids,
+            "VIDEO",
+        )
+
+        # v4.6: 손 경로 필터링 적용 (Top 카메라 기준)
+        if top_hand_tracker is not None and self.hand_path_filter_enabled:
+            candidate_class_ids = [r.class_id for r in combined_results]
+            valid_class_ids = top_hand_tracker.filter_products_by_path(candidate_class_ids)
+            valid_class_ids_set = set(valid_class_ids)
+
+            before_count = len(combined_results)
+            filtered_by_hand_path = [
+                r for r in combined_results if r.class_id in valid_class_ids_set
+            ]
+            if before_count > 0 and not filtered_by_hand_path:
+                logger.warning(
+                    "[VIDEO] fallback=kept_candidates reason=hand_path_removed_all"
+                )
+                stats.hand_path_filtered_classes = 0
+            else:
+                removed_results = [
+                    result
+                    for result in combined_results
+                    if result.class_id not in valid_class_ids_set
+                ]
+                combined_results = filtered_by_hand_path
+                stats.hand_path_filtered_classes = before_count - len(combined_results)
+                for result in filtered_by_hand_path:
+                    self._record_stage(
+                        trace_context,
+                        class_id=result.class_id,
+                        class_name=result.class_name,
+                        stage="hand_path_passed",
+                        camera="top",
+                    )
+                for result in removed_results:
+                    self._record_stage(
+                        trace_context,
+                        class_id=result.class_id,
+                        class_name=result.class_name,
+                        stage="hand_path_filtered",
+                        camera="top",
+                    )
+
+            if stats.hand_path_filtered_classes > 0:
+                logger.info(
+                    f"[VIDEO] 손 경로 필터링: {stats.hand_path_filtered_classes}개 제외"
+                )
+
+        # Filter by minimum vote ratio OR minimum vote count
+        # 조건 1: vote_ratio >= 5% (기존)
+        # 조건 2: vote_count >= min_vote_count (짧은 비디오 대응)
+        min_vote_count = self.min_vote_count
+        filtered_results = [
+            r for r in combined_results
+            if r.vote_ratio >= self.min_vote_ratio or r.vote_count >= min_vote_count
+        ]
+        filtered_results = self._limit_candidates(filtered_results, "VIDEO")
+        threshold_rescue_candidates = self._build_threshold_rescue_candidates(
+            low_confidence_stats,
+            roi_filtered_stats,
+            inference_allowed_class_ids,
+            "VIDEO",
+        )
+        roi_rescue_candidates = self._build_roi_rescue_candidates(
+            roi_filtered_stats,
+            inference_allowed_class_ids,
+            "VIDEO",
+        )
+        if trace_context is not None:
+            for rank, result in enumerate(filtered_results, start=1):
+                trace_context.record_final_candidate_rank(result.class_id, rank)
+            trace_context.record_threshold_rescue_candidates(
+                threshold_rescue_candidates,
+                product_weights,
+            )
+            trace_context.record_roi_rescue_candidates(
+                roi_rescue_candidates,
+                product_weights,
+            )
+
+        # 필터링 로그
+        filtered_by_ratio = sum(1 for r in combined_results if r.vote_ratio >= self.min_vote_ratio)
+        filtered_by_count = sum(1 for r in combined_results if r.vote_count >= min_vote_count and r.vote_ratio < self.min_vote_ratio)
+        logger.info(
+            f"[VIDEO] 필터링: vote_ratio >= {self.min_vote_ratio*100:.0f}%: {filtered_by_ratio}개, "
+            f"vote_count >= {min_vote_count}: 추가 {filtered_by_count}개"
+        )
+
+        stats.processing_time_ms = (time.time() - start_time) * 1000
+        if stats.yolo_inference_count > 0:
+            stats.yolo_avg_time_ms = (
+                stats.yolo_total_time_ms / stats.yolo_inference_count
+            )
+
+        logger.info(
+            f"[VIDEO][LATENCY] total_ms={stats.processing_time_ms:.1f} "
+            f"yolo_total_ms={stats.yolo_total_time_ms:.1f} "
+            f"yolo_avg_ms={stats.yolo_avg_time_ms:.1f} "
+            f"yolo_count={stats.yolo_inference_count}"
+        )
+        self._log_candidate_trace("VIDEO", stats, filtered_results)
+        if trace_context is not None:
+            trace_context.record_video_stats(stats)
+            trace_context.record_candidates(filtered_results, product_weights)
+
+        logger.info(f"[VIDEO] 앙상블 결합 완료: {len(filtered_results)}개 후보")
+
+        return VideoProcessingResult(
+            vote_results=filtered_results,
+            top_ensemble=top_ensemble,
+            side_ensemble=side_ensemble,
+            stats=stats,
+            threshold_rescue_candidates=threshold_rescue_candidates,
+            roi_rescue_candidates=roi_rescue_candidates,
+        )
+
+    async def process_videos_async(
+        self,
+        top_path: Optional[str] = None,
+        side_path: Optional[str] = None,
+        allowed_class_ids: Optional[List[int]] = None,
+        product_weights: Optional[Dict[int, float]] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
+        delta_weight: Optional[float] = None,
+    ) -> VideoProcessingResult:
+        """
+        Async streaming video processing (v5.3).
+
+        Top과 Side 카메라의 프레임 추출을 병렬로 수행하고,
+        단일 YOLO 인스턴스에서 인터리빙 추론합니다.
+
+        I/O 병렬화로 처리 시간 20-30% 개선 예상:
+        - 현재: 12-20초/트리거
+        - 목표: 8-14초/트리거
+
+        Args:
+            top_path: Path to top camera AVI file (optional)
+            side_path: Path to side camera AVI file (optional)
+            allowed_class_ids: 허용된 YOLO 클래스 ID 리스트
+            product_weights: {class_id: weight_in_grams} for logging
+
+        Returns:
+            VideoProcessingResult with combined voting results
+        """
+        start_time = time.time()
+        stats = VideoProcessingStats()
+
+        logger.info("[VIDEO-ASYNC] ========== 비동기 스트리밍 처리 시작 ==========")
+        logger.info(f"[VIDEO-ASYNC] top_path={top_path}")
+        logger.info(f"[VIDEO-ASYNC] side_path={side_path}")
+        logger.info(
+            f"[VIDEO-ASYNC] thresholds: top={self.top_confidence_threshold:.2f}, "
+            f"side={self.side_confidence_threshold:.2f}"
+        )
+        inference_allowed_class_ids = self._inference_allowed_class_ids(
+            allowed_class_ids,
+            "VIDEO-ASYNC",
+        )
+        frame_stride = 2
+
+        top_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
+        side_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
+
+        # v5.3: 손 경로 추적기 (Top 카메라에서만 사용)
+        top_hand_tracker: Optional[HandPathTracker] = None
+        if self.hand_path_filter_enabled:
+            top_hand_tracker = HandPathTracker()
+
+        # 프레임 큐: (camera_type, frame_idx, frame, extractor_done)
+        # None frame = EOF marker
+        frame_queue: asyncio.Queue[Tuple[str, int, Optional[Any]]] = asyncio.Queue(
+            maxsize=config.async_streaming.frame_queue_size
+        )
+
+        # Motion tracking
+        top_bbox_trackers: Dict[int, BboxTracker] = {}
+        side_bbox_trackers: Dict[int, BboxTracker] = {}
+        top_pending_votes: Dict[int, List[Tuple[float, str]]] = {}
+        side_pending_votes: Dict[int, List[Tuple[float, str]]] = {}
+        low_confidence_stats: Dict[int, _LowConfidenceClassStats] = {}
+        roi_filtered_stats: Dict[int, _RoiFilteredClassStats] = {}
+
+        # Frame counters
+        top_frame_count = 0
+        side_frame_count = 0
+        top_original_frame_count = 0
+        side_original_frame_count = 0
+        top_raw_detection_count = 0
+        side_raw_detection_count = 0
+        top_threshold_filtered_count = 0
+        side_threshold_filtered_count = 0
+        top_detection_count = 0
+        side_detection_count = 0
+        roi_filtered_count = 0
+        side_roi_soft_passed_count = 0
+        side_roi_soft_filtered_count = 0
+        extractor_diagnostics: Dict[str, object] = {}
+
+        # Active extractors count
+        active_extractors = 0
+        if top_path:
+            active_extractors += 1
+        if side_path:
+            active_extractors += 1
+
+        if active_extractors == 0:
+            logger.warning("[VIDEO-ASYNC] No video paths provided")
+            return VideoProcessingResult(
+                vote_results=[],
+                top_ensemble=top_ensemble,
+                side_ensemble=side_ensemble,
+                stats=stats,
+            )
+
+        async def extract_frames(path: str, camera_type: str) -> None:
+            """프레임 추출 태스크 (비동기)."""
+            nonlocal top_frame_count, side_frame_count
+            nonlocal top_original_frame_count, side_original_frame_count
+
+            extractor = create_frame_extractor(
+                path,
+                prefer_ffmpeg=True,
+                use_hwaccel=self.use_hwaccel,
+                camera_type=camera_type,
+            )
+            if trace_context is not None:
+                trace_context.plan_camera(
+                    camera_type,
+                    int(getattr(extractor, "total_frames", 0) or 0),
+                )
+
+            frame_idx = 0
+            # ffmpeg 미존재 시 CV2FrameExtractor가 반환될 수 있음(__aiter__ 미지원)
+            if not hasattr(extractor, '__aiter__'):
+                logger.error(
+                    f"[VIDEO-ASYNC] {camera_type}: async streaming requires ffmpeg "
+                    "but extractor does not support async iteration (ffmpeg not available?). "
+                    "Skipping video extraction."
+                )
+                await frame_queue.put((camera_type, -1, None))
+                return
+
+            try:
+                async for frame in extractor:
+                    original_frame_idx = frame_idx
+                    frame_idx += 1
+
+                    if camera_type == "top":
+                        top_original_frame_count = frame_idx
+                    else:
+                        side_original_frame_count = frame_idx
+
+                    if original_frame_idx % frame_stride != 0:
+                        continue
+
+                    if trace_context is not None:
+                        trace_context.record_frame(camera_type, original_frame_idx, frame)
+                    await frame_queue.put((camera_type, original_frame_idx, frame))
+
+                    # Update frame count
+                    if camera_type == "top":
+                        top_frame_count += 1
+                    else:
+                        side_frame_count += 1
+
+            except asyncio.CancelledError:
+                logger.warning(f"[VIDEO-ASYNC] {camera_type} extraction cancelled at frame {frame_idx}")
+                raise
+            finally:
+                extractor_diagnostics[camera_type] = getattr(
+                    extractor,
+                    "last_diagnostics",
+                    None,
+                )
+                # EOF marker
+                await frame_queue.put((camera_type, -1, None))
+                logger.info(f"[VIDEO-ASYNC] {camera_type} 추출 완료: {frame_idx}개 프레임")
+
+        async def yolo_inference_loop() -> None:
+            """YOLO 추론 루프 (단일 인스턴스)."""
+            nonlocal top_raw_detection_count, side_raw_detection_count
+            nonlocal top_threshold_filtered_count, side_threshold_filtered_count
+            nonlocal top_detection_count, side_detection_count, roi_filtered_count
+            nonlocal side_roi_soft_passed_count, side_roi_soft_filtered_count
+
+            eof_received = 0
+            expected_eofs = active_extractors
+
+            while eof_received < expected_eofs:
+                try:
+                    camera_type, frame_idx, frame = await asyncio.wait_for(
+                        frame_queue.get(),
+                        timeout=60.0  # 60초 타임아웃
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("[VIDEO-ASYNC] Frame queue timeout")
+                    break
+
+                # EOF marker
+                if frame is None:
+                    eof_received += 1
+                    logger.debug(f"[VIDEO-ASYNC] EOF received from {camera_type} ({eof_received}/{expected_eofs})")
+                    continue
+
+                # YOLO 추론 (to_thread로 CPU 양보)
+                self._record_diagnostic_detections(
+                    trace_context,
+                    frame,
+                    camera_type,
+                    frame_idx,
+                )
+                yolo_started = time.perf_counter()
+                detections = await asyncio.to_thread(
+                    self._detect_frame, frame, inference_allowed_class_ids, camera_type
+                )
+                stats.yolo_total_time_ms += (
+                    time.perf_counter() - yolo_started
+                ) * 1000
+                stats.yolo_inference_count += 1
+                self._record_preprocess(trace_context, camera_type)
+
+                # 카메라별 처리
+                if camera_type == "top":
+                    # 손 경로 추적 업데이트
+                    if top_hand_tracker is not None:
+                        top_hand_tracker.update_frame(detections, frame_idx)
+
+                    for det in detections:
+                        if det.is_hand:
+                            continue
+                        top_raw_detection_count += 1
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="raw",
+                            camera="top",
+                            confidence=det.conf,
+                        )
+                        if det.conf < self._threshold_for_camera("top"):
+                            top_threshold_filtered_count += 1
+                            bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                            roi_eligible, _ = self._top_roi_accepts(det, delta_weight)
+                            self._record_low_confidence_detection(
+                                low_confidence_stats,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                confidence=det.conf,
+                                camera="top",
+                                center=det.center,
+                                frame_idx=frame_idx,
+                                bbox_size=bbox_size,
+                                roi_eligible=roi_eligible,
+                            )
+                            self._record_stage(
+                                trace_context,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                stage="threshold_filtered",
+                                camera="top",
+                                confidence=det.conf,
+                            )
+                            continue
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="threshold_passed",
+                            camera="top",
+                            confidence=det.conf,
+                        )
+                        top_roi_passed, top_roi_direction = self._top_roi_accepts(
+                            det,
+                            delta_weight,
+                        )
+                        if not top_roi_passed:
+                            roi_filtered_count += 1
+                            self._record_stage(
+                                trace_context,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                stage="roi_filtered",
+                                camera="top",
+                                confidence=det.conf,
+                                center=det.center,
+                                roi_y_limit=self.top_roi_y_split,
+                                roi_direction=top_roi_direction,
+                            )
+                            continue
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="roi_passed",
+                            camera="top",
+                        )
+
+                        class_id = det.cls
+                        center = det.center
+
+                        # 동적 임계값 계산
+                        bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                        dynamic_threshold = max(
+                            float(self.min_motion_displacement),
+                            bbox_size * 0.10,
+                        )
+
+                        if class_id not in top_bbox_trackers:
+                            top_bbox_trackers[class_id] = BboxTracker()
+                        top_bbox_trackers[class_id].update(center, frame_idx)
+                        top_bbox_trackers[class_id].dynamic_threshold = max(
+                            top_bbox_trackers[class_id].dynamic_threshold,
+                            dynamic_threshold
+                        )
+
+                        if class_id not in top_pending_votes:
+                            top_pending_votes[class_id] = []
+                        top_pending_votes[class_id].append((det.conf, det.name))
+                        top_detection_count += 1
+
+                else:  # side
+                    for det in detections:
+                        if det.is_hand:
+                            continue
+                        side_raw_detection_count += 1
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="raw",
+                            camera="side",
+                            confidence=det.conf,
+                        )
+                        if det.conf < self._threshold_for_camera("side"):
+                            side_threshold_filtered_count += 1
+                            center_x = det.center[0]
+                            bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                            self._record_low_confidence_detection(
+                                low_confidence_stats,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                confidence=det.conf,
+                                camera="side",
+                                center=det.center,
+                                frame_idx=frame_idx,
+                                bbox_size=bbox_size,
+                                roi_eligible=center_x <= self.side_roi_x_max,
+                            )
+                            self._record_stage(
+                                trace_context,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                stage="threshold_filtered",
+                                camera="side",
+                                confidence=det.conf,
+                            )
+                            continue
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="threshold_passed",
+                            camera="side",
+                            confidence=det.conf,
+                        )
+
+                        # Side ROI 필터
+                        center_x = det.center[0]
+                        side_roi_passed, side_roi_soft_passed = self._side_roi_accepts(
+                            center_x
+                        )
+                        if not side_roi_passed:
+                            roi_filtered_count += 1
+                            if center_x > self._side_roi_soft_limit():
+                                side_roi_soft_filtered_count += 1
+                            bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                            self._record_roi_filtered_detection(
+                                roi_filtered_stats,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                confidence=det.conf,
+                                center=det.center,
+                                frame_idx=frame_idx,
+                                bbox_size=bbox_size,
+                                roi_x_limit=self.side_roi_x_max,
+                            )
+                            self._record_stage(
+                                trace_context,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                stage="roi_filtered",
+                                camera="side",
+                                confidence=det.conf,
+                                center=det.center,
+                                roi_x_limit=self.side_roi_x_max,
+                            )
+                            if center_x > self._side_roi_soft_limit():
+                                self._record_stage(
+                                    trace_context,
+                                    class_id=det.cls,
+                                    class_name=det.name,
+                                    stage="soft_margin_filtered",
+                                    camera="side",
+                                    confidence=det.conf,
+                                )
+                            continue
+                        if side_roi_soft_passed:
+                            side_roi_soft_passed_count += 1
+                            self._record_stage(
+                                trace_context,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                stage="side_roi_soft_passed",
+                                camera="side",
+                                confidence=det.conf,
+                                center=det.center,
+                                roi_x_limit=self._side_roi_soft_limit(),
+                            )
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="roi_passed",
+                            camera="side",
+                        )
+
+                        class_id = det.cls
+                        center = det.center
+
+                        bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                        dynamic_threshold = max(
+                            float(self.min_motion_displacement),
+                            bbox_size * 0.10,
+                        )
+
+                        if class_id not in side_bbox_trackers:
+                            side_bbox_trackers[class_id] = BboxTracker()
+                        side_bbox_trackers[class_id].update(center, frame_idx)
+                        side_bbox_trackers[class_id].dynamic_threshold = max(
+                            side_bbox_trackers[class_id].dynamic_threshold,
+                            dynamic_threshold
+                        )
+
+                        if class_id not in side_pending_votes:
+                            side_pending_votes[class_id] = []
+                        side_pending_votes[class_id].append((det.conf, det.name))
+                        side_detection_count += 1
+
+                # 진행 로그 (50프레임마다)
+                total_frames = top_frame_count + side_frame_count
+                if total_frames > 0 and total_frames % 50 == 0:
+                    logger.info(
+                        f"[VIDEO-ASYNC] 처리 중: top={top_frame_count}, side={side_frame_count}, "
+                        f"탐지={top_detection_count + side_detection_count}"
+                    )
+
+        # Python 3.10 does not support asyncio.TaskGroup / except*.
+        tasks: dict[asyncio.Task[None], str] = {}
+        if top_path:
+            tasks[asyncio.create_task(extract_frames(top_path, "top"))] = "top-extractor"
+        if side_path:
+            tasks[asyncio.create_task(extract_frames(side_path, "side"))] = "side-extractor"
+        tasks[asyncio.create_task(yolo_inference_loop())] = "yolo-inference"
+
+        done: set[asyncio.Task[None]] = set()
+        pending: set[asyncio.Task[None]] = set(tasks)
+
+        try:
+            first_error: Exception | None = None
+
+            while pending and first_error is None:
+                current_done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                done.update(current_done)
+
+                for task in current_done:
+                    if task.cancelled():
+                        continue
+
+                    exc = task.exception()
+                    if exc is not None:
+                        first_error = exc
+                        break
+
+            if first_error is not None and pending:
+                for task in pending:
+                    task.cancel()
+
+            if pending:
+                current_done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.ALL_COMPLETED,
+                )
+                done.update(current_done)
+
+        except asyncio.CancelledError:
+            for task in pending:
+                task.cancel()
+
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                done.update(pending)
+                pending.clear()
+
+            cancelled_count = sum(1 for task in done if task.cancelled())
+            logger.warning(
+                f"[VIDEO-ASYNC] Tasks cancelled: {cancelled_count} task(s), "
+                f"processed frames: top={top_frame_count}, side={side_frame_count}"
+            )
+        else:
+            cancelled_names: list[str] = []
+            task_errors: list[tuple[str, BaseException]] = []
+
+            for task, task_name in tasks.items():
+                if task.cancelled():
+                    cancelled_names.append(task_name)
+                    continue
+
+                exc = task.exception()
+                if exc is not None:
+                    task_errors.append((task_name, exc))
+
+            if cancelled_names:
+                logger.warning(
+                    f"[VIDEO-ASYNC] Tasks cancelled: {', '.join(cancelled_names)}, "
+                    f"processed frames: top={top_frame_count}, side={side_frame_count}"
+                )
+
+            for task_name, exc in task_errors:
+                logger.error(f"[VIDEO-ASYNC] Task error in {task_name}: {type(exc).__name__}: {exc}")
+
+        # Frame counts 설정
+        top_ensemble.set_frame_count(top_frame_count)
+        side_ensemble.set_frame_count(side_frame_count)
+
+        # Motion 필터링 및 투표 적용 (Top)
+        top_motion_filtered = self._apply_motion_filter_and_votes(
+            "top", top_pending_votes, top_bbox_trackers, top_ensemble, trace_context
+        )
+
+        # Motion 필터링 및 투표 적용 (Side)
+        side_motion_filtered = self._apply_motion_filter_and_votes(
+            "side", side_pending_votes, side_bbox_trackers, side_ensemble, trace_context
+        )
+
+        stats.top_frames = top_frame_count
+        stats.side_frames = side_frame_count
+        stats.top_original_frames = top_original_frame_count
+        stats.side_original_frames = side_original_frame_count
+        stats.frame_stride = frame_stride
+        stats.top_raw_detections = top_raw_detection_count
+        stats.side_raw_detections = side_raw_detection_count
+        stats.top_threshold_filtered = top_threshold_filtered_count
+        stats.side_threshold_filtered = side_threshold_filtered_count
+        stats.top_detections = top_detection_count
+        stats.side_detections = side_detection_count
+        stats.roi_filtered_detections = roi_filtered_count
+        stats.side_roi_soft_passed_detections = side_roi_soft_passed_count
+        stats.side_roi_soft_filtered_detections = side_roi_soft_filtered_count
+        stats.motion_filtered_classes = top_motion_filtered + side_motion_filtered
+
+        # Side ROI 필터링 로그
+        if roi_filtered_count > 0:
+            logger.info(
+                f"[VIDEO-ASYNC] ROI 필터링: {roi_filtered_count}개 탐지 제외 "
+                f"(center_x > {self.side_roi_x_max}px, "
+                f"soft_limit={self._side_roi_soft_limit()}px)"
+            )
+
+        # 앙상블 결합
+        combined_results = VotingEnsemble.combine(
+            top_ensemble=top_ensemble,
+            side_ensemble=side_ensemble,
+            top_weight=config.top_weight,
+            side_weight=config.side_weight,
+            common_class_bonus=config.common_class_bonus,
+            product_weights=product_weights,
+            top_only_weight=config.top_only_weight,
+            side_only_weight=config.side_only_weight,
+        )
+        combined_results = self._filter_results_by_allowed_class_ids(
+            combined_results,
+            inference_allowed_class_ids,
+            "VIDEO-ASYNC",
+        )
+
+        # 손 경로 필터링
+        if top_hand_tracker is not None and self.hand_path_filter_enabled:
+            candidate_class_ids = [r.class_id for r in combined_results]
+            valid_class_ids = top_hand_tracker.filter_products_by_path(candidate_class_ids)
+            valid_class_ids_set = set(valid_class_ids)
+
+            before_count = len(combined_results)
+            filtered_by_hand_path = [
+                r for r in combined_results if r.class_id in valid_class_ids_set
+            ]
+            if before_count > 0 and not filtered_by_hand_path:
+                logger.warning(
+                    "[VIDEO-ASYNC] fallback=kept_candidates reason=hand_path_removed_all"
+                )
+                stats.hand_path_filtered_classes = 0
+            else:
+                removed_results = [
+                    result
+                    for result in combined_results
+                    if result.class_id not in valid_class_ids_set
+                ]
+                combined_results = filtered_by_hand_path
+                stats.hand_path_filtered_classes = before_count - len(combined_results)
+                for result in filtered_by_hand_path:
+                    self._record_stage(
+                        trace_context,
+                        class_id=result.class_id,
+                        class_name=result.class_name,
+                        stage="hand_path_passed",
+                        camera="top",
+                    )
+                for result in removed_results:
+                    self._record_stage(
+                        trace_context,
+                        class_id=result.class_id,
+                        class_name=result.class_name,
+                        stage="hand_path_filtered",
+                        camera="top",
+                    )
+
+            if stats.hand_path_filtered_classes > 0:
+                logger.info(
+                    f"[VIDEO-ASYNC] 손 경로 필터링: {stats.hand_path_filtered_classes}개 제외"
+                )
+
+        # 최소 투표 필터링
+        min_vote_count = self.min_vote_count
+        filtered_results = [
+            r for r in combined_results
+            if r.vote_ratio >= self.min_vote_ratio or r.vote_count >= min_vote_count
+        ]
+        filtered_results = self._limit_candidates(filtered_results, "VIDEO-ASYNC")
+        threshold_rescue_candidates = self._build_threshold_rescue_candidates(
+            low_confidence_stats,
+            roi_filtered_stats,
+            inference_allowed_class_ids,
+            "VIDEO-ASYNC",
+        )
+        roi_rescue_candidates = self._build_roi_rescue_candidates(
+            roi_filtered_stats,
+            inference_allowed_class_ids,
+            "VIDEO-ASYNC",
+        )
+        if trace_context is not None:
+            for rank, result in enumerate(filtered_results, start=1):
+                trace_context.record_final_candidate_rank(result.class_id, rank)
+            for camera_type, diagnostics in extractor_diagnostics.items():
+                trace_context.record_extractor_diagnostics(camera_type, diagnostics)
+            trace_context.record_threshold_rescue_candidates(
+                threshold_rescue_candidates,
+                product_weights,
+            )
+            trace_context.record_roi_rescue_candidates(
+                roi_rescue_candidates,
+                product_weights,
+            )
+
+        stats.processing_time_ms = (time.time() - start_time) * 1000
+        if stats.yolo_inference_count > 0:
+            stats.yolo_avg_time_ms = (
+                stats.yolo_total_time_ms / stats.yolo_inference_count
+            )
+
+        logger.info(
+            f"[VIDEO-ASYNC][LATENCY] total_ms={stats.processing_time_ms:.1f} "
+            f"frame_stride={stats.frame_stride} "
+            f"original_frames={stats.original_frames} "
+            f"processed_frames={stats.processed_frames} "
+            f"skipped_frames={stats.skipped_frames} "
+            f"yolo_total_ms={stats.yolo_total_time_ms:.1f} "
+            f"yolo_avg_ms={stats.yolo_avg_time_ms:.1f} "
+            f"yolo_count={stats.yolo_inference_count}"
+        )
+        self._log_candidate_trace("VIDEO-ASYNC", stats, filtered_results)
+        if trace_context is not None:
+            trace_context.record_video_stats(stats)
+            trace_context.record_candidates(filtered_results, product_weights)
+
+        logger.info("[VIDEO-ASYNC] ========== 비동기 처리 완료 ==========")
+        logger.info(
+            f"[VIDEO-ASYNC] 프레임: top={top_frame_count}, side={side_frame_count}, "
+            f"후보={len(filtered_results)}개, 시간={stats.processing_time_ms:.1f}ms"
+        )
+
+        return VideoProcessingResult(
+            vote_results=filtered_results,
+            top_ensemble=top_ensemble,
+            side_ensemble=side_ensemble,
+            stats=stats,
+            threshold_rescue_candidates=threshold_rescue_candidates,
+            roi_rescue_candidates=roi_rescue_candidates,
+        )
+
+    def _apply_motion_filter_and_votes(
+        self,
+        camera_type: str,
+        pending_votes: Dict[int, List[Tuple[float, str]]],
+        bbox_trackers: Dict[int, BboxTracker],
+        ensemble: VotingEnsemble,
+        trace_context: Optional[TriggerTraceContext] = None,
+    ) -> int:
+        """
+        Motion 필터링 적용 및 투표 등록 (v5.3).
+
+        Args:
+            camera_type: "top" or "side"
+            pending_votes: 대기 중인 투표 (class_id -> [(conf, name), ...])
+            bbox_trackers: BboxTracker 딕셔너리
+            ensemble: 투표를 등록할 VotingEnsemble
+
+        Returns:
+            필터링된 클래스 수
+        """
+        motion_filtered_count = 0
+        motion_passed_count = 0
+
+        for class_id, votes in pending_votes.items():
+            tracker = bbox_trackers.get(class_id)
+
+            has_motion = True
+            if self.motion_filter_enabled and tracker is not None:
+                has_motion = tracker.has_motion(self.min_motion_displacement)
+
+            if has_motion:
+                for conf, class_name in votes:
+                    ensemble.add_vote(
+                        class_id=class_id,
+                        confidence=conf,
+                        class_name=class_name,
+                    )
+                self._record_stage(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=votes[0][1] if votes else "",
+                    stage="motion_passed",
+                    camera=camera_type,
+                    amount=len(votes),
+                )
+                motion_passed_count += 1
+
+                if tracker:
+                    threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement
+                    logger.debug(
+                        f"[MOTION-ASYNC] {camera_type} class {class_id}: PASSED "
+                        f"(displacement={tracker.total_displacement:.1f}px, "
+                        f"threshold={threshold_used:.1f}px)"
+                    )
+            else:
+                motion_filtered_count += 1
+                self._record_stage(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=votes[0][1] if votes else "",
+                    stage="motion_filtered",
+                    camera=camera_type,
+                    amount=len(votes),
+                )
+                if tracker:
+                    threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement
+                    logger.info(
+                        f"[MOTION-ASYNC] {camera_type} class {class_id}: FILTERED "
+                        f"(displacement={tracker.total_displacement:.1f}px < threshold={threshold_used:.1f}px)"
+                    )
+
+        logger.info(
+            f"[MOTION-ASYNC] {camera_type} 필터링: 통과={motion_passed_count}, 제외={motion_filtered_count}"
+        )
+
+        return motion_filtered_count
+
+    def _process_single_video(
+        self,
+        video_path: str,
+        ensemble: VotingEnsemble,
+        camera_type: str = "unknown",
+        allowed_class_ids: Optional[List[int]] = None,
+        hand_path_tracker: Optional[HandPathTracker] = None,
+        trace_context: Optional[TriggerTraceContext] = None,
+        low_confidence_stats: Optional[Dict[int, _LowConfidenceClassStats]] = None,
+        roi_filtered_stats: Optional[Dict[int, _RoiFilteredClassStats]] = None,
+        delta_weight: Optional[float] = None,
+    ) -> dict:
+        """
+        Process a single video file with motion-based filtering.
+
+        Uses FFmpeg for hardware-accelerated decoding (NVDEC on Jetson).
+        Streams frames one at a time to minimize memory usage.
+        Each frame is immediately released after YOLO inference.
+
+        Motion Tracking (v4.1):
+        - Tracks bbox center points for each class across frames
+        - Only includes classes with significant center movement in final results
+        - Filters out stationary background objects
+
+        Hand Path Tracking (v4.6):
+        - Tracks hand movement trajectory
+        - Filters products that don't intersect with hand path
+
+        Args:
+            video_path: Path to video file
+            ensemble: VotingEnsemble to accumulate votes
+            camera_type: Camera type for logging ("top" or "side")
+            allowed_class_ids: 허용된 YOLO 클래스 ID 리스트 (v4.4)
+            hand_path_tracker: HandPathTracker for hand path filtering (v4.6)
+
+        Returns:
+            Statistics dict with frames, detections, and motion_filtered count
+        """
+        frame_count = 0
+        detection_count = 0
+        raw_detection_count = 0
+        threshold_filtered_count = 0
+        yolo_inference_count = 0
+        yolo_total_time_ms = 0.0
+
+        # Motion tracking: class_id -> BboxTracker
+        bbox_trackers: Dict[int, BboxTracker] = {}
+
+        # Buffer votes until motion filtering decides whether to keep them.
+        # class_id -> list of (confidence, class_name) tuples
+        pending_votes: Dict[int, List[Tuple[float, str]]] = {}
+
+        # Use factory to get appropriate extractor (ffmpeg or cv2 fallback)
+        # v4.6: camera_type 전달하여 카메라별 gamma/contrast 적용
+        extractor = create_frame_extractor(
+            video_path,
+            prefer_ffmpeg=True,
+            use_hwaccel=self.use_hwaccel,
+            camera_type=camera_type,
+        )
+        if trace_context is not None:
+            trace_context.plan_camera(
+                camera_type,
+                int(getattr(extractor, "total_frames", 0) or 0),
+            )
+
+        # ROI 필터링 통계
+        roi_filtered_count = 0
+        side_roi_soft_passed_count = 0
+        side_roi_soft_filtered_count = 0
+
+        for frame in extractor:
+            frame_count += 1
+            if trace_context is not None:
+                trace_context.record_frame(camera_type, frame_count - 1, frame)
+
+            # YOLO inference (single frame) - v4.4: allowed_class_ids 전달
+            self._record_diagnostic_detections(
+                trace_context,
+                frame,
+                camera_type,
+                frame_count - 1,
+            )
+            yolo_started = time.perf_counter()
+            detections = self._detect_frame(frame, allowed_class_ids, camera_type)
+            yolo_total_time_ms += (time.perf_counter() - yolo_started) * 1000
+            yolo_inference_count += 1
+            self._record_preprocess(trace_context, camera_type)
+
+            # v4.6: 손 경로 추적기에 모든 탐지 결과 전달 (손 포함)
+            if hand_path_tracker is not None:
+                hand_path_tracker.update_frame(detections, frame_count)
+
+            # Process detections
+            for det in detections:
+                # Filter out hands and low confidence
+                if det.is_hand:
+                    continue
+                raw_detection_count += 1
+                self._record_stage(
+                    trace_context,
+                    class_id=det.cls,
+                    class_name=det.name,
+                    stage="raw",
+                    camera=camera_type,
+                    confidence=det.conf,
+                )
+                if det.conf < self._threshold_for_camera(camera_type):
+                    threshold_filtered_count += 1
+                    bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                    roi_eligible = True
+                    if camera_type == "top":
+                        roi_eligible, _ = self._top_roi_accepts(det, delta_weight)
+                    if camera_type == "side":
+                        roi_eligible = det.center[0] <= self.side_roi_x_max
+                    if low_confidence_stats is not None:
+                        self._record_low_confidence_detection(
+                            low_confidence_stats,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            confidence=det.conf,
+                            camera=camera_type,
+                            center=det.center,
+                            frame_idx=frame_count - 1,
+                            bbox_size=bbox_size,
+                            roi_eligible=roi_eligible,
+                        )
+                    self._record_stage(
+                        trace_context,
+                        class_id=det.cls,
+                        class_name=det.name,
+                        stage="threshold_filtered",
+                        camera=camera_type,
+                        confidence=det.conf,
+                    )
+                    continue
+                self._record_stage(
+                    trace_context,
+                    class_id=det.cls,
+                    class_name=det.name,
+                    stage="threshold_passed",
+                    camera=camera_type,
+                    confidence=det.conf,
+                )
+
+                # Top camera ROI changes by weight direction.
+                if camera_type == "top":
+                    top_roi_passed, top_roi_direction = self._top_roi_accepts(
+                        det,
+                        delta_weight,
+                    )
+                    if not top_roi_passed:
+                        roi_filtered_count += 1
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="roi_filtered",
+                            camera=camera_type,
+                            confidence=det.conf,
+                            center=det.center,
+                            roi_y_limit=self.top_roi_y_split,
+                            roi_direction=top_roi_direction,
+                        )
+                        continue
+
+                # Side 카메라 ROI 필터: 왼쪽 영역만 허용
+                # bbox 중심점이 오른쪽 영역(> side_roi_x_max)에 있으면 제외
+                if camera_type == "side":
+                    center_x = det.center[0]
+                    side_roi_passed, side_roi_soft_passed = self._side_roi_accepts(
+                        center_x
+                    )
+                    if not side_roi_passed:
+                        roi_filtered_count += 1
+                        if center_x > self._side_roi_soft_limit():
+                            side_roi_soft_filtered_count += 1
+                        bbox_size = max(det.x2 - det.x1, det.y2 - det.y1)
+                        if roi_filtered_stats is not None:
+                            self._record_roi_filtered_detection(
+                                roi_filtered_stats,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                confidence=det.conf,
+                                center=det.center,
+                                frame_idx=frame_count - 1,
+                                bbox_size=bbox_size,
+                                roi_x_limit=self.side_roi_x_max,
+                            )
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="roi_filtered",
+                            camera=camera_type,
+                            confidence=det.conf,
+                            center=det.center,
+                            roi_x_limit=self.side_roi_x_max,
+                        )
+                        if center_x > self._side_roi_soft_limit():
+                            self._record_stage(
+                                trace_context,
+                                class_id=det.cls,
+                                class_name=det.name,
+                                stage="soft_margin_filtered",
+                                camera=camera_type,
+                                confidence=det.conf,
+                            )
+                        continue
+                    if side_roi_soft_passed:
+                        side_roi_soft_passed_count += 1
+                        self._record_stage(
+                            trace_context,
+                            class_id=det.cls,
+                            class_name=det.name,
+                            stage="side_roi_soft_passed",
+                            camera=camera_type,
+                            confidence=det.conf,
+                            center=det.center,
+                            roi_x_limit=self._side_roi_soft_limit(),
+                        )
+                self._record_stage(
+                    trace_context,
+                    class_id=det.cls,
+                    class_name=det.name,
+                    stage="roi_passed",
+                    camera=camera_type,
+                )
+
+                class_id = det.cls
+
+                # Use YOLODetection's center property
+                center = det.center
+
+                # bbox 크기 기반 동적 임계값 계산
+                bbox_width = det.x2 - det.x1
+                bbox_height = det.y2 - det.y1
+                bbox_size = max(bbox_width, bbox_height)
+                # Dynamic threshold: 10% of bbox size, floored by motion config.
+                dynamic_threshold = max(
+                    float(self.min_motion_displacement),
+                    bbox_size * 0.10,
+                )
+
+                # Update bbox tracker
+                if class_id not in bbox_trackers:
+                    bbox_trackers[class_id] = BboxTracker()
+                bbox_trackers[class_id].update(center, frame_count)
+                # 동적 임계값 업데이트 (최대값 유지)
+                bbox_trackers[class_id].dynamic_threshold = max(
+                    bbox_trackers[class_id].dynamic_threshold,
+                    dynamic_threshold
+                )
+
+                # Store vote for later (will be applied after motion filtering)
+                if class_id not in pending_votes:
+                    pending_votes[class_id] = []
+                pending_votes[class_id].append((det.conf, det.name))
+
+                detection_count += 1
+
+            # Log progress every 50 frames
+            if frame_count % 50 == 0:
+                logger.info(
+                    f"[VIDEO] {camera_type} 처리 중: {frame_count}프레임, "
+                    f"탐지={detection_count}개"
+                )
+
+        # Set frame count
+        ensemble.set_frame_count(frame_count)
+
+        # Apply motion filtering and add votes to ensemble
+        motion_filtered_count = 0
+        motion_passed_count = 0
+
+        for class_id, votes in pending_votes.items():
+            tracker = bbox_trackers.get(class_id)
+
+            # Check motion
+            has_motion = True
+            if self.motion_filter_enabled and tracker is not None:
+                has_motion = tracker.has_motion(self.min_motion_displacement)
+
+            if has_motion:
+                # Add all votes for this class
+                for conf, class_name in votes:
+                    ensemble.add_vote(
+                        class_id=class_id,
+                        confidence=conf,
+                        class_name=class_name,
+                    )
+                self._record_stage(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=votes[0][1] if votes else "",
+                    stage="motion_passed",
+                    camera=camera_type,
+                    amount=len(votes),
+                )
+                motion_passed_count += 1
+
+                if tracker:
+                    threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement
+                    logger.debug(
+                        f"[MOTION] {camera_type} class {class_id}: PASSED "
+                        f"(displacement={tracker.total_displacement:.1f}px, "
+                        f"max_dist={tracker.max_distance:.1f}px, "
+                        f"threshold={threshold_used:.1f}px, "
+                        f"detections={tracker.detection_count})"
+                    )
+            else:
+                motion_filtered_count += 1
+                self._record_stage(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=votes[0][1] if votes else "",
+                    stage="motion_filtered",
+                    camera=camera_type,
+                    amount=len(votes),
+                )
+                if tracker:
+                    threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement
+                    logger.info(
+                        f"[MOTION] {camera_type} class {class_id}: FILTERED "
+                        f"(displacement={tracker.total_displacement:.1f}px < threshold={threshold_used:.1f}px, "
+                        f"detections={tracker.detection_count})"
+                    )
+
+        logger.info(
+            f"[MOTION] {camera_type} 필터링 결과: "
+            f"통과={motion_passed_count}개, 제외={motion_filtered_count}개 "
+            f"(기본 임계값={self.min_motion_displacement}px, 동적 임계값 적용)"
+        )
+
+        # Side 카메라 ROI 필터링 결과 로그
+        if camera_type == "side" and roi_filtered_count > 0:
+            logger.info(
+                f"[ROI] {camera_type} ROI 필터링: "
+                f"{roi_filtered_count}개 탐지 제외 (center_x > {self.side_roi_x_max}px)"
+            )
+
+        return {
+            "frames": frame_count,
+            "raw_detections": raw_detection_count,
+            "threshold_filtered": threshold_filtered_count,
+            "detections": detection_count,
+            "yolo_inference_count": yolo_inference_count,
+            "yolo_total_time_ms": yolo_total_time_ms,
+            "motion_filtered": motion_filtered_count,
+            "roi_filtered": roi_filtered_count,
+            "side_roi_soft_passed": side_roi_soft_passed_count,
+            "side_roi_soft_filtered": side_roi_soft_filtered_count,
+        }
+
+    def process_single_video_file(
+        self,
+        video_path: str,
+    ) -> VideoProcessingResult:
+        """
+        Process a single video file (for testing or single-camera setups).
+
+        Args:
+            video_path: Path to video file
+
+        Returns:
+            VideoProcessingResult with voting results
+        """
+        return self.process_videos(top_path=video_path)

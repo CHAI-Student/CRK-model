@@ -1,0 +1,160 @@
+# Source Code Map: Configuration
+
+Source: [core/config.py](../../../services/model/model_service/core/config.py),
+[.env.example](../../../.env.example),
+[docs/jetson-stride2.env.txt](../../jetson-stride2.env.txt),
+[docs/jetson-stride2.env.ko.txt](../../jetson-stride2.env.ko.txt),
+[pyproject.toml](../../../pyproject.toml)
+
+Status: current configuration map
+
+## Current Thesis
+
+Configuration is Pydantic Settings with `MODEL__` prefix, nested `__`
+delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
+
+## Settings Groups
+
+| Group | Class | Purpose |
+| --- | --- | --- |
+| API | `APIModel` | Host, port, log level, graceful shutdown timeout. |
+| Vision | `VisionModel` | YOLO engine path, thresholds, crop/ROI policies, vote weights, rescue knobs. |
+| Weight | `WeightModel` | Strict/relaxed tolerance, combination limits, detected-single fallback. |
+| Trigger | `TriggerModel` | Dedup TTL/size, queue size, min weight, low-weight video fallback, return-only skip, balanced cancellation. |
+| Catalog | `CatalogModel` | Node-first active product catalog policy and optional legacy static validation. |
+| Loadcell | `LoadcellModel` | Stable window and stability threshold. |
+| Video | `VideoModel` | AVI readiness polling limits. |
+| Async streaming | `AsyncStreamingModel` | Async enablement, frame queue, frame stride, zero-frame retry. |
+| Trace | `TraceModel` | Sample frame export settings. |
+| Buffer | `BufferModel` | Trigger session TTL, max sessions, cleanup interval. |
+| Door session | `DoorSessionModel` | Door session enablement, timeout, close waits, YAML retention. |
+
+## High-Impact Defaults
+
+- `MODEL__API__PORT=8002`
+- `MODEL__VISION__YOLO_MODEL_PATH=models/0204_morning.engine`
+- `MODEL__VISION__YOLO_INTERNAL_CONF_THRESHOLD=0.01` keeps raw YOLO
+  collection broad; service-side regular candidate thresholds do the main
+  filtering.
+- `MODEL__CATALOG__SOURCE_POLICY=node_first` makes Node-provided product data
+  the runtime source of truth. Direct class-id fields
+  `trainingidx`, `training_idx`, `trainingIdx`, `yolo_class_id`, and
+  `yoloClassId` are accepted; product-name fallback through
+  `yolo_product_mapping.json` is available only with
+  `static_mapping_compat`.
+- `MODEL__CATALOG__STATIC_VALIDATION_ENABLED=false` skips startup comparison
+  against `dataset.yaml` and `services/config/yolo_product_mapping.json` by
+  default, preventing stale static files from warning after an engine swap.
+- `MODEL__WEIGHT__IDENTITY_POLICY=vision_first` is the default product-identity
+  policy. Product identity must come from final vision candidates, strong stage
+  evidence, or weight-gated rescue evidence; loadcell-only and active-only
+  candidates remain validation/count evidence instead of creating a charged
+  product. `weight_aware` keeps the older loadcell/active fallback behavior for
+  explicit legacy testing or field rollback.
+- `MODEL__WEIGHT__FUSION_VISION_WEIGHT=0.65`,
+  `MODEL__WEIGHT__FUSION_LOADCELL_WEIGHT=0.25`, and
+  `MODEL__WEIGHT__FUSION_COUNT_WEIGHT=0.10` make fused confidence vision-heavy
+  under the default policy.
+- `MODEL__WEIGHT__STRICT_MODE=true`
+- `MODEL__WEIGHT__STRICT_MODE_FALLBACK=true`
+- `MODEL__WEIGHT__TOLERANCE_GRAMS=5.0` in code defaults, used by strict
+  combination matching and relaxed count validation.
+- `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` is the per-item confidence
+  floor for multi-kind combinations.
+- `MODEL__WEIGHT__SAME_PRODUCT_COUNT_TOLERANCE_GRAMS=5.0` applies only to the
+  repeated same-product count path.
+- `MODEL__WEIGHT__SAME_PRODUCT_MAX_COUNT=8` caps repeated same-product removal
+  or return matches without widening general multi-kind strict matching.
+- `MODEL__WEIGHT__MAX_ITEMS_PER_SEGMENT=3` caps one detected loadcell removal
+  segment to at most three product units. When two segment targets exist, the
+  segment-derived aggregate cap is six; when no segment targets exist, the
+  existing aggregate `SAME_PRODUCT_MAX_COUNT=8` behavior remains available.
+- `MODEL__WEIGHT__MAX_COMBINATION_ITEMS=5` bounds strict matching by total
+  units.
+- `MODEL__WEIGHT__MAX_COMBINATION_KINDS=3` bounds strict matching by distinct
+  product kinds.
+- `MODEL__WEIGHT__DETECTED_SINGLE_FALLBACK_*` controls the final one-item
+  fallback.
+- `.env.example` now lists the same repeated-count and strict-search weight
+  knobs as the Jetson templates so a copied env preserves these operational
+  guardrails.
+- `MODEL__TRIGGER__RETURN_VIDEO_SKIP_ENABLED=true`
+- `MODEL__TRIGGER__RETURN_STABILIZATION_WAIT_SECONDS=1.0`
+- `MODEL__TRIGGER__RETURN_STABILIZATION_REQUIRE_STABLE_REGIONS=true`
+- `MODEL__TRIGGER__BALANCED_EVENT_CANCEL_ENABLED=true`
+- `MODEL__TRIGGER__COOPERATIVE_CANCEL_ENABLED=true`
+- `MODEL__TRIGGER__RAPID_SAME_ZONE_WINDOW_SECONDS=3.0` controls how far back
+  trigger traces expose same-zone loadcell events for rapid follow-up
+  disambiguation.
+- `MODEL__TRACE__SAMPLE_EXPORT_ENABLED=false` in `.env.example` and Jetson
+  templates keeps frame image export opt-in. Turning it on writes sampled frame
+  files during inference and can add Jetson disk I/O.
+- `MODEL__DOOR_SESSION__CLOSE_INITIAL_WAIT_SECONDS=3.0`
+- `MODEL__DOOR_SESSION__CLOSE_SUBSEQUENT_WAIT_SECONDS=1.0`
+- `MODEL__VIDEO__READY_MAX_WAIT_SECONDS=2.0`
+- `MODEL__VIDEO__READY_POLL_INTERVAL_SECONDS=0.2`
+- `MODEL__VISION__TOP_CROP_POLICY=left`,
+  `MODEL__VISION__SIDE_CROP_POLICY=left`, and
+  `MODEL__VISION__CROP_WIDTH=480` keep inference on the left 480x480 crop from
+  640x480 camera frames.
+- `MODEL__VISION__CAMERA_LAYOUT=legacy_top_side` preserves the current one Top
+  plus per-zone Side camera mapping. `dual_top_proxy` keeps the `/trigger`
+  `videos.top/side` contract but records `videos.top` as physical `top_center`
+  and `videos.side` as `top_left_proxy` using the Side processing profile.
+- `MODEL__VISION__TOP_ROI_ENABLED=true`
+- `MODEL__VISION__MOTION_MIN_DISPLACEMENT_PX=10.0`; tracker dynamic thresholds
+  also use this as the minimum floor before applying the bbox-size rule.
+- `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
+  `center_y` with image top at `0`, and non-zero removal/return deltas both
+  keep the lower region.
+- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.25` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.25` align service regular
+  candidates with the Jetson live preview command used for Pepsi/Trevi checks.
+- `MODEL__VISION__TOP_WEIGHT=0.60`,
+  `MODEL__VISION__SIDE_WEIGHT=0.65`,
+  `MODEL__VISION__TOP_ONLY_WEIGHT=0.55`, and
+  `MODEL__VISION__SIDE_ONLY_WEIGHT=0.60` boost strong vision candidates in
+  ranking.
+- `MODEL__VISION__SIDE_ROI_X_MAX=400.0` keeps the hard side ROI boundary in
+  the field-tuned left-crop operating region.
+- `MODEL__VISION__SIDE_ROI_SOFT_MARGIN_PX=5.0` opens a conditional regular
+  candidate band through `center_x <= 405` for threshold-passed side detections
+  that still survive motion filtering; low-confidence threshold rescue remains
+  hard-ROI gated.
+- The Jetson templates currently set `MODEL__VISION__FFMPEG_TOP_GAMMA=1.2`,
+  `MODEL__VISION__FFMPEG_TOP_CONTRAST=1.2`,
+  `MODEL__VISION__FFMPEG_SIDE_GAMMA=1.0`, and
+  `MODEL__VISION__FFMPEG_SIDE_CONTRAST=1.0` for the Pepsi field profile.
+- `MODEL__VISION__ROI_RESCUE_REQUIRE_MOTION=true` and
+  `MODEL__VISION__ROI_RESCUE_MAX_OVER_LIMIT_PX=0.0` keep right-side/static
+  ROI-filtered detections from re-entering as rescue candidates.
+- `MODEL__ASYNC_STREAMING__FRAME_STRIDE=2`; this is fixed and is the only
+  accepted async streaming stride.
+- `docs/jetson-stride2.env.txt` is now aligned with the fixed default and
+  remains as a copy-paste deployment template.
+
+## Validators And Safety
+
+- API port must be `1..65535`.
+- API log level is normalized and validated.
+- Crop policy must be one of `left`, `center`, `right`, `offset`, `none`, or
+  `letterbox`.
+- Camera layout must be `legacy_top_side` or `dual_top_proxy`.
+- Catalog source policy must be `node_first` or `static_mapping_compat`.
+- Frame queue size must be positive. Frame stride must be exactly `2`.
+- Video readiness waits and door-session waits must be non-negative.
+- Trace sample count must be non-negative.
+
+## Jetson Environment Notes
+
+- `pyproject.toml` does not encode system-site-packages. Jetson venv creation
+  must use `uv venv --system-site-packages`.
+- NumPy is pinned below 2.0.
+- Do not let uv reinstall CPU-only torch into the Jetson venv.
+
+## Related Wiki Pages
+
+- [Repo overview](repo-overview.md)
+- [Latency and frame stride](../synthesis/latency-and-frame-stride.md)
+- [Scenario readiness and 0g diagnostics](../synthesis/scenario-readiness-and-0g.md)
+- [Jetson and testing](../synthesis/jetson-and-testing.md)

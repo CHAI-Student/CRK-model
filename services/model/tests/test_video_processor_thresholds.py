@@ -1,0 +1,1551 @@
+import json
+from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+from model_service.vision.yolo_wrapper import YOLODetection
+
+
+def _patch_single_frame_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
+    import model_service.video.video_processor as video_processor_module
+
+    class FakeExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        def __iter__(self) -> Iterator[int]:
+            return iter([0])
+
+    def create_fake_extractor(*_args: object, **_kwargs: object) -> FakeExtractor:
+        return FakeExtractor()
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        create_fake_extractor,
+    )
+
+
+class TopRoiFakeYolo:
+    last_preprocess: dict[str, object] = {}
+
+    def detect(
+        self,
+        frame: object,
+        allowed_class_ids: list[int] | None = None,
+        camera_type: str | None = None,
+    ) -> list[YOLODetection]:
+        return [
+            YOLODetection(
+                xyxy=(10.0, 100.0, 40.0, 140.0),
+                cls=52,
+                conf=0.91,
+                name="PRODUCT_UPPER_HALF",
+            ),
+            YOLODetection(
+                xyxy=(10.0, 220.0, 40.0, 260.0),
+                cls=53,
+                conf=0.92,
+                name="PRODUCT_LOWER_HALF",
+            ),
+        ]
+
+
+def _process_side_detections(
+    monkeypatch: pytest.MonkeyPatch,
+    centers: list[float],
+    *,
+    class_id: int = 42,
+    confidence: float = 0.75,
+):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.video import VideoProcessor
+
+    class FakeExtractor:
+        last_diagnostics = None
+
+        def __init__(self) -> None:
+            self.total_frames = len(centers)
+
+        def __iter__(self) -> Iterator[int]:
+            return iter(range(len(centers)))
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(
+            self,
+            frame: object,
+            allowed_class_ids: list[int] | None = None,
+            camera_type: str | None = None,
+        ) -> list[YOLODetection]:
+            center_x = centers[int(frame)]
+            return [
+                YOLODetection(
+                    xyxy=(center_x - 10.0, 210.0, center_x + 10.0, 250.0),
+                    cls=class_id,
+                    conf=confidence,
+                    name=f"PRODUCT_{class_id}",
+                )
+            ]
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    return processor.process_videos(
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[class_id],
+    )
+
+
+def test_video_processor_uses_split_camera_thresholds():
+    from model_service.video.video_processor import VideoProcessor
+
+    processor = VideoProcessor(
+        yolo=MagicMock(),
+        top_confidence_threshold=0.5,
+        side_confidence_threshold=0.25,
+    )
+
+    assert processor._threshold_for_camera("top") == 0.5
+    assert processor._threshold_for_camera("side") == 0.25
+    assert processor.confidence_threshold == 0.25
+
+
+def test_video_processor_shared_threshold_remains_backward_compatible():
+    from model_service.video.video_processor import VideoProcessor
+
+    processor = VideoProcessor(yolo=MagicMock(), confidence_threshold=0.4)
+
+    assert processor._threshold_for_camera("top") == 0.4
+    assert processor._threshold_for_camera("side") == 0.4
+    assert processor.confidence_threshold == 0.4
+
+
+def test_video_processor_operational_roi_defaults_are_480_left_crop_aligned():
+    from model_service.core.config import VisionModel
+
+    vision = VisionModel()
+
+    assert vision.top_crop_policy == "left"
+    assert vision.side_crop_policy == "left"
+    assert vision.crop_width == 480
+    assert vision.side_roi_x_max == 400.0
+    assert vision.side_roi_soft_margin_px == 5.0
+    assert vision.top_roi_y_split == 240.0
+    assert vision.roi_rescue_max_over_limit_px == 0.0
+
+
+def test_video_processor_default_side_roi_keeps_hard_boundary_and_soft_margin(monkeypatch):
+    result = _process_side_detections(
+        monkeypatch,
+        [399.9, 402.5, 405.1],
+        class_id=201,
+        confidence=0.76,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [201]
+    assert result.vote_results[0].vote_count == 2
+    assert result.stats.side_roi_soft_passed_detections == 1
+    assert result.stats.roi_filtered_detections == 1
+
+
+def test_video_processor_soft_side_roi_promotes_pepsi_boundary_trace_shape(monkeypatch):
+    result = _process_side_detections(
+        monkeypatch,
+        [402.1, 403.8, 404.0],
+        class_id=75,
+        confidence=0.646,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [75]
+    assert result.vote_results[0].side_vote_count == 3
+    assert result.stats.side_roi_soft_passed_detections == 3
+    assert result.stats.roi_filtered_detections == 0
+
+
+def test_video_processor_soft_side_roi_still_filters_trevi_far_right_shape(monkeypatch):
+    result = _process_side_detections(
+        monkeypatch,
+        [409.8, 410.2],
+        class_id=54,
+        confidence=0.894,
+    )
+
+    assert result.vote_results == []
+    assert result.stats.side_roi_soft_passed_detections == 0
+    assert result.stats.roi_filtered_detections == 2
+
+
+def test_video_processor_default_side_roi_promotes_bibigo_trace_shape(monkeypatch):
+    result = _process_side_detections(
+        monkeypatch,
+        [330.2, 339.4],
+        class_id=120,
+        confidence=0.7535,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [120]
+    assert result.vote_results[0].side_vote_count == 2
+    assert result.stats.roi_filtered_detections == 0
+
+
+def test_video_processor_default_side_roi_promotes_pepero_trace_shape(monkeypatch):
+    result = _process_side_detections(
+        monkeypatch,
+        [424.4, 412.7, 374.0, 366.8],
+        class_id=114,
+        confidence=0.7677,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [114]
+    assert result.vote_results[0].side_vote_count == 2
+    assert result.stats.roi_filtered_detections == 2
+
+
+def test_video_processor_side_threshold_promotes_letsbe_trace_confidence(monkeypatch):
+    result = _process_side_detections(
+        monkeypatch,
+        [220.0, 225.0],
+        class_id=12,
+        confidence=0.2926,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [12]
+    assert result.vote_results[0].side_vote_count == 2
+    assert result.stats.side_threshold_filtered == 0
+
+
+def test_video_processor_limits_candidates_to_configured_top_k(monkeypatch):
+    from model_service.core.config import config
+    from model_service.video.video_processor import VideoProcessor
+    from model_service.video.voting_ensemble import VoteResult
+
+    monkeypatch.setattr(config.vision, "top_k", 10)
+    processor = VideoProcessor(yolo=MagicMock())
+    results = [
+        VoteResult(
+            class_id=index,
+            class_name=f"product-{index}",
+            vote_count=1,
+            max_confidence=0.9,
+            avg_confidence=0.9,
+            weighted_confidence=0.9,
+        )
+        for index in range(12)
+    ]
+
+    limited = processor._limit_candidates(results, "TEST")
+
+    assert len(limited) == 10
+    assert [result.class_id for result in limited] == list(range(10))
+
+
+def test_video_processor_merge_rescue_votes_keeps_vision_source_first(monkeypatch):
+    from model_service.core.config import config
+    from model_service.video.video_processor import VideoProcessor
+    from model_service.video.voting_ensemble import VoteResult
+
+    def candidate(class_id: int, source: str, confidence: float) -> VoteResult:
+        return VoteResult(
+            class_id=class_id,
+            class_name=f"product-{class_id}",
+            vote_count=1,
+            max_confidence=confidence,
+            avg_confidence=confidence,
+            weighted_confidence=confidence,
+            source=source,
+        )
+
+    vision = candidate(1, "vision", 0.2)
+    roi_rescue = candidate(2, "roi_rescue", 0.99)
+    threshold_rescue = candidate(3, "threshold_rescue", 0.98)
+
+    ranked = VideoProcessor.rank_candidates_by_source_priority(
+        [roi_rescue, threshold_rescue, vision]
+    )
+
+    assert [result.class_id for result in ranked] == [1, 2, 3]
+
+    monkeypatch.setattr(config.vision, "top_k", 1)
+
+    merged = VideoProcessor.merge_rescue_votes(
+        [vision],
+        [roi_rescue, threshold_rescue],
+    )
+
+    assert [result.class_id for result in merged] == [1]
+
+
+def test_video_processor_defaults_use_configurable_filter_settings(monkeypatch):
+    from model_service.core.config import config
+    from model_service.video.video_processor import VideoProcessor
+
+    monkeypatch.setattr(config.vision, "min_vote_ratio", 0.02, raising=False)
+    monkeypatch.setattr(config.vision, "motion_min_displacement_px", 8.0, raising=False)
+    monkeypatch.setattr(config.vision, "side_roi_x_max", 275.0, raising=False)
+    monkeypatch.setattr(config.vision, "min_vote_count", 1, raising=False)
+
+    processor = VideoProcessor(yolo=MagicMock())
+
+    assert processor.min_vote_ratio == 0.02
+    assert processor.min_motion_displacement == 8.0
+    assert processor.side_roi_x_max == 275.0
+    assert processor.min_vote_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_frame_stride_skips_frames_and_records_stats(
+    monkeypatch,
+    tmp_path,
+):
+    import json
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeAsyncExtractor:
+        last_diagnostics = None
+
+        def __init__(self, frames):
+            self.frames = frames
+            self.total_frames = len(frames)
+
+        async def __aiter__(self):
+            for frame in self.frames:
+                yield frame
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def __init__(self):
+            self.calls = []
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            self.calls.append((camera_type, frame))
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 30.0, 30.0),
+                    cls=42,
+                    conf=0.91,
+                    name="PRODUCT_STRIDE",
+                )
+            ]
+
+    def extractor_factory(path, *args, **kwargs):
+        camera_type = kwargs["camera_type"]
+        base = 0 if camera_type == "top" else 100
+        return FakeAsyncExtractor([base + index for index in range(6)])
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        extractor_factory,
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="frame-stride",
+        zone=3,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    yolo = FakeYolo()
+    processor = VideoProcessor(
+        yolo=yolo,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = await processor.process_videos_async(
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        trace_context=trace_context,
+    )
+    trace_context.finalize(status="complete")
+
+    assert [(camera, frame) for camera, frame in yolo.calls] == [
+        ("top", 0),
+        ("top", 2),
+        ("top", 4),
+        ("side", 100),
+        ("side", 102),
+        ("side", 104),
+    ]
+    assert result.stats.frame_stride == 2
+    assert result.stats.original_frames == 12
+    assert result.stats.processed_frames == 6
+    assert result.stats.skipped_frames == 6
+    assert result.stats.yolo_inference_count == 6
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["cameras"]["top"]["total_frames"] == 6
+    assert detail["cameras"]["top"]["processed_frames"] == 3
+    assert detail["cameras"]["side"]["total_frames"] == 6
+    assert detail["cameras"]["side"]["processed_frames"] == 3
+    assert detail["video_stats"]["frame_stride"] == 2
+    assert detail["video_stats"]["original_frames"] == 12
+    assert detail["video_stats"]["processed_frames"] == 6
+    assert detail["video_stats"]["skipped_frames"] == 6
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_ignores_non_two_stride_override(
+    monkeypatch,
+):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeAsyncExtractor:
+        last_diagnostics = None
+        total_frames = 3
+
+        async def __aiter__(self):
+            for frame in range(3):
+                yield frame
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def __init__(self):
+            self.calls = []
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            self.calls.append(frame)
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 30.0, 30.0),
+                    cls=42,
+                    conf=0.91,
+                    name="PRODUCT_STRIDE",
+                )
+            ]
+
+    monkeypatch.setattr(config.async_streaming, "frame_stride", 1, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeAsyncExtractor(),
+    )
+
+    yolo = FakeYolo()
+    processor = VideoProcessor(
+        yolo=yolo,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = await processor.process_videos_async(top_path="/tmp/top.avi")
+
+    assert yolo.calls == [0, 2]
+    assert result.stats.frame_stride == 2
+    assert result.stats.original_frames == 3
+    assert result.stats.processed_frames == 2
+    assert result.stats.skipped_frames == 1
+
+
+def test_async_streaming_frame_stride_is_fixed_to_two():
+    from model_service.core.config import AsyncStreamingModel
+
+    assert AsyncStreamingModel().frame_stride == 2
+    assert AsyncStreamingModel(frame_stride=2).frame_stride == 2
+
+    with pytest.raises(ValueError, match="frame_stride is fixed at 2"):
+        AsyncStreamingModel(frame_stride=1)
+
+    with pytest.raises(ValueError, match="frame_stride is fixed at 2"):
+        AsyncStreamingModel(frame_stride=3)
+
+
+def test_video_processor_records_preprocess_and_stage_counts(monkeypatch, tmp_path):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([[[0]]])
+
+    class FakeYolo:
+        last_preprocess = {
+            "camera_type": "side",
+            "original_width": 640,
+            "original_height": 480,
+            "processed_width": 480,
+            "processed_height": 480,
+            "crop_policy": "left",
+            "crop_box": {"x1": 0, "y1": 0, "x2": 480, "y2": 480},
+        }
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            return [
+                YOLODetection(
+                    xyxy=(400.0, 10.0, 430.0, 40.0),
+                    cls=42,
+                    conf=0.91,
+                    name="PRODUCT_ROI_FILTERED",
+                ),
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 40.0, 40.0),
+                    cls=43,
+                    conf=0.92,
+                    name="PRODUCT_KEPT",
+                ),
+            ]
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="stage-session",
+        zone=1,
+        top_path=None,
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+    )
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        side_roi_x_max=360.0,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[42, 43],
+        trace_context=trace_context,
+    )
+    trace_context.finalize(status="complete")
+
+    assert [candidate.class_id for candidate in result.vote_results] == [43]
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = __import__("json").loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["preprocess"]["side"]["crop_policy"] == "left"
+    assert detail["stage_counts_by_class"]["42"]["roi_filtered"] == 1
+    assert detail["stage_counts_by_class"]["43"]["final_rank"] == 1
+
+
+def test_video_processor_top_roi_removal_keeps_lower_region(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    _patch_single_frame_extractor(monkeypatch)
+    processor = VideoProcessor(
+        yolo=TopRoiFakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+    trace_context = TriggerTraceContext(
+        session_id="top-roi-removal",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path=None,
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=-50.0,
+        trace_context=trace_context,
+    )
+    trace_context.finalize(status="complete")
+
+    assert [candidate.class_id for candidate in result.vote_results] == [53]
+    assert result.stats.roi_filtered_detections == 1
+    assert result.roi_rescue_candidates == []
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["stage_counts_by_class"]["52"]["roi_filtered"] == 1
+    assert detail["stage_counts_by_class"]["52"]["roi_y_limit"] == 240.0
+    assert detail["stage_counts_by_class"]["52"]["roi_direction"] == "removal"
+    assert detail["vision_config"]["top_roi_enabled"] is True
+    assert detail["vision_config"]["top_roi_y_split"] == 240.0
+
+
+def test_video_processor_top_roi_return_keeps_lower_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    from model_service.video import VideoProcessor
+
+    _patch_single_frame_extractor(monkeypatch)
+    processor = VideoProcessor(
+        yolo=TopRoiFakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=50.0,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [53]
+    assert result.stats.roi_filtered_detections == 1
+    assert result.roi_rescue_candidates == []
+
+
+def test_video_processor_top_roi_skips_zero_delta(monkeypatch: pytest.MonkeyPatch) -> None:
+    from model_service.video import VideoProcessor
+
+    _patch_single_frame_extractor(monkeypatch)
+    processor = VideoProcessor(
+        yolo=TopRoiFakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=0.0,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [53, 52]
+    assert result.stats.roi_filtered_detections == 0
+    assert result.roi_rescue_candidates == []
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_top_roi_return_keeps_lower_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import model_service.video.video_processor as video_processor_module
+    from model_service.video import VideoProcessor
+
+    class FakeAsyncExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        async def __aiter__(self) -> AsyncIterator[int]:
+            yield 0
+
+    def create_fake_extractor(*_args: object, **_kwargs: object) -> FakeAsyncExtractor:
+        return FakeAsyncExtractor()
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        create_fake_extractor,
+    )
+    processor = VideoProcessor(
+        yolo=TopRoiFakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = await processor.process_videos_async(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=50.0,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [53]
+    assert result.stats.roi_filtered_detections == 1
+    assert result.roi_rescue_candidates == []
+
+
+def test_video_processor_records_optional_all_class_diagnostic_trace(monkeypatch, tmp_path):
+    import json
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([[[0]]])
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            if allowed_class_ids == []:
+                return []
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 30.0, 30.0),
+                    cls=96,
+                    conf=0.64,
+                    name="BAG_JAYEONLU_MOIST_SWEET_CHESTNUT_80G",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "diagnostic_all_class_trace", True, raising=False)
+    monkeypatch.setattr(config.vision, "diagnostic_trace_max_frames", 1, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="diagnostic-all-class",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path=None,
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+    )
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[],
+        trace_context=trace_context,
+    )
+    trace_context.finalize(status="complete")
+
+    assert result.vote_results == []
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["diagnostic_candidates"][0]["name"] == "BAG_JAYEONLU_MOIST_SWEET_CHESTNUT_80G"
+    assert detail["candidates"] == []
+
+
+def test_video_processor_records_moving_threshold_rescue_candidate(monkeypatch, tmp_path):
+    import json
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 2
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([0, 1])
+
+    class FakeYolo:
+        last_preprocess = {
+            "crop_policy": "left",
+            "crop_box": {"x1": 0, "y1": 0, "x2": 480, "y2": 480},
+        }
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            shift = int(frame) * 40.0
+            confidence = 0.19 if camera_type == "top" else 0.16
+            return [
+                YOLODetection(
+                    xyxy=(10.0 + shift, 10.0, 40.0 + shift, 40.0),
+                    cls=75,
+                    conf=confidence,
+                    name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_max_candidates", 20, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="threshold-rescue",
+        zone=4,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        top_confidence_threshold=0.5,
+        side_confidence_threshold=0.5,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_motion_displacement=5.0,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[75],
+        product_weights={75: 516.8},
+        trace_context=trace_context,
+    )
+    trace_context.finalize(status="complete")
+
+    assert result.vote_results == []
+    assert len(result.threshold_rescue_candidates) == 1
+    rescue = result.threshold_rescue_candidates[0]
+    assert rescue.class_id == 75
+    assert rescue.top_detected is True
+    assert rescue.side_detected is True
+    assert rescue.top_motion_passed is True
+    assert rescue.side_motion_passed is True
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["vision_config"]["threshold_rescue_enabled"] is True
+    assert detail["threshold_rescue_candidates"][0]["class_id"] == 75
+    assert detail["threshold_rescue_candidates"][0]["unit_weight_g"] == 516.8
+    assert detail["stage_counts_by_class"]["75"]["threshold_filtered"] == 4
+    assert detail["stage_counts_by_class"]["75"]["threshold_filtered_max_confidence"] == 0.19
+    assert detail["stage_counts_by_class"]["75"]["threshold_rescue_motion"]["top"]["passed"] is True
+
+
+def test_threshold_rescue_rejects_roi_conflicted_low_confidence_class(monkeypatch):
+    from types import SimpleNamespace
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+
+    class FakeExtractor:
+        total_frames = 3
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([0, 1, 2])
+
+    class FakeYolo:
+        last_preprocess = {
+            "crop_policy": "left",
+            "crop_box": {"x1": 0, "y1": 0, "x2": 480, "y2": 480},
+        }
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            if camera_type != "side":
+                return []
+            shift = int(frame) * 55.0
+            return [
+                YOLODetection(
+                    xyxy=(390.0, 250.0, 430.0, 310.0),
+                    cls=54,
+                    conf=0.89,
+                    name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                ),
+                YOLODetection(
+                    xyxy=(20.0 + shift, 260.0, 50.0 + shift, 300.0),
+                    cls=54,
+                    conf=0.14,
+                    name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                ),
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "side_roi_x_max", 400.0, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        top_confidence_threshold=0.25,
+        side_confidence_threshold=0.25,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_motion_displacement=5.0,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[54],
+        product_weights={54: 530.0},
+        delta_weight=-529.0,
+    )
+
+    assert result.vote_results == []
+    assert len(result.threshold_rescue_candidates) == 1
+    rescue = result.threshold_rescue_candidates[0]
+    assert rescue.class_id == 54
+    assert rescue.roi_conflict is True
+    assert rescue.roi_conflict_reason == "side_roi_filtered_stronger_evidence"
+
+    diagnostics = {}
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        result.threshold_rescue_candidates,
+        [
+            SimpleNamespace(
+                yolo_class_id=54,
+                product_name="BOTTLE_LOTTE_TREVI_LEMON_500ML",
+                product_weight=530.0,
+                stock_qty=10,
+            )
+        ],
+        -529.0,
+        diagnostics=diagnostics,
+    )
+
+    assert rescue_votes == []
+    assert diagnostics["rejections"]["threshold_rescue_roi_conflict"] == 1
+    assert diagnostics["candidates"][0]["threshold_rescue_rejected_reason"] == (
+        "side_roi_filtered_stronger_evidence"
+    )
+
+
+def test_video_processor_does_not_rescue_static_threshold_filtered_class(monkeypatch):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 2
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([0, 1])
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 40.0, 40.0),
+                    cls=75,
+                    conf=0.19,
+                    name="BOTTLE_LOTTE_PEPSI_ZERO_SUGAR_LIME_500ML",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        top_confidence_threshold=0.5,
+        side_confidence_threshold=0.5,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_motion_displacement=5.0,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[75],
+        product_weights={75: 516.8},
+    )
+
+    assert result.vote_results == []
+    assert result.threshold_rescue_candidates == []
+
+
+def test_weight_gated_no_motion_threshold_rescue_can_recover_tight_weight_match(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 9
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter(range(9))
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 40.0, 40.0),
+                    cls=95,
+                    conf=0.13,
+                    name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "weight_rescue_no_motion_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "weight_rescue_no_motion_min_raw_votes", 8, raising=False)
+    monkeypatch.setattr(
+        config.vision,
+        "weight_rescue_no_motion_max_residual_grams",
+        2.0,
+        raising=False,
+    )
+    monkeypatch.setattr(config.weight, "rescue_tolerance_grams", 5.0, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        top_confidence_threshold=0.5,
+        side_confidence_threshold=0.5,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_motion_displacement=5.0,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[95],
+        product_weights={95: 220.0},
+    )
+
+    assert result.vote_results == []
+    assert len(result.threshold_rescue_candidates) == 1
+    rescue = result.threshold_rescue_candidates[0]
+    assert rescue.class_id == 95
+    assert rescue.vote_count == 9
+    assert rescue.motion_gate_passed is False
+
+    diagnostics = {}
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        result.threshold_rescue_candidates,
+        [
+            SimpleNamespace(
+                yolo_class_id=95,
+                product_name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                stock_qty=1,
+                product_weight=220.0,
+                sale_price=1800,
+            )
+        ],
+        delta_weight=-221.0,
+        diagnostics=diagnostics,
+    )
+
+    assert len(rescue_votes) == 1
+    assert rescue_votes[0].class_id == 95
+    assert rescue_votes[0].source == "threshold_rescue"
+    assert rescue_votes[0].motion_gate_passed is False
+    assert rescue_votes[0].weight_gate_passed is True
+    assert rescue_votes[0].rescue_tolerance_g == 5.0
+    assert diagnostics["accepted"] == 1
+    assert diagnostics["candidates"][0]["weight_gate_passed"] is True
+    assert diagnostics["candidates"][0]["motion_gate_passed"] is False
+
+
+def test_weight_gated_no_motion_threshold_rescue_rejects_loose_weight_match(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 9
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter(range(9))
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            return [
+                YOLODetection(
+                    xyxy=(10.0, 10.0, 40.0, 40.0),
+                    cls=95,
+                    conf=0.13,
+                    name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "weight_rescue_no_motion_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "weight_rescue_no_motion_min_raw_votes", 8, raising=False)
+    monkeypatch.setattr(
+        config.vision,
+        "weight_rescue_no_motion_max_residual_grams",
+        2.0,
+        raising=False,
+    )
+    monkeypatch.setattr(config.weight, "rescue_tolerance_grams", 5.0, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        top_confidence_threshold=0.5,
+        side_confidence_threshold=0.5,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_motion_displacement=5.0,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[95],
+        product_weights={95: 218.0},
+    )
+    diagnostics = {}
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        result.threshold_rescue_candidates,
+        [
+            SimpleNamespace(
+                yolo_class_id=95,
+                product_name="BOTTLE_HY_HALUYACHE_PURPLE_200ML_V2",
+                stock_qty=1,
+                product_weight=218.0,
+                sale_price=1800,
+            )
+        ],
+        delta_weight=-221.0,
+        diagnostics=diagnostics,
+    )
+
+    assert rescue_votes == []
+    assert diagnostics["accepted"] == 0
+    assert diagnostics["candidates"][0]["reason"] == "motion_rejected_but_weight_matched"
+    assert diagnostics["candidates"][0]["rescue_weight_residual_g"] == 3.0
+
+
+def test_video_processor_records_roi_rescue_candidate_for_weight_gated_side_detection(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 2
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([0, 1])
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            shift = int(frame) * 16.0
+            return [
+                YOLODetection(
+                    xyxy=(348.0 + shift, 40.0, 388.0 + shift, 100.0),
+                    cls=8,
+                    conf=0.64,
+                    name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "threshold_rescue_max_candidates", 20, raising=False)
+    monkeypatch.setattr(config.vision, "roi_rescue_max_over_limit_px", 20.0, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="roi-rescue",
+        zone=4,
+        top_path=None,
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        side_confidence_threshold=0.25,
+        side_roi_x_max=360.0,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[8],
+        product_weights={8: 369.0},
+        trace_context=trace_context,
+    )
+
+    active_products = [
+        SimpleNamespace(
+            yolo_class_id=8,
+            product_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+            stock_qty=1,
+            product_weight=369.0,
+            sale_price=2000,
+        )
+    ]
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        result.roi_rescue_candidates,
+        active_products,
+        delta_weight=-369.0,
+    )
+    trace_context.record_roi_rescue_candidates(result.roi_rescue_candidates, {8: 369.0})
+    trace_context.finalize(status="complete")
+
+    assert result.vote_results == []
+    assert len(result.roi_rescue_candidates) == 1
+    rescue = result.roi_rescue_candidates[0]
+    assert rescue.class_id == 8
+    assert rescue.source == "roi_rescue"
+    assert rescue.side_detected is True
+    assert rescue.roi_x_min > 360.0
+    assert rescue.roi_x_avg <= rescue.roi_x_limit + 20.0
+    assert rescue.roi_x_limit == 360.0
+
+    assert len(rescue_votes) == 1
+    assert rescue_votes[0].class_id == 8
+    assert rescue_votes[0].source == "roi_rescue"
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["roi_rescue_candidates"][0]["class_id"] == 8
+    assert detail["roi_rescue_candidates"][0]["source"] == "roi_rescue"
+    assert detail["stage_counts_by_class"]["8"]["roi_filtered"] == 2
+    assert detail["stage_counts_by_class"]["8"]["roi_x_max"] > 360.0
+
+
+def test_video_processor_drops_static_far_right_roi_rescue_candidate(monkeypatch, tmp_path):
+    import json
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+    from model_service.video.frame_trace import TriggerTraceContext
+    from model_service.vision.yolo_wrapper import YOLODetection
+
+    class FakeExtractor:
+        total_frames = 2
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([0, 1])
+
+    class FakeYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            return [
+                YOLODetection(
+                    xyxy=(410.0, 40.0, 450.0, 100.0),
+                    cls=8,
+                    conf=0.64,
+                    name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+                )
+            ]
+
+    monkeypatch.setattr(config.vision, "threshold_rescue_enabled", True, raising=False)
+    monkeypatch.setattr(config.vision, "roi_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "roi_rescue_max_over_limit_px", 20.0, raising=False)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="roi-rescue-static-right",
+        zone=4,
+        top_path=None,
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    processor = VideoProcessor(
+        yolo=FakeYolo(),
+        side_confidence_threshold=0.30,
+        side_roi_x_max=360.0,
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    result = processor.process_videos(
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[8],
+        product_weights={8: 369.0},
+        trace_context=trace_context,
+    )
+    trace_context.record_roi_rescue_candidates(result.roi_rescue_candidates, {8: 369.0})
+    trace_context.finalize(status="complete")
+
+    assert result.vote_results == []
+    assert result.roi_rescue_candidates == []
+    assert result.stats.roi_filtered_detections == 2
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["roi_rescue_candidates"] == []
+    assert detail["stage_counts_by_class"]["8"]["roi_filtered"] == 2
+    assert detail["stage_counts_by_class"]["8"]["roi_x_avg"] == 430.0
+    assert detail["stage_counts_by_class"]["8"]["roi_x_limit"] == 360.0
+
+
+def test_weight_gated_roi_rescue_rejects_no_motion_and_far_right(monkeypatch):
+    from types import SimpleNamespace
+
+    from model_service.core.config import config
+    from model_service.video.video_processor import ThresholdRescueCandidate, VideoProcessor
+
+    monkeypatch.setattr(config.vision, "roi_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "roi_rescue_max_over_limit_px", 20.0, raising=False)
+
+    active_products = [
+        SimpleNamespace(
+            yolo_class_id=8,
+            product_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+            stock_qty=1,
+            product_weight=369.0,
+            sale_price=2000,
+        )
+    ]
+    static_candidate = ThresholdRescueCandidate(
+        class_id=8,
+        class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+        vote_count=2,
+        max_confidence=0.64,
+        avg_confidence=0.64,
+        side_detected=True,
+        side_vote_count=2,
+        side_max_confidence=0.64,
+        side_motion_passed=False,
+        roi_x_avg=370.0,
+        roi_x_limit=360.0,
+        source="roi_rescue",
+        motion_gate_passed=False,
+    )
+    far_right_candidate = ThresholdRescueCandidate(
+        class_id=8,
+        class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+        vote_count=2,
+        max_confidence=0.64,
+        avg_confidence=0.64,
+        side_detected=True,
+        side_vote_count=2,
+        side_max_confidence=0.64,
+        side_motion_passed=True,
+        roi_x_avg=390.1,
+        roi_x_limit=360.0,
+        source="roi_rescue",
+        motion_gate_passed=True,
+    )
+    diagnostics: dict = {}
+
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        [static_candidate, far_right_candidate],
+        active_products,
+        delta_weight=-369.0,
+        diagnostics=diagnostics,
+    )
+
+    assert rescue_votes == []
+    assert diagnostics["accepted"] == 0
+    assert diagnostics["rejections"]["roi_rescue_no_motion"] == 1
+    assert diagnostics["rejections"]["roi_rescue_too_far_right"] == 1
+    assert [entry["reason"] for entry in diagnostics["candidates"]] == [
+        "roi_rescue_no_motion",
+        "roi_rescue_too_far_right",
+    ]
+
+
+def test_weight_gated_roi_rescue_default_is_strict_at_side_roi_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from model_service.core.config import config
+    from model_service.video.video_processor import ThresholdRescueCandidate, VideoProcessor
+
+    monkeypatch.setattr(config.vision, "roi_rescue_require_motion", True, raising=False)
+    monkeypatch.setattr(config.vision, "roi_rescue_max_over_limit_px", 0.0, raising=False)
+
+    active_products = [
+        SimpleNamespace(
+            yolo_class_id=8,
+            product_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+            stock_qty=1,
+            product_weight=369.0,
+            sale_price=2000,
+        )
+    ]
+    just_outside_candidate = ThresholdRescueCandidate(
+        class_id=8,
+        class_name="CAN_LOTTE_HOT6_THE_KING_RUSH_355ML",
+        vote_count=2,
+        max_confidence=0.64,
+        avg_confidence=0.64,
+        side_detected=True,
+        side_vote_count=2,
+        side_max_confidence=0.64,
+        side_motion_passed=True,
+        roi_x_avg=400.1,
+        roi_x_limit=400.0,
+        source="roi_rescue",
+        motion_gate_passed=True,
+    )
+    diagnostics: dict = {}
+
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        [just_outside_candidate],
+        active_products,
+        delta_weight=-369.0,
+        diagnostics=diagnostics,
+    )
+
+    assert rescue_votes == []
+    assert diagnostics["accepted"] == 0
+    assert diagnostics["rejections"]["roi_rescue_too_far_right"] == 1
+    assert diagnostics["candidates"][0]["reason"] == "roi_rescue_too_far_right"
+
+
+def test_stage_threshold_evidence_can_drive_detected_single_fallback(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    import model_service.engine.decision_engine as decision_engine_module
+    from model_service.engine import EnsembleResult, JudgmentStatus, ProductDecisionEngine
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(
+        decision_engine_module.config.weight,
+        "strict_mode_fallback",
+        True,
+    )
+    trace_context = TriggerTraceContext(
+        session_id="stage-fallback",
+        zone=3,
+        top_path=None,
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.record_stage_count(
+        class_id=114,
+        class_name="BOX_LOTTE_PEPERO_ORIGINAL_46G",
+        stage="threshold_filtered",
+        camera="side",
+        amount=10,
+        confidence=0.1854,
+    )
+
+    result = ProductDecisionEngine(strict_mode=True).judge(
+        vision_candidates=[
+            EnsembleResult(
+                class_id=115,
+                class_name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                top_confidence=0.2303,
+                side_confidence=0.0,
+                combined_confidence=0.2303,
+                vote_count=1,
+            )
+        ],
+        delta_weight=-71.6,
+        active_products=[
+            SimpleNamespace(
+                yolo_class_id=114,
+                product_name="BOX_LOTTE_PEPERO_ORIGINAL_46G",
+                product_weight=66.0,
+                stock_qty=25,
+                sale_price=2500,
+                product_idx="P114",
+                has_loadcell="true",
+            ),
+            SimpleNamespace(
+                yolo_class_id=115,
+                product_name="BOX_LOTTE_PEPERO_ALMOND_37G",
+                product_weight=58.0,
+                stock_qty=21,
+                sale_price=1400,
+                product_idx="P115",
+                has_loadcell="true",
+            ),
+        ],
+        trace_context=trace_context,
+    )
+
+    trace_context.record_final_result(
+        products=result.products,
+        total_price=result.total_price,
+        status=result.status.value,
+        confidence=result.confidence,
+    )
+    trace_context.finalize(status="complete")
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert result.products[0].product_id == 114
+    assert result.weight_residual == 5.6
+
+    detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
+    detail = json.loads(detail_file.read_text(encoding="utf-8"))
+    assert detail["weight_diagnostics"]["fallback_reason"] == "detected_single_item_fallback"
+    assert (
+        detail["weight_diagnostics"]["detected_single_item_fallback"]["accepted"]["class_id"]
+        == 114
+    )

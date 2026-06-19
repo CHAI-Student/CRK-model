@@ -1,0 +1,43 @@
+door_session_id: door_zone_4_260204_050627
+zone: 4
+status: complete
+triggers:
+- trigger_id: trigger_001
+  session_id: zone_4_260204_050603
+  timestamp: 1770149187.269494
+  products:
+  - product_id: 23
+    product_idx: '23'
+    name: BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML
+    count: 1
+    price: 1500
+    confidence: 0.3990234375
+  delta_weight: -538.0
+  confidence: 0.3990234375
+  video_paths:
+    top: /home/chai/Documents/Edge_Environment/20260204_050549/inference/zone_4/2026-02-03_20-05-58/top.avi
+    side: /home/chai/Documents/Edge_Environment/20260204_050549/inference/zone_4/2026-02-03_20-05-58/side.avi
+  is_return: false
+  processing_time_ms: 23874.866724014282
+aggregated_products:
+  '23':
+    product_id: 23
+    product_idx: '23'
+    name: BOTTLE_COCA_POWER_ADE_MOUNTAIN_BLAST_600ML
+    count: 1
+    unit_price: 1500
+    weight: 0.0
+    total_price: 1500
+    average_confidence: 0.399
+    detection_count: 1
+unmatched_returns: []
+created_at: 1770149187.2695308
+last_trigger_at: 1770149187.2695308
+finalized_at: 1770149354.9640222
+summary:
+  trigger_count: 1
+  total_price: 1500
+  product_count: 1
+  duration_seconds: 167.7
+  unmatched_returns_count: 0
+  unmatched_returns_weight: 0
