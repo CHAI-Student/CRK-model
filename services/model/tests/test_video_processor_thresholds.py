@@ -1162,7 +1162,7 @@ def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
     assert "reason=single_removal_weight_tiebreak" in caplog.text
 
 
-def test_video_processor_freezer_handled_filter_preserves_strong_multi_vision(
+def test_video_processor_freezer_handled_filter_preserves_weight_fit_multi_vision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1248,7 +1248,7 @@ def test_video_processor_freezer_handled_filter_preserves_strong_multi_vision(
 
     handled = VideoProcessor.filter_freezer_handled_candidates(
         vote_results,
-        delta_weight=-999.0,
+        delta_weight=-210.0,
         product_weights={41: 100.0, 42: 110.0, 99: 999.0},
         trace_context=trace_context,
         log_prefix="TEST",
@@ -1256,9 +1256,106 @@ def test_video_processor_freezer_handled_filter_preserves_strong_multi_vision(
 
     assert [candidate.class_id for candidate in handled] == [41, 42]
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert diagnostics["reason"] == "freezer_multi_kind_vision_passthrough"
+    assert diagnostics["reason"] == "freezer_multi_kind_weight_fit"
     assert diagnostics["handled_candidate_count"] == 2
     assert diagnostics["selectedClassIds"] == [41, 42]
+    assert diagnostics["weightResidual"] == 0.0
+    assert diagnostics["allowedResidual"] == 15.0
+
+
+def test_video_processor_freezer_filter_rejects_mismatched_top_three_multi(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_vision_multi_without_weight_enabled",
+        True,
+    )
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-178g-single",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        str(class_id): {
+            "class_id": class_id,
+            "name": name,
+            "freezerExitPathVotes": 6,
+            "freezer_roi_filtered_max_confidence": confidence,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 3},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        }
+        for class_id, name, confidence in [
+            (101, "FREEZER_172G", 0.93),
+            (102, "FREEZER_170G", 0.91),
+            (103, "FREEZER_166G", 0.89),
+        ]
+    }
+    vote_results = [
+        VoteResult(
+            class_id=101,
+            class_name="FREEZER_172G",
+            vote_count=12,
+            max_confidence=0.93,
+            avg_confidence=0.9,
+            weighted_confidence=0.93,
+            top_detected=True,
+            side_detected=True,
+        ),
+        VoteResult(
+            class_id=102,
+            class_name="FREEZER_170G",
+            vote_count=10,
+            max_confidence=0.91,
+            avg_confidence=0.88,
+            weighted_confidence=0.91,
+            top_detected=True,
+            side_detected=True,
+        ),
+        VoteResult(
+            class_id=103,
+            class_name="FREEZER_166G",
+            vote_count=9,
+            max_confidence=0.89,
+            avg_confidence=0.86,
+            weighted_confidence=0.89,
+            top_detected=True,
+            side_detected=True,
+        ),
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-178.0,
+        product_weights={101: 172.0, 102: 170.0, 103: 166.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    assert [candidate.class_id for candidate in handled] == [101]
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert diagnostics["reason"] == "weight_gate_exit_path"
+    assert diagnostics["handled_candidate_count"] == 1
+    assert diagnostics["selected"]["class_id"] == 101
+    assert diagnostics["selected"]["weight_residual"] == 6.0
+    rejected = diagnostics["rejectedMultiCandidate"]
+    assert rejected["reason"] == "freezer_multi_kind_weight_mismatch"
+    assert rejected["allowedResidual"] == 15.0
 
 
 def test_video_processor_freezer_exit_path_prefers_melona_over_static_lala(

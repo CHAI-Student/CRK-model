@@ -96,7 +96,9 @@ Important inputs:
   reject gate in freezer mode. Single-item freezer selection ranks by vision
   confidence first; only candidates within
   `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND` of the best confidence use
-  weight residual as a tie-break.
+  weight residual as a tie-break. A single freezer result is weight-reliable
+  when residual is within
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
   `weight_residual`, `selectionTier`, `freezerExitPathVotes`, and the full
@@ -107,16 +109,13 @@ Important inputs:
   engine input, and DoorSession snapshots receive the one handled product
   selected by freezer exit-path evidence and weight residual before falling
   back to top confidence-band weight residual.
-- Multi-kind freezer results prefer segment/compound loadcell evidence first,
-  then combined freezer candidate weights that fit the target inside the
-  existing count-scaled tolerance. With
-  `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`, strong
-  dual-camera exit-path evidence can also select multiple freezer candidates
-  without a loadcell fit. That path returns detected products/prices as
-  `partial`, records `freezer_multi_kind_vision_supported`, and treats the
-  loadcell residual as diagnostic. Same-class count greater than one is still
-  allowed only when the voting `instance_count_hint` is supported by the target
-  weight.
+- Multi-kind freezer results require segment/compound or combined-candidate
+  weight support inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`.
+  Strong dual-camera exit-path evidence alone no longer selects multiple
+  freezer candidates for ordinary nonzero deltas; rejected sets record
+  `freezer_multi_kind_weight_mismatch` and fall back to the single handled
+  freezer selection path. Same-class count greater than one is still allowed
+  only when the voting `instance_count_hint` is supported by the target weight.
 
 ## StrictWeightMatcher
 

@@ -1,6 +1,6 @@
 # Model Service Tests
 
-Last reviewed: 2026-06-04
+Last reviewed: 2026-06-29
 
 ## Test Bootstrap
 
@@ -39,7 +39,7 @@ pytest services/model/tests --cov=services/model/model_service --cov-report=term
 | `test_fastapi_imports.py` | import smoke, runtime settings checks, and best-effort health diagnostics |
 | `test_multi_zone_summary.py` | multi-zone close summaries, active snapshot guards, and response contracts |
 | `test_trigger_helpers.py` | loadcell and vote helper logic |
-| `test_video_processor_thresholds.py` | video thresholds, ROI, async frame stride, and async failure propagation |
+| `test_video_processor_thresholds.py` | video thresholds, ROI, freezer handled-candidate weight gating, async frame stride, and async failure propagation |
 | `test_frame_trace.py` | trigger traces, worker lifecycle, and propagated video-error session status |
 | `test_session_store_lifecycle.py` | session overwrite logging lifecycle |
 | `test_product_aggregator.py` | removal, return, and close aggregation behavior |
@@ -50,13 +50,13 @@ pytest services/model/tests --cov=services/model/model_service --cov-report=term
 The full model-service suite is the preferred local gate:
 
 ```bash
-uv run --no-sync pytest services/model/tests -q
+pytest services/model/tests -q
 ```
 
-Current recorded result on 2026-06-04:
+Current recorded result on 2026-06-29:
 
 ```text
-351 passed
+428 passed
 ```
 
 This is local unit/contract coverage only. It does not prove Jetson TensorRT,

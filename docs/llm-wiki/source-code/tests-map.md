@@ -74,7 +74,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   rescue, and side-ROI-conflicted threshold rescue rejection.
   Freezer tests cover dual-top lower-half ROI filtering, freezer rescue
   suppression, same-frame multi-bbox `instance_count_hint`, disabled-layout
-  warnings, and freezer filter OPS visibility.
+  warnings, `15g` weight-fit multi selection, top-three mismatch narrowing,
+  and freezer filter OPS visibility.
   Async failure tests cover model-service exception re-raise, unknown task
   wrapping, missing async extractor support, frame queue timeout, and zero-frame
   failure after retry.
@@ -123,8 +124,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   full stable removal delta.
   Freezer decision tests cover confidence-first single selection outside the
   normal weight tolerance, weight residual tie-breaks only inside the
-  confidence band, candidate-only identity, multi-kind vision evidence, and
-  same-class counts gated by `instance_count_hint`.
+  confidence band, candidate-only identity, freezer `15g` weight-gated
+  multi-kind evidence, rejection of mismatched top-three freezer candidates,
+  and same-class counts gated by `instance_count_hint`.
 - [test_session_store_lifecycle.py](../../../services/model/tests/test_session_store_lifecycle.py):
   normal `processing -> complete/waiting/error` session saves do not emit
   `Session overwritten`, while replacing an already completed session still

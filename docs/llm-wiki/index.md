@@ -116,11 +116,12 @@ shape without rereading every long historical document.
   removal segment, the handled list defaults to one product; weight residual
   breaks ties inside the top confidence band, and same-class count hints are
   used only when the target weight supports that count.
-- With `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`,
-  strong freezer dual-camera exit-path evidence can preserve multiple handled
-  product identities as a `partial` multi-kind result even when combined
-  loadcell residual does not fit. Set it to `false` to restore the stricter
-  segment/combined-weight-supported freezer multi-kind behavior.
+- Freezer loadcell is now treated as reliable to about `15g` by
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
+  freezer evidence can keep multiple handled identities only when their
+  combined/segment weight fits that freezer tolerance; ordinary nonzero freezer
+  deltas no longer return top-1/top-2/top-3 candidates together when their sum
+  greatly exceeds the measured removal.
 - Side-camera ROI keeps hard `center_x <= 400` in the left 480 crop and adds a
   conditional `+5px` regular-candidate soft band. This catches Pepsi detections
   around `x=402..404` while leaving farther-right Trevi-style detections out.
@@ -324,6 +325,10 @@ shape without rereading every long historical document.
 - [CRK feedback 2026-06-29](source-docs/crk-feedback-2026-06-29.md):
   external review note covering CRK-model operational hardening and async video
   failure propagation.
+- [Freezer weight feedback 2026-06-29](source-docs/freezer-weight-feedback-2026-06-29.md):
+  operator feedback that freezer loadcell error is usually about `5g` and up to
+  `10g-15g`, with a `178g` single-removal top-three candidate over-selection
+  failure.
 
 ### Historical Planning And Risk Docs
 

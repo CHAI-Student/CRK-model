@@ -549,9 +549,9 @@ class ProductDecisionEngine:
             0.0,
             float(config.weight.detected_single_fallback_tolerance_grams),
         )
-        near_residual_limit = strict_residual_limit + max(
-            0.0,
-            float(config.weight.same_product_count_tolerance_grams),
+        near_residual_limit = max(
+            strict_residual_limit,
+            self._freezer_weight_tolerance_grams(),
         )
         vision_candidates = self._augment_freezer_stage_exit_path_candidates(
             vision_candidates=vision_candidates,
@@ -1101,7 +1101,7 @@ class ProductDecisionEngine:
         best_residual = abs(target_weight - unit_weight)
         for count in range(2, max_hint + 1):
             residual = abs(target_weight - unit_weight * count)
-            if residual <= self._count_scaled_weight_tolerance(count) and residual < best_residual:
+            if residual <= self._freezer_weight_tolerance_grams() and residual < best_residual:
                 best_count = count
                 best_residual = residual
         return best_count
@@ -1122,21 +1122,18 @@ class ProductDecisionEngine:
             return None
 
         max_kinds = max(2, int(config.weight.max_combination_kinds))
-        if self._freezer_trace_has_multi_item_evidence(trace_context):
-            return (
-                high_confidence[: min(max_kinds, len(high_confidence))],
-                "freezer_multi_kind_segment_evidence",
-            )
-
+        has_multi_item_trace_evidence = self._freezer_trace_has_multi_item_evidence(
+            trace_context
+        )
         viable: list[tuple[int, float, float, int, list[dict[str, Any]]]] = []
+        allowed_residual = self._freezer_weight_tolerance_grams()
         for size in range(2, min(max_kinds, len(high_confidence)) + 1):
             for combo in combinations(high_confidence, size):
                 selected = list(combo)
                 total_count = sum(int(option["count"]) for option in selected)
                 expected_weight = sum(float(option["expected_weight"]) for option in selected)
                 residual = abs(target_weight - expected_weight)
-                allowed = self._count_scaled_weight_tolerance(total_count)
-                if residual > allowed:
+                if residual > allowed_residual:
                     continue
                 avg_confidence = sum(
                     float(option["confidence"]) for option in selected
@@ -1157,10 +1154,40 @@ class ProductDecisionEngine:
                 max_kinds=max_kinds,
             )
             if vision_supported is not None:
-                return vision_supported, "freezer_multi_kind_vision_supported"
+                expected_weight = sum(
+                    float(option["expected_weight"]) for option in vision_supported
+                )
+                residual = abs(target_weight - expected_weight)
+                self._record_weight_diagnostics(
+                    trace_context,
+                    {
+                        "freezer_multi_kind_weight_mismatch": {
+                            "accepted": False,
+                            "reason": "freezer_multi_kind_weight_mismatch",
+                            "target_weight": round(target_weight, 1),
+                            "expected_weight": round(expected_weight, 1),
+                            "weight_residual": round(residual, 1),
+                            "allowed_residual": round(allowed_residual, 1),
+                            "selected": [
+                                option["diagnostics"] for option in vision_supported
+                            ],
+                            "legacy_flag_enabled": bool(
+                                config.weight.freezer_vision_multi_without_weight_enabled
+                            ),
+                            "multi_item_trace_evidence": bool(
+                                has_multi_item_trace_evidence
+                            ),
+                        }
+                    },
+                )
             return None
         viable.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-        return viable[0][4], "freezer_multi_kind_weight_supported"
+        reason = (
+            "freezer_multi_kind_segment_weight_supported"
+            if has_multi_item_trace_evidence
+            else "freezer_multi_kind_weight_supported"
+        )
+        return viable[0][4], reason
 
     @staticmethod
     def _select_freezer_vision_supported_multi_options(
@@ -1244,7 +1271,7 @@ class ProductDecisionEngine:
             confidences.append(confidence)
 
         residual = abs(target_weight - explained_weight)
-        tolerance = float(config.weight.tolerance_grams)
+        tolerance = self._freezer_weight_tolerance_grams()
         weight_reliable = residual <= tolerance
         status = JudgmentStatus.COMPLETE if weight_reliable else JudgmentStatus.PARTIAL
         confidence = sum(confidences) / len(confidences) if confidences else 0.0
@@ -1255,11 +1282,8 @@ class ProductDecisionEngine:
             "explained_weight": round(explained_weight, 1),
             "weight_residual": round(residual, 1),
             "tolerance": round(tolerance, 1),
-            "weight_used_as": (
-                "diagnostic"
-                if reason == "freezer_multi_kind_vision_supported"
-                else "tiebreaker"
-            ),
+            "freezer_weight_tolerance": round(tolerance, 1),
+            "weight_used_as": "tiebreaker",
             "weight_reliable": weight_reliable,
             "selected": [option["diagnostics"] for option in selected_options],
             "considered": considered,
@@ -1271,9 +1295,8 @@ class ProductDecisionEngine:
             and float(item.get("weight_residual", target_weight) or target_weight)
             <= max(
                 0.0,
-                float(config.weight.detected_single_fallback_tolerance_grams),
+                self._freezer_weight_tolerance_grams(),
             )
-            + max(0.0, float(config.weight.same_product_count_tolerance_grams))
             and int(item.get("freezerExitPathVotes", 0) or 0)
             >= max(0, int(getattr(config.vision, "freezer_min_exit_path_votes", 3)))
         ]
@@ -1885,6 +1908,10 @@ class ProductDecisionEngine:
     @staticmethod
     def _is_500ml_bottle_weight(unit_weight: float) -> bool:
         return 450.0 <= float(unit_weight) <= 560.0
+
+    @staticmethod
+    def _freezer_weight_tolerance_grams() -> float:
+        return max(0.0, float(config.weight.freezer_weight_tolerance_grams))
 
     @staticmethod
     def _count_scaled_weight_tolerance(count: int, *, extra_units: int = 0) -> float:

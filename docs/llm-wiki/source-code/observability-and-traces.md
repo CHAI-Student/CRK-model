@@ -105,8 +105,9 @@ start writing sample images during inference.
   when regular candidate identity beats a same-weight active/rescue collision.
   Freezer decisions add `decision_branch=freezer_vision_first` with
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
-  `weight_residual`, `freezer_multi_kind_vision_supported`, and
-  selected/considered candidate diagnostics.
+  `weight_residual`, `freezer_multi_kind_weight_fit`,
+  `freezer_multi_kind_weight_mismatch`, and selected/considered candidate
+  diagnostics.
 - final result and storage result
 
 Trace JSONL/detail files are raw operational evidence. The current wiki policy

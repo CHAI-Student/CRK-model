@@ -97,13 +97,12 @@ vision-supported product identity.
   the handled candidate list sent to OPS, the engine, and DoorSession is
   narrowed for single freezer removal segments. In that case one product is
   selected by freezer exit-path evidence and weight residual, with top
-  confidence-band weight residual used only as fallback. Weak/static multi-kind
-  freezer noise is not summed by confidence alone. With
-  `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`, however,
-  strong dual-camera freezer exit-path evidence can pass multiple handled
-  candidates to the engine and return those identities as `partial` even when
-  loadcell residual does not fit. Setting the flag to `false` restores the
-  stricter segment/compound or combined weight/count requirement.
+  confidence-band weight residual used only as fallback. Freezer loadcell
+  residual is now reliable to about `15g`, so multi-kind freezer output requires
+  segment/compound or combined-candidate weight support inside
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Strong dual-camera evidence
+  without a weight fit records `freezer_multi_kind_weight_mismatch` and falls
+  back to one handled freezer product.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count

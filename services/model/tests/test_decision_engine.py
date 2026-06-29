@@ -26,6 +26,7 @@ def reset_weight_identity_policy(monkeypatch):
         "freezer_vision_multi_without_weight_enabled",
         True,
     )
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
 
 
 def use_weight_aware_identity(monkeypatch):
@@ -43,6 +44,7 @@ def test_weight_model_defaults_to_vision_first_identity_policy():
     assert settings.fusion_vision_weight == 0.65
     assert settings.fusion_loadcell_weight == 0.25
     assert settings.fusion_count_weight == 0.10
+    assert settings.freezer_weight_tolerance_grams == 15.0
     assert settings.freezer_vision_multi_without_weight_enabled is True
 
 
@@ -282,7 +284,9 @@ def test_vision_first_missing_weight_preserves_strong_vision_identity_as_partial
     assert diagnostics["selected"]["weight_status"] == "unavailable"
 
 
-def test_freezer_vision_first_keeps_candidate_outside_weight_tolerance(monkeypatch):
+def test_freezer_vision_first_accepts_candidate_outside_refrigerated_tolerance(
+    monkeypatch,
+):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     trace = FakeLoadcellTrace({})
     engine = ProductDecisionEngine(strict_mode=True)
@@ -299,14 +303,15 @@ def test_freezer_vision_first_keeps_candidate_outside_weight_tolerance(monkeypat
         trace_context=trace,
     )
 
-    assert result.status == JudgmentStatus.PARTIAL
+    assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [(26, 1)]
     assert result.weight_explained == 365.0
     assert result.weight_residual == 10.0
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     assert diagnostics["accepted"] is True
     assert diagnostics["weight_used_as"] == "tiebreaker"
-    assert diagnostics["weight_reliable"] is False
+    assert diagnostics["weight_reliable"] is True
+    assert diagnostics["freezer_weight_tolerance"] == 15.0
 
 
 def test_freezer_vision_first_uses_weight_only_inside_confidence_band(monkeypatch):
@@ -385,7 +390,7 @@ def test_freezer_vision_first_outputs_multi_kind_when_vision_is_strong(monkeypat
     )
 
 
-def test_freezer_vision_first_outputs_multi_kind_from_strong_vision_without_weight_fit(
+def test_freezer_vision_first_rejects_multi_kind_without_weight_fit(
     monkeypatch,
 ):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
@@ -430,14 +435,69 @@ def test_freezer_vision_first_outputs_multi_kind_from_strong_vision_without_weig
 
     assert result.status == JudgmentStatus.PARTIAL
     assert [(product.product_id, product.count) for product in result.products] == [
-        (1, 1),
-        (2, 1),
+        (2, 1)
     ]
-    assert result.total_price == 7000
+    assert result.weight_explained == 110.0
     assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
-        "freezer_multi_kind_vision_supported"
+        "freezer_single_confidence_weight_tiebreak"
     )
-    assert trace.weight_diagnostics["freezer_vision_first"]["weight_reliable"] is False
+    mismatch = trace.weight_diagnostics["freezer_multi_kind_weight_mismatch"]
+    assert mismatch["reason"] == "freezer_multi_kind_weight_mismatch"
+    assert mismatch["expected_weight"] == 210.0
+    assert mismatch["allowed_residual"] == 15.0
+
+
+def test_freezer_vision_first_selects_single_178g_candidate_not_top_three(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_multi_min_confidence", 0.45)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        str(class_id): {
+            "class_id": class_id,
+            "name": name,
+            "freezerExitPathVotes": 6,
+            "freezer_roi_filtered_max_confidence": confidence,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 3},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        }
+        for class_id, name, confidence in [
+            (101, "FREEZER_172G", 0.93),
+            (102, "FREEZER_170G", 0.91),
+            (103, "FREEZER_166G", 0.89),
+        ]
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=101, name="FREEZER_172G", confidence=0.93),
+            make_candidate(class_id=102, name="FREEZER_170G", confidence=0.91),
+            make_candidate(class_id=103, name="FREEZER_166G", confidence=0.89),
+        ],
+        delta_weight=-178.0,
+        active_products=[
+            make_active_product(101, "FREEZER_172G", weight=172.0, stock=10),
+            make_active_product(102, "FREEZER_170G", weight=170.0, stock=10),
+            make_active_product(103, "FREEZER_166G", weight=166.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 1)
+    ]
+    assert result.weight_explained == 172.0
+    assert result.weight_residual == 6.0
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
+    mismatch = trace.weight_diagnostics["freezer_multi_kind_weight_mismatch"]
+    assert mismatch["weight_residual"] == 330.0
+    assert mismatch["allowed_residual"] == 15.0
 
 
 def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(
@@ -489,8 +549,8 @@ def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(
 
     assert result.status == JudgmentStatus.PARTIAL
     assert len(result.products) == 1
-    assert trace.weight_diagnostics["freezer_vision_first"]["reason"] != (
-        "freezer_multi_kind_vision_supported"
+    assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
+        "freezer_single_confidence_weight_tiebreak"
     )
 
 
@@ -553,7 +613,7 @@ def test_freezer_vision_first_prefers_single_handled_item_by_weight_tiebreak(
         trace_context=trace,
     )
 
-    assert result.status == JudgmentStatus.PARTIAL
+    assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
         (44, 1)
     ]
@@ -604,7 +664,7 @@ def test_freezer_vision_first_prefers_melona_exit_path_over_static_lala(monkeypa
         trace_context=trace,
     )
 
-    assert result.status == JudgmentStatus.PARTIAL
+    assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
         (44, 1)
     ]
@@ -801,7 +861,7 @@ def test_freezer_vision_first_rescues_yomamte_stage_only_dual_camera(monkeypatch
         trace_context=trace,
     )
 
-    assert result.status == JudgmentStatus.PARTIAL
+    assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
         (30, 1)
     ]

@@ -1,5 +1,17 @@
 # LLM Wiki Log
 
+## [2026-06-29] maintenance | freezer weight-gated multi-candidate repair
+
+- Recorded that freezer loadcell matching is again reliable enough to gate
+  product selection with `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`.
+- Updated freezer single-removal policy so strong top-1/top-2/top-3 freezer
+  candidates are not returned together unless their combined/segment weight
+  fits the measured delta. A `178g` removal with several `170g` candidates now
+  resolves to one handled product instead of a roughly `500g` basket.
+- Replaced the old vision-only freezer multi exception with
+  `freezer_multi_kind_weight_mismatch` diagnostics and a single-candidate
+  fallback path for ordinary nonzero freezer deltas.
+
 ## [2026-06-29] maintenance | CRK async video failure propagation and ops hardening
 
 - Ingested the CRK 2026-06-29 feedback note as an external review source

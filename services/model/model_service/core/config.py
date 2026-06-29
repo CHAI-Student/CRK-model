@@ -372,11 +372,15 @@ class WeightModel(BaseModel):
         default=0.45,
         description="Freezer-only confidence threshold for multi-kind vision decisions",
     )
+    freezer_weight_tolerance_grams: float = Field(
+        default=15.0,
+        description="Freezer-only gram tolerance for reliable loadcell weight matches",
+    )
     freezer_vision_multi_without_weight_enabled: bool = Field(
         default=True,
         description=(
-            "Allow strong freezer multi-kind vision evidence to create a "
-            "partial multi-product result even when loadcell weight does not fit"
+            "Legacy freezer multi-kind vision flag. Nonzero freezer deltas still "
+            "require combined weight to fit freezer_weight_tolerance_grams."
         ),
     )
     min_weight_change: float = Field(

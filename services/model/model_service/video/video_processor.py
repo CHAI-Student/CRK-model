@@ -42,6 +42,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field, replace
+from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
 from model_service.core.config import config
@@ -789,11 +790,12 @@ class VideoProcessor:
         return weight_value if weight_value > 0.0 else None
 
     @staticmethod
-    def _freezer_count_tolerance(count: int) -> float:
-        return float(config.weight.tolerance_grams) + (
-            float(config.weight.same_product_count_tolerance_grams)
-            * max(0, int(count))
-        )
+    def _freezer_weight_tolerance_grams() -> float:
+        return max(0.0, float(config.weight.freezer_weight_tolerance_grams))
+
+    @classmethod
+    def _freezer_count_tolerance(cls, count: int) -> float:
+        return cls._freezer_weight_tolerance_grams()
 
     @classmethod
     def _freezer_supported_instance_count(
@@ -1166,9 +1168,9 @@ class VideoProcessor:
             0.0,
             float(config.weight.detected_single_fallback_tolerance_grams),
         )
-        near_residual_limit = strict_residual_limit + max(
-            0.0,
-            float(config.weight.same_product_count_tolerance_grams),
+        near_residual_limit = max(
+            strict_residual_limit,
+            cls._freezer_weight_tolerance_grams(),
         )
 
         existing_class_ids = {int(vote.class_id) for vote in ranked_votes}
@@ -1276,6 +1278,7 @@ class VideoProcessor:
                 "selectionTier": str(item["reason"]),
             }
 
+        rejected_multi_diagnostics: Optional[dict[str, Any]] = None
         if bool(config.weight.freezer_vision_multi_without_weight_enabled):
             multi_min_confidence = float(config.weight.freezer_multi_min_confidence)
             strong_multi_items = [
@@ -1290,45 +1293,123 @@ class VideoProcessor:
                 strong_multi_items.sort(
                     key=lambda item: (int(item["index"]), -float(item["confidence"]))
                 )
-                selected_items = strong_multi_items[: max(2, int(config.vision.top_k))]
-                selected_votes = [
-                    replace(
-                        item["vote"],
-                        freezer_exit_path_votes=int(item["freezer_exit_path_votes"]),
+                max_kinds = max(2, int(config.weight.max_combination_kinds))
+                allowed_residual = cls._freezer_weight_tolerance_grams()
+                viable_multi: list[dict[str, Any]] = []
+                for size in range(2, min(max_kinds, len(strong_multi_items)) + 1):
+                    for combo in combinations(strong_multi_items, size):
+                        selected = list(combo)
+                        expected_weight = 0.0
+                        selected_counts: dict[int, int] = {}
+                        weight_known = True
+                        for item in selected:
+                            unit_weight = item["unit_weight"]
+                            if unit_weight is None:
+                                weight_known = False
+                                break
+                            count = cls._freezer_supported_instance_count(
+                                item["vote"],
+                                target_weight=target_weight,
+                                product_weights=product_weights,
+                            )
+                            selected_counts[int(item["vote"].class_id)] = count
+                            expected_weight += float(unit_weight) * count
+                        if not weight_known:
+                            continue
+                        residual = abs(target_weight - expected_weight)
+                        if residual <= allowed_residual:
+                            viable_multi.append(
+                                {
+                                    "selected": selected,
+                                    "selected_counts": selected_counts,
+                                    "expected_weight": expected_weight,
+                                    "residual": residual,
+                                    "rank_sum": sum(
+                                        int(item["index"]) for item in selected
+                                    ),
+                                    "confidence_sum": sum(
+                                        float(item["confidence"]) for item in selected
+                                    ),
+                                }
+                            )
+                if not viable_multi:
+                    rejected_multi_diagnostics = {
+                        "reason": "freezer_multi_kind_weight_mismatch",
+                        "targetWeight": round(target_weight, 1),
+                        "allowedResidual": round(allowed_residual, 1),
+                        "selectedClassIds": [
+                            int(item["vote"].class_id) for item in strong_multi_items
+                        ],
+                        "considered": [
+                            considered_entry(item) for item in strong_multi_items
+                        ],
+                    }
+                else:
+                    viable_multi.sort(
+                        key=lambda item: (
+                            len(item["selected"]),
+                            float(item["residual"]),
+                            int(item["rank_sum"]),
+                            -float(item["confidence_sum"]),
+                        )
                     )
-                    for item in selected_items
-                ]
-                diagnostics = {
-                    **cls._freezer_candidate_filter_config_payload(
-                        delta_weight=delta_weight,
-                        raw_candidate_count=len(votes),
-                        handled_candidate_count=len(selected_votes),
-                    ),
-                    "accepted": False,
-                    "reason": "freezer_multi_kind_vision_passthrough",
-                    "stage_only_candidate_count": len(stage_only_votes),
-                    "minFreezerExitPathVotes": min_exit_path_votes,
-                    "multiMinConfidence": round(multi_min_confidence, 4),
-                    "selectedClassIds": [
-                        int(item["vote"].class_id) for item in selected_items
-                    ],
-                    "selected": [
-                        considered_entry(item) for item in selected_items
-                    ],
-                    "considered": [considered_entry(item) for item in scored],
-                }
-                cls._record_freezer_candidate_filter_diagnostics(
-                    trace_context,
-                    diagnostics,
-                )
-                logger.info(
-                    "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=%s "
-                    "reason=freezer_multi_kind_vision_passthrough",
-                    log_prefix,
-                    len(votes),
-                    len(selected_votes),
-                )
-                return selected_votes
+                    selected_multi = viable_multi[0]
+                    selected_items = selected_multi["selected"]
+                    selected_counts = selected_multi["selected_counts"]
+                    selected_votes = [
+                        replace(
+                            item["vote"],
+                            instance_count_hint=selected_counts[
+                                int(item["vote"].class_id)
+                            ],
+                            freezer_exit_path_votes=int(item["freezer_exit_path_votes"]),
+                        )
+                        for item in selected_items
+                    ]
+                    diagnostics = {
+                        **cls._freezer_candidate_filter_config_payload(
+                            delta_weight=delta_weight,
+                            raw_candidate_count=len(votes),
+                            handled_candidate_count=len(selected_votes),
+                        ),
+                        "accepted": False,
+                        "reason": "freezer_multi_kind_weight_fit",
+                        "stage_only_candidate_count": len(stage_only_votes),
+                        "minFreezerExitPathVotes": min_exit_path_votes,
+                        "multiMinConfidence": round(multi_min_confidence, 4),
+                        "expectedWeight": round(
+                            float(selected_multi["expected_weight"]),
+                            1,
+                        ),
+                        "weightResidual": round(float(selected_multi["residual"]), 1),
+                        "allowedResidual": round(allowed_residual, 1),
+                        "selectedClassIds": [
+                            int(item["vote"].class_id) for item in selected_items
+                        ],
+                        "selected": [
+                            {
+                                **considered_entry(item),
+                                "instance_count_hint": selected_counts[
+                                    int(item["vote"].class_id)
+                                ],
+                            }
+                            for item in selected_items
+                        ],
+                        "considered": [considered_entry(item) for item in scored],
+                    }
+                    cls._record_freezer_candidate_filter_diagnostics(
+                        trace_context,
+                        diagnostics,
+                    )
+                    logger.info(
+                        "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=%s "
+                        "reason=freezer_multi_kind_weight_fit residual=%.1fg",
+                        log_prefix,
+                        len(votes),
+                        len(selected_votes),
+                        float(selected_multi["residual"]),
+                    )
+                    return selected_votes
 
         handled_pool = [item for item in scored if int(item["tier"]) < 2]
         if handled_pool:
@@ -1430,6 +1511,8 @@ class VideoProcessor:
             "ambiguousCandidates": ambiguous_candidates,
             "hardNegativeCandidates": ambiguous_candidates,
         }
+        if rejected_multi_diagnostics is not None:
+            diagnostics["rejectedMultiCandidate"] = rejected_multi_diagnostics
         cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
         logger.info(
             "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=1 selected=%s "
