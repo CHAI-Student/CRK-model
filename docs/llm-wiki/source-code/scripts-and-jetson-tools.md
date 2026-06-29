@@ -25,7 +25,10 @@ developer PC can validate TensorRT runtime behavior.
   standalone Jetson camera/model preview that loads an engine, opens a camera
   source, draws boxes/labels/FPS, and displays via OpenCV or ffplay.
 - [convert_engine.sh](../../../scripts/convert_engine.sh):
-  helper for TensorRT engine conversion/export workflows.
+  repo-local TensorRT engine conversion/export helper. It defaults to this
+  repo's `models/`, keeps env overrides such as `PT_FILE`, `IMGSZ`,
+  `MODELS_DIR`, `PROJECT_ROOT`, and `PYTHON_BIN`, verifies `yolo`, and fails
+  when the active Torch build cannot see CUDA.
 - [refresh_scenario_fixture.py](../../../scripts/refresh_scenario_fixture.py):
   operator-run helper that reads the source Excel workbooks, regenerates the
   committed scenario JSON fixture, and refreshes the human fixture report.
@@ -54,6 +57,17 @@ python scripts/live_engine_preview.py \
 ```
 
 Use this only on Jetson with real camera/CUDA/TensorRT availability.
+
+## TensorRT Engine Export Flow
+
+```bash
+source .venv/bin/activate
+PT_FILE=0204_morning.pt scripts/convert_engine.sh
+```
+
+This creates the direct `.engine` artifact for the Python TensorRT service.
+Do not use this page to move ONNX ownership into CRK-model; ONNX export remains
+part of the `CRK-model-go` deployment flow.
 
 ## Related Wiki Pages
 

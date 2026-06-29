@@ -265,7 +265,9 @@ vision-supported product identity.
 
 ## Failure Modes To Keep Separate
 
-- Decode failure: ffprobe sees frames but async decode yields zero frames.
+- Decode failure: ffprobe sees frames but async decode/retries yield zero
+  frames, or async extractor/queue/YOLO tasks fail. This now propagates as an
+  error path and must not be merged with a true vision miss.
 - Capture timing failure: loadcell stable tail is missing, so delta is wrong.
 - Removal stabilization conflict: vision strongly supports a two-bottle
   removal, but the posted negative loadcell delta is still undercounted; return

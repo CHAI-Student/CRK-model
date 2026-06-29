@@ -24,7 +24,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   YOLO class id/name mapping, mapping diagnostics, and active snapshot
   preservation on invalid overwrite, including TTL-bounded last-valid fallback.
 - [test_fastapi_imports.py](../../../services/model/tests/test_fastapi_imports.py):
-  import smoke, lazy exports, runtime settings, YOLO load failure surfacing.
+  import smoke, lazy exports, runtime settings, YOLO load failure surfacing,
+  and best-effort `/api/health/detailed` runtime diagnostics.
 - [test_logging_config.py](../../../services/model/tests/test_logging_config.py):
   logging setup and console filter behavior.
 - [test_model_validation.py](../../../services/model/tests/test_model_validation.py):
@@ -63,6 +64,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   Recent freezer coverage verifies that zone-sliced `loadcells` remain the
   effective payload, even when the deprecated compatibility field is present,
   and traces retain `loadcell_scope=zone`.
+  It also verifies that propagated video processing failures mark worker
+  sessions and traces as `error` instead of calling the decision engine.
 - [test_video_processor_thresholds.py](../../../services/model/tests/test_video_processor_thresholds.py):
   thresholds, top-k, frame stride, 480-left-crop-aligned ROI defaults, top/side
   ROI filtering, side ROI hard `center_x <= 400` plus `+5px` soft-band Pepsi
@@ -72,6 +75,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   Freezer tests cover dual-top lower-half ROI filtering, freezer rescue
   suppression, same-frame multi-bbox `instance_count_hint`, disabled-layout
   warnings, and freezer filter OPS visibility.
+  Async failure tests cover model-service exception re-raise, unknown task
+  wrapping, missing async extractor support, frame queue timeout, and zero-frame
+  failure after retry.
 - [test_yolo_wrapper_geometry.py](../../../services/model/tests/test_yolo_wrapper_geometry.py):
   default left-crop and optional crop/letterbox geometry.
 - [test_voting_ensemble.py](../../../services/model/tests/test_voting_ensemble.py):
@@ -160,6 +166,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   `test_active_product_store_mapping.py`.
 - Video/vision change: `test_video_processor_thresholds.py`,
   `test_yolo_wrapper_geometry.py`, `test_voting_ensemble.py`.
+- Async failure propagation change: `test_video_processor_thresholds.py` plus
+  the worker error regression in `test_frame_trace.py`.
 - Decision/weight change: `test_decision_engine.py`,
   `test_strict_weight_matcher.py`, `test_scenario_matrix_contract.py`.
 - Freezer policy change: `test_frame_trace.py`,
@@ -167,6 +175,7 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
 - Session/return change: `test_product_aggregator.py`,
   `test_cross_zone_return.py`, `test_multi_zone_summary.py`.
 - Jetson bootstrap change: `test_runtime_env.py`.
+- Health diagnostics change: `test_fastapi_imports.py`.
 
 ## Related Wiki Pages
 

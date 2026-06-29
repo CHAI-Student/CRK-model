@@ -2,6 +2,7 @@
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -75,6 +76,7 @@ def test_health_route_uses_runtime_settings():
     assert payload["config"]["host"] == "127.0.0.1"
     assert payload["config"]["port"] == 9123
     assert payload["config"]["yolo_model_path"] == "runtime-model.engine"
+    assert set(payload["runtime"]) == {"numpy", "torch_cuda", "tensorrt"}
 
 
 def test_detailed_health_serializes_initialized_dependencies(tmp_path):
@@ -112,6 +114,44 @@ def test_detailed_health_serializes_initialized_dependencies(tmp_path):
     assert payload["dependencies"]["door_session_store"] is True
     assert payload["dependencies"]["yolo_loaded"] is True
     assert "door_session_store_instance" not in payload["dependencies"]
+
+
+def test_detailed_health_runtime_diagnostics_are_best_effort(monkeypatch):
+    from model_service.api.routes import health as health_route
+
+    fake_torch = SimpleNamespace(
+        __version__="2.5.0",
+        cuda=SimpleNamespace(is_available=lambda: True),
+        version=SimpleNamespace(cuda="12.6"),
+    )
+    fake_numpy = SimpleNamespace(__version__="1.26.4")
+
+    def fake_import_module(module_name: str):
+        if module_name == "numpy":
+            return fake_numpy
+        if module_name == "torch":
+            return fake_torch
+        if module_name == "tensorrt":
+            raise ImportError("missing tensorrt")
+        raise AssertionError(module_name)
+
+    monkeypatch.setattr(health_route.importlib, "import_module", fake_import_module)
+
+    diagnostics = health_route._collect_runtime_diagnostics()
+
+    assert diagnostics["numpy"] == {
+        "available": True,
+        "version": "1.26.4",
+        "error": None,
+    }
+    assert diagnostics["torch_cuda"]["torch_available"] is True
+    assert diagnostics["torch_cuda"]["torch_version"] == "2.5.0"
+    assert diagnostics["torch_cuda"]["cuda_available"] is True
+    assert diagnostics["torch_cuda"]["cuda_version"] == "12.6"
+    assert diagnostics["torch_cuda"]["error"] is None
+    assert diagnostics["tensorrt"]["available"] is False
+    assert diagnostics["tensorrt"]["version"] is None
+    assert "ImportError: missing tensorrt" == diagnostics["tensorrt"]["error"]
 
 
 def test_video_processor_source_is_python310_compatible():

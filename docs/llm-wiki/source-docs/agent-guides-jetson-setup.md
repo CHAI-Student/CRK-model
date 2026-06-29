@@ -22,12 +22,20 @@ Use this as the concise Jetson setup and recovery guide.
 - `scripts/jetson_env.sh` restores CUDA, TensorRT, and shared library paths.
 - Recovery order is activation, `source scripts/jetson_env.sh`, CUDA checks,
   then `scripts/install_jetson_torch.sh` if torch is CPU-only.
+- `scripts/convert_engine.sh` is the Jetson-only repo-local TensorRT export
+  helper. It checks `yolo` plus Torch CUDA visibility and writes under this
+  repo's `models/` by default.
+- `/api/health/detailed` exposes best-effort NumPy, Torch CUDA, and TensorRT
+  diagnostics, but does not replace Jetson trigger verification.
+- YAML retention is configured in the app, while `frame_split_*.jsonl` trace
+  retention should be bounded with host log rotation.
 
 ## Related Code
 
 - `scripts/setup_jetson.sh`
 - `scripts/install_jetson_torch.sh`
 - `scripts/jetson_env.sh`
+- `scripts/convert_engine.sh`
 - `services/model/model_service/main.py`
 
 ## Caveats

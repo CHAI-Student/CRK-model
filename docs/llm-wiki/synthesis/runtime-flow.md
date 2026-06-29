@@ -15,6 +15,7 @@ Camera POST /trigger
   -> return-only or balanced-out triggers skip video
   -> TriggerService worker processes chargeable vision work one trigger at a time
   -> VideoProcessor.process_videos_async() decodes top/side AVI streams
+     (fatal extractor/queue/YOLO task failures propagate as errors)
   -> YOLOWrapper detects per processed frame
   -> filters and VotingEnsemble produce vision candidates
   -> ProductDecisionEngine.judge() fuses candidates, delta_weight, active_products
@@ -100,6 +101,8 @@ Return handling is layered:
 - `[VIDEO-ASYNC][LATENCY]`: async video processing totals and stride counts.
 - `[CLOSE][LATENCY]`: close wait behavior and pending trigger counts.
 - Trace JSON and frame traces: detailed per-session diagnostics.
+- Fatal async video failures should appear as trace/session `status=error`;
+  they should not proceed into decision fusion as empty no-detection results.
 
 ## Evidence
 

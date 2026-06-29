@@ -16,6 +16,8 @@ pytest services/model/tests/test_fastapi_imports.py -q
 pytest services/model/tests/test_multi_zone_summary.py -q
 pytest services/model/tests/test_trigger_helpers.py -q
 pytest services/model/tests/test_runtime_env.py -q
+pytest services/model/tests/test_video_processor_thresholds.py -q
+pytest services/model/tests/test_frame_trace.py::test_trigger_service_worker_marks_video_processing_error -q
 ```
 
 If you want to use `uv run`, prefer `--no-sync` once the environment is already installed:
@@ -34,9 +36,11 @@ pytest services/model/tests --cov=services/model/model_service --cov-report=term
 
 | File | Purpose |
 |------|---------|
-| `test_fastapi_imports.py` | import smoke and runtime settings checks |
+| `test_fastapi_imports.py` | import smoke, runtime settings checks, and best-effort health diagnostics |
 | `test_multi_zone_summary.py` | multi-zone close summaries, active snapshot guards, and response contracts |
 | `test_trigger_helpers.py` | loadcell and vote helper logic |
+| `test_video_processor_thresholds.py` | video thresholds, ROI, async frame stride, and async failure propagation |
+| `test_frame_trace.py` | trigger traces, worker lifecycle, and propagated video-error session status |
 | `test_session_store_lifecycle.py` | session overwrite logging lifecycle |
 | `test_product_aggregator.py` | removal, return, and close aggregation behavior |
 | `test_cross_zone_return.py` | cross-zone return repair behavior |

@@ -1,5 +1,6 @@
 """Health check routes."""
 
+import importlib
 import time
 
 from fastapi import APIRouter, Request
@@ -24,6 +25,7 @@ class DetailedHealthResponse(BaseModel):
     status: str = "ok"
     dependencies: dict = Field(default_factory=dict)
     config: dict = Field(default_factory=dict)
+    runtime: dict = Field(default_factory=dict)
     timestamp: float = 0.0
 
 
@@ -32,6 +34,48 @@ def _get_runtime_settings(request: Request) -> Settings:
     if isinstance(runtime_settings, Settings):
         return runtime_settings
     return config
+
+
+def _import_status(module_name: str) -> tuple[object | None, dict]:
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        return None, {
+            "available": False,
+            "version": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return module, {
+        "available": True,
+        "version": str(getattr(module, "__version__", "")) or None,
+        "error": None,
+    }
+
+
+def _collect_runtime_diagnostics() -> dict:
+    _, numpy_status = _import_status("numpy")
+    torch_module, torch_status = _import_status("torch")
+    _, tensorrt_status = _import_status("tensorrt")
+
+    torch_cuda = {
+        "torch_available": torch_status["available"],
+        "torch_version": torch_status["version"],
+        "cuda_available": False,
+        "cuda_version": None,
+        "error": torch_status["error"],
+    }
+    if torch_module is not None:
+        try:
+            torch_cuda["cuda_available"] = bool(torch_module.cuda.is_available())
+            torch_cuda["cuda_version"] = getattr(torch_module.version, "cuda", None)
+        except Exception as exc:
+            torch_cuda["error"] = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "numpy": numpy_status,
+        "torch_cuda": torch_cuda,
+        "tensorrt": tensorrt_status,
+    }
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -76,5 +120,6 @@ async def detailed_health_check(request: Request):
             "port": runtime_settings.port,
             "yolo_model_path": runtime_settings.yolo_model_path,
         },
+        runtime=_collect_runtime_diagnostics(),
         timestamp=time.time(),
     )

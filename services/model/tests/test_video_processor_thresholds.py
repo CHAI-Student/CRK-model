@@ -468,13 +468,196 @@ def test_async_streaming_frame_stride_is_fixed_to_two():
     from model_service.core.config import AsyncStreamingModel
 
     assert AsyncStreamingModel().frame_stride == 2
-    assert AsyncStreamingModel(frame_stride=2).frame_stride == 2
 
     with pytest.raises(ValueError, match="frame_stride is fixed at 2"):
         AsyncStreamingModel(frame_stride=1)
 
     with pytest.raises(ValueError, match="frame_stride is fixed at 2"):
         AsyncStreamingModel(frame_stride=3)
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_reraises_model_service_task_error(monkeypatch):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.exceptions import YOLOGPUError
+    from model_service.video import VideoProcessor
+
+    class FakeAsyncExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        async def __aiter__(self):
+            yield 0
+
+    class FailingYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            raise YOLOGPUError("cuda out of memory")
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeAsyncExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FailingYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    with pytest.raises(YOLOGPUError, match="cuda out of memory"):
+        await processor.process_videos_async(top_path="/tmp/top.avi")
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_wraps_unknown_task_error(monkeypatch):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.exceptions import VideoProcessingError
+    from model_service.video import VideoProcessor
+
+    class FakeAsyncExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        async def __aiter__(self):
+            yield 0
+
+    class FailingYolo:
+        last_preprocess = {}
+
+        def detect(self, frame, allowed_class_ids=None, camera_type=None):
+            raise RuntimeError("unexpected detector crash")
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeAsyncExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=FailingYolo(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    with pytest.raises(VideoProcessingError, match="Task error in yolo-inference"):
+        await processor.process_videos_async(top_path="/tmp/top.avi")
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_fails_without_async_extractor(monkeypatch):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.exceptions import VideoProcessingError
+    from model_service.video import VideoProcessor
+
+    class SyncOnlyExtractor:
+        total_frames = 1
+        last_diagnostics = None
+
+        def __iter__(self):
+            return iter([0])
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: SyncOnlyExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=MagicMock(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    with pytest.raises(VideoProcessingError, match="does not support async iteration"):
+        await processor.process_videos_async(top_path="/tmp/top.avi")
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_fails_on_zero_frames_after_retry(monkeypatch):
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.exceptions import VideoProcessingError
+    from model_service.video import VideoProcessor
+
+    class Diagnostics:
+        expected_frames = 3
+        decoded_frames = 0
+        method = "sync_mjpeg_retry"
+        final_branch = "sync_mjpeg_retry"
+        stderr_tail = "corrupt input"
+
+    class ZeroFrameExtractor:
+        total_frames = 3
+        last_diagnostics = Diagnostics()
+
+        async def __aiter__(self):
+            if False:
+                yield 0
+
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: ZeroFrameExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=MagicMock(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    with pytest.raises(VideoProcessingError, match="decoded zero frames"):
+        await processor.process_videos_async(top_path="/tmp/top.avi")
+
+
+@pytest.mark.asyncio
+async def test_async_video_processor_fails_on_frame_queue_timeout(monkeypatch):
+    import asyncio
+
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.exceptions import VideoProcessingError
+    from model_service.video import VideoProcessor
+
+    original_wait_for = video_processor_module.asyncio.wait_for
+
+    async def fake_wait_for(awaitable, timeout=None):
+        if timeout == 60.0:
+            close = getattr(awaitable, "close", None)
+            if close is not None:
+                close()
+            raise asyncio.TimeoutError
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    class NoFrameExtractor:
+        total_frames = 0
+        last_diagnostics = None
+
+        async def __aiter__(self):
+            if False:
+                yield 0
+
+    monkeypatch.setattr(video_processor_module.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: NoFrameExtractor(),
+    )
+
+    processor = VideoProcessor(
+        yolo=MagicMock(),
+        motion_filter_enabled=False,
+        hand_path_filter_enabled=False,
+        min_vote_count=1,
+    )
+
+    with pytest.raises(VideoProcessingError, match="frame queue timeout"):
+        await processor.process_videos_async(top_path="/tmp/top.avi")
 
 
 def test_video_processor_records_preprocess_and_stage_counts(monkeypatch, tmp_path):

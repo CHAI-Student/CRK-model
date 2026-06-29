@@ -16,6 +16,10 @@ Use this as the first source for the current trigger-inference architecture.
   deduplication, and trace logging.
 - `ProductDecisionEngine.judge()` combines vision candidates, `delta_weight`,
   and live `active_products`.
+- Fatal async video decode/queue/YOLO task failures propagate as
+  `VideoProcessingError` or related model-service exceptions; expected-frame
+  zero-decode after retry must not become a normal no-detection or loadcell-only
+  fallback result.
 - `active_products` from Node is the supported source for strict/loadcell-only
   matching.
 - `stock_qty = 0` is a hard sold-out filter for strict matching.

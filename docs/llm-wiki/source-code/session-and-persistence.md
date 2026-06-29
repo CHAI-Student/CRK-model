@@ -25,7 +25,9 @@ while the door is open.
 - `ProductResult` is the stored product item shape used by routes and sessions.
 - `generate_session_id(zone)` includes microseconds to reduce collisions.
 - Worker errors should propagate status rather than leaving sessions stuck in
-  `processing`.
+  `processing`. Fatal async video errors now reach the worker catch block,
+  which saves `status=error` / `processing_stage=error` and clears pending
+  trigger state.
 
 ## Door Session Layer
 
@@ -152,7 +154,10 @@ while the door is open.
 
 - Door sessions are serialized through `YamlPersistence`.
 - YAML directory and retention are configured by `MODEL__DOOR_SESSION__*`.
-- Startup can recover active sessions; shutdown can clean old YAML files.
+- Startup can recover active sessions; shutdown can clean old YAML files using
+  `MODEL__DOOR_SESSION__YAML_RETENTION_DAYS`.
+- Frame trace JSONL retention is not handled by `YamlPersistence`; deployed
+  hosts should use OS log rotation for `services/model/logs/frame_split_*.jsonl`.
 
 ## Related Wiki Pages
 

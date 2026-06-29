@@ -180,6 +180,10 @@ queued work can be skipped if a later return balances it before video starts.
   judgment, `SessionStore` save, `DoorSession` aggregation, OPS logging, and
   trace finalization are complete. Error paths clear the same session id once
   with status `error`.
+- Fatal async video processing errors propagate out of `VideoProcessor` into
+  the worker. The worker marks the loadcell event and trigger session as
+  `error`, finalizes the trace with `status=error`, notifies
+  `DoorSessionStore`, and does not call the decision engine or add products.
 - Worker lifecycle is started/stopped by FastAPI lifespan.
 - The older inline `TriggerService` loadcell helper implementations were
   removed after being shadowed by the current `core/loadcell_stats.py`

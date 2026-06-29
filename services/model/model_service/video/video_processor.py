@@ -45,6 +45,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from model_service.core.config import config
+from model_service.core.exceptions import ModelServiceError, VideoProcessingError
 from model_service.vision import YOLODetection, YOLOWrapper
 from model_service.vision.hand_path_tracker import HandPathTracker
 
@@ -53,6 +54,39 @@ from .frame_trace import TriggerTraceContext
 from .voting_ensemble import VoteResult, VotingEnsemble
 
 logger = logging.getLogger(__name__)
+
+
+def _async_zero_frame_failure_reason(extractor: object) -> Optional[str]:
+    diagnostics = getattr(extractor, "last_diagnostics", None)
+    if diagnostics is None:
+        return None
+
+    expected_frames = int(getattr(diagnostics, "expected_frames", 0) or 0)
+    decoded_frames = int(getattr(diagnostics, "decoded_frames", 0) or 0)
+    if expected_frames <= 0 or decoded_frames > 0:
+        return None
+
+    method = getattr(diagnostics, "method", None)
+    final_branch = getattr(diagnostics, "final_branch", None)
+    stderr_tail = getattr(diagnostics, "stderr_tail", None)
+    reason = (
+        f"ffmpeg decoded zero frames after async retry "
+        f"(expected_frames={expected_frames}, method={method}, final_branch={final_branch})"
+    )
+    if stderr_tail:
+        reason += f", stderr_tail={stderr_tail!r}"
+    return reason
+
+
+def _raise_async_task_error(task_name: str, exc: BaseException) -> None:
+    error_msg = f"Task error in {task_name}: {type(exc).__name__}: {exc}"
+    logger.error(
+        "[VIDEO-ASYNC] Critical failure during streaming. "
+        f"Propagation triggered: {error_msg}"
+    )
+    if isinstance(exc, ModelServiceError):
+        raise exc
+    raise VideoProcessingError(f"Async video streaming failed: {error_msg}")
 
 
 @dataclass
@@ -2539,13 +2573,13 @@ class VideoProcessor:
             frame_idx = 0
             # ffmpeg 미존재 시 CV2FrameExtractor가 반환될 수 있음(__aiter__ 미지원)
             if not hasattr(extractor, '__aiter__'):
-                logger.error(
+                message = (
                     f"[VIDEO-ASYNC] {camera_type}: async streaming requires ffmpeg "
                     "but extractor does not support async iteration (ffmpeg not available?). "
-                    "Skipping video extraction."
+                    "Video extraction cannot continue safely."
                 )
-                await frame_queue.put((camera_type, -1, None))
-                return
+                logger.error(message)
+                raise VideoProcessingError(message)
 
             try:
                 async for frame in extractor:
@@ -2569,6 +2603,13 @@ class VideoProcessor:
                         top_frame_count += 1
                     else:
                         side_frame_count += 1
+
+                zero_frame_reason = _async_zero_frame_failure_reason(extractor)
+                if zero_frame_reason is not None:
+                    raise VideoProcessingError(
+                        f"{camera_type} video extraction failed: {zero_frame_reason}",
+                        video_path=path,
+                    )
 
             except asyncio.CancelledError:
                 logger.warning(f"[VIDEO-ASYNC] {camera_type} extraction cancelled at frame {frame_idx}")
@@ -2601,7 +2642,9 @@ class VideoProcessor:
                     )
                 except asyncio.TimeoutError:
                     logger.error("[VIDEO-ASYNC] Frame queue timeout")
-                    break
+                    raise VideoProcessingError(
+                        "Async video frame queue timeout before all extractors finished"
+                    )
 
                 # EOF marker
                 if frame is None:
@@ -2910,7 +2953,7 @@ class VideoProcessor:
         pending: set[asyncio.Task[None]] = set(tasks)
 
         try:
-            first_error: Exception | None = None
+            first_error: BaseException | None = None
 
             while pending and first_error is None:
                 current_done, pending = await asyncio.wait(
@@ -2953,6 +2996,7 @@ class VideoProcessor:
                 f"[VIDEO-ASYNC] Tasks cancelled: {cancelled_count} task(s), "
                 f"processed frames: top={top_frame_count}, side={side_frame_count}"
             )
+            raise
         else:
             cancelled_names: list[str] = []
             task_errors: list[tuple[str, BaseException]] = []
@@ -2974,6 +3018,10 @@ class VideoProcessor:
 
             for task_name, exc in task_errors:
                 logger.error(f"[VIDEO-ASYNC] Task error in {task_name}: {type(exc).__name__}: {exc}")
+
+            if task_errors:
+                primary_task_name, primary_exc = task_errors[0]
+                _raise_async_task_error(primary_task_name, primary_exc)
 
         # Frame counts 설정
         top_ensemble.set_frame_count(top_frame_count)

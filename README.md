@@ -60,6 +60,10 @@ curl http://localhost:8002/api/health/detailed
 ```
 
 `/api/health` is ready only when `model` is `HEALTHY`, `yolo_loaded` is `true`, and `status` is `ok`.
+`/api/health/detailed` additionally reports best-effort runtime diagnostics for
+NumPy, Torch CUDA visibility, and TensorRT import availability. Treat those as
+operator diagnostics; the authoritative runtime proof is still a Jetson trigger
+run with the real `.engine` file and AVI payloads.
 
 ## Live Engine Preview
 
@@ -143,6 +147,10 @@ uv run --no-sync pytest services/model/tests -q
 - The model does not run inference on the AVI blob directly. It splits the AVI into frame images and runs YOLO per frame.
 - Every trigger now writes a persistent trace entry to `services/model/logs/frame_split_YYYYMMDD.jsonl`.
 - Each trace entry records `processing_mode="avi_to_frames"`, `inference_unit="image_frame"`, trigger status, video paths, and per-camera frame counts.
+- Long-running Jetson deployments should pair the app-level trace files with an
+  OS-level logrotate rule for `services/model/logs/frame_split_*.jsonl`. The
+  model service keeps YAML session retention configurable, but JSONL trace file
+  rotation is intentionally handled by the host OS.
 - Optional sample frame export is off by default. Enable it with:
 
 ```bash
@@ -163,6 +171,22 @@ MODEL__TRACE__SAMPLE_EXPORT_DIR=logs/frame_samples
 - If `import torch` fails with `libcudss.so`, install `nvidia-cudss-cu12` after the Jetson torch wheel is in place.
 - Avoid plain `uv run ...` for day-to-day execution if the environment is already installed. A sync step can unexpectedly reinstall or shadow packages in `.venv`.
 - Avoid `uv sync` unless you intentionally want uv to reconcile the environment against the lock file.
+
+## TensorRT Engine Export
+
+This Python repo owns direct `.engine` runtime artifacts for the legacy/reference
+TensorRT service. Use the repo-local helper on Jetson after activating the
+system-site-packages venv:
+
+```bash
+source .venv/bin/activate
+PT_FILE=0204_morning.pt scripts/convert_engine.sh
+```
+
+The helper defaults to `models/` in this repo, verifies that `yolo` is on
+`PATH`, and fails fast if the active Torch build cannot see CUDA. Override
+`PT_FILE`, `IMGSZ`, `MODELS_DIR`, `PROJECT_ROOT`, or `PYTHON_BIN` only when the
+deployment layout intentionally differs.
 
 ## PT to ONNX Export Role
 

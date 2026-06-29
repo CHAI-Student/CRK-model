@@ -40,6 +40,13 @@ shape without rereading every long historical document.
 - Frame trace image export is opt-in. `.env.example` keeps
   `MODEL__TRACE__SAMPLE_EXPORT_ENABLED=false` so replacing a live `.env` does
   not add sample-frame disk writes on Jetson.
+- Fatal async video processing failures are not valid no-detection outcomes.
+  `process_videos_async()` must propagate extractor, queue, and YOLO task
+  errors as model-service exceptions so `TriggerService` records
+  `status=error` instead of silently returning empty candidates.
+- `/api/health/detailed` includes best-effort diagnostics for NumPy, Torch CUDA
+  visibility, and TensorRT import availability. These are operator clues, not
+  local-PC production proof.
 - The model service receives Camera-packaged `/trigger` payloads and Node
   `/api/judge/multi-zone` calls. It does not call IO Board or Payment directly.
 - `active_products` from Node is the runtime product-catalog source by
@@ -229,6 +236,13 @@ shape without rereading every long historical document.
   these skipped events, surfaced at close through
   `decisionSummary.diagnosticZoneLines` and
   `decisionSummary.zones[*].noChargeDiagnostics`.
+- Completed door-session YAML retention is controlled by
+  `MODEL__DOOR_SESSION__YAML_RETENTION_DAYS`; deployed Jetsons should also use
+  host log rotation for `services/model/logs/frame_split_*.jsonl`.
+- `scripts/convert_engine.sh` is the repo-local TensorRT `.engine` export
+  helper. It defaults to this repo's `models/`, checks for `yolo`, and fails if
+  the active Torch build cannot see CUDA. ONNX export ownership remains in
+  `CRK-model-go`.
 - No-vision active-only forced fallback is not part of the default
   `vision_first` identity policy. The older low-weight noise guard still
   applies when `MODEL__WEIGHT__IDENTITY_POLICY=weight_aware` is explicitly
@@ -304,6 +318,12 @@ shape without rereading every long historical document.
   timing contract across Edge, Camera, and Model.
 - [Trigger inference recovery notes](source-docs/trigger-inference-recovery-notes-2026-03-31.md):
   current trigger hardening and return recovery behavior.
+
+### External Review Inputs
+
+- [CRK feedback 2026-06-29](source-docs/crk-feedback-2026-06-29.md):
+  external review note covering CRK-model operational hardening and async video
+  failure propagation.
 
 ### Historical Planning And Risk Docs
 

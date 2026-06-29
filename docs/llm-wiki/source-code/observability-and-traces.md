@@ -31,6 +31,9 @@ Important patterns include:
   paths. Cabinet runs also log `cabinet_type`, `loadcell_scope=zone`,
   `loadcell_source=loadcells`, `requested_zone`, and effective channel count.
 - `[OPS][FRAMES]`: zone and video paths for frame processing.
+- `[VIDEO-ASYNC]` fatal extractor, frame queue, and YOLO task errors propagate
+  to the trigger worker and should end with trace/session `status=error`, not
+  `status=complete` with empty candidates.
 - `[OPS][CANDIDATES]`: ranked candidates, weights, confidence, camera flags,
   source.
 - `[OPS][RESULT]`: final status, products, total price.
@@ -110,10 +113,19 @@ Trace JSONL/detail files are raw operational evidence. The current wiki policy
 is to describe the trace schema and not ingest untracked trace JSON files unless
 the user explicitly asks.
 
+The application writes `services/model/logs/frame_split_*.jsonl`; deployed
+Jetsons should bound those files with host logrotate or an equivalent OS-level
+rotation policy.
+
 ## Debugging Heuristic
 
 - If ffprobe reports frames but decoded frames are zero, inspect extractor
-  diagnostics and retry branch.
+  diagnostics and retry branch. After the async failure-propagation fix, this
+  should become a video processing error instead of a normal no-detection
+  result when frames were expected and all decode retries still produced zero.
+- If a trace/session is `status=error` with a `VideoProcessingError`, inspect
+  `[VIDEO-ASYNC]` task names such as `top-extractor`, `side-extractor`, and
+  `yolo-inference` before treating the event as a product absence.
 - If `queue_wait_ms` is high, the serial worker is the bottleneck.
 - If `video_ms` is high and `yolo_count` is high, frame stride may help.
 - If model result is ready but close is late, inspect Node polling and CLOSE

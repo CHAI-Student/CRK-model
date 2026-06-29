@@ -181,6 +181,18 @@ print(model.names)
 PY
 ```
 
+Export a TensorRT engine from a repo-local `.pt` file only on Jetson:
+
+```bash
+source .venv/bin/activate
+PT_FILE=0204_morning.pt scripts/convert_engine.sh
+```
+
+`scripts/convert_engine.sh` defaults to this repo's `models/` directory, checks
+that the `yolo` CLI exists, and fails if `torch.version.cuda` or
+`torch.cuda.is_available()` shows a CPU-only Torch environment. Keep ONNX export
+ownership in `CRK-model-go`; this Python repo owns direct `.engine` artifacts.
+
 ## Health Checks
 
 ```bash
@@ -188,7 +200,18 @@ curl http://localhost:8002/api/health
 curl http://localhost:8002/api/health/detailed
 ```
 
-`/api/health/detailed` now reports the runtime host, port, and model path from the app settings, not stale import-time defaults.
+`/api/health/detailed` now reports the runtime host, port, model path, NumPy
+version, Torch CUDA availability/version, and TensorRT import availability. Use
+these fields as diagnostics; the production proof remains a real Jetson trigger
+run with the deployed `.engine` and AVI payloads.
+
+## Long-Running Logs
+
+Completed YAML door sessions are cleaned according to
+`MODEL__DOOR_SESSION__YAML_RETENTION_DAYS`. Frame trace JSONL files under
+`services/model/logs/frame_split_*.jsonl` should also be covered by an OS-level
+logrotate rule on deployed Jetsons so six-month operation cannot accumulate
+unbounded trace logs.
 
 ## Systemd Example
 

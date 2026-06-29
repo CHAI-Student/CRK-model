@@ -43,6 +43,13 @@ node --test server/test/payments-order.test.js
 - The full local model-service suite recorded `351 passed` on 2026-06-04.
   Re-run the suite instead of relying on the historical count.
 - Unit tests should not require YOLO, TensorRT, or GPU startup.
+- Async video processing changes should include
+  `test_video_processor_thresholds.py`; fatal extractor, queue, or YOLO task
+  failures must propagate as errors instead of becoming empty no-detection
+  results.
+- Health route changes should include `test_fastapi_imports.py`; runtime
+  dependency diagnostics must stay best-effort so tests do not require
+  Torch/TensorRT on the development host.
 - `test_runtime_env.py` covers the Jetson-specific startup bootstrap and should
   be rerun whenever `main.py`, `runtime_env.py`, or the Jetson startup scripts
   change.

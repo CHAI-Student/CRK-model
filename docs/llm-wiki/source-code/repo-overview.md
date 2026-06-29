@@ -25,6 +25,9 @@ vending stack. The README now frames it as the legacy/reference TensorRT
   authoritative runtime verification.
 - This Python repo can still provide the Python/Ultralytics environment used by
   `CRK-model-go` when exporting `.pt` to FP16 ONNX.
+- Direct TensorRT `.engine` export for this Python service uses
+  `scripts/convert_engine.sh`, which defaults to this repo's `models/` and
+  fails fast if Torch cannot see CUDA.
 
 ## Package And Dependency Shape
 
@@ -63,6 +66,9 @@ Important groups:
 - Door session: enabled flag, session timeout, close debounce waits, YAML
   persistence.
 - Trace: sample export enablement, sample count, sample export directory.
+- Health: `/api/health/detailed` reports runtime dependency diagnostics for
+  NumPy, Torch CUDA, and TensorRT without making those imports hard test
+  requirements on the development host.
 
 ## Important Freshness Notes
 
@@ -76,6 +82,9 @@ Important groups:
 - README says new clone-based operation should use `CRK-model-go`; this wiki is
   still scoped to the Python `CRK-model` repo unless a task explicitly asks for
   sibling repo ingestion.
+- README now records host log rotation as the retention layer for
+  `services/model/logs/frame_split_*.jsonl`; app YAML retention does not clean
+  those JSONL trace files.
 
 ## Related Wiki Pages
 

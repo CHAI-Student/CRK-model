@@ -70,6 +70,29 @@ If `torch.version.cuda` is `None`, reinstall the Jetson torch wheel:
 ./scripts/install_jetson_torch.sh
 ```
 
+## Engine Export
+
+Use the repo-local TensorRT helper only on Jetson:
+
+```bash
+source .venv/bin/activate
+PT_FILE=0204_morning.pt scripts/convert_engine.sh
+```
+
+The helper defaults to this repo's `models/`, checks the `yolo` CLI, and fails
+when the active Torch build cannot see CUDA. `.engine` artifacts are owned by
+this Python TensorRT service; ONNX export remains a `CRK-model-go` concern.
+
+## Health And Retention
+
+- `/api/health/detailed` includes best-effort NumPy, Torch CUDA, and TensorRT
+  import diagnostics. Do not treat local PC health output as Jetson proof.
+- YAML door-session retention is controlled by
+  `MODEL__DOOR_SESSION__YAML_RETENTION_DAYS`.
+- Deployed Jetsons should use OS log rotation for
+  `services/model/logs/frame_split_*.jsonl`; the application writes the trace
+  file, but host logrotate should bound long-running disk use.
+
 ## Compatibility Rules
 
 - Keep NumPy on `1.x`.

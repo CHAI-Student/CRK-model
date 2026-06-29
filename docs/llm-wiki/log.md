@@ -1,5 +1,16 @@
 # LLM Wiki Log
 
+## [2026-06-29] maintenance | CRK async video failure propagation and ops hardening
+
+- Ingested the CRK 2026-06-29 feedback note as an external review source
+  summary and scoped implementation to CRK-model only.
+- Documented that fatal async video extractor, frame queue, zero-frame retry,
+  and YOLO task failures now propagate as model-service exceptions instead of
+  becoming empty no-detection results.
+- Recorded `/api/health/detailed` runtime diagnostics for NumPy, Torch CUDA,
+  and TensorRT, the repo-local TensorRT `.engine` export helper, and host
+  logrotate responsibility for `frame_split_*.jsonl` trace files.
+
 ## [2026-06-29] maintenance | freezer deferred candidate repair and filter visibility
 
 - Documented that freezer strict handled-candidate filtering requires both

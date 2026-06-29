@@ -45,6 +45,15 @@ polling surface.
 - Can skip reliable low-weight events, use vision-only fallback for uncertain
   low-weight video, or enqueue normal worker processing.
 
+## Health Diagnostics
+
+- `/api/health` remains the coarse readiness endpoint.
+- `/api/health/detailed` reports initialized dependency flags, runtime host,
+  port, model path, and best-effort import/runtime diagnostics for NumPy, Torch
+  CUDA visibility, and TensorRT.
+- Missing Torch/TensorRT on a local development host should appear as
+  diagnostic `error` strings rather than failing the health route import.
+
 ## `/api/judge/multi-zone` Behavior
 
 - Accepts object-form or array-form products.

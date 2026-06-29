@@ -118,6 +118,9 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   files during inference and can add Jetson disk I/O.
 - `MODEL__DOOR_SESSION__CLOSE_INITIAL_WAIT_SECONDS=3.0`
 - `MODEL__DOOR_SESSION__CLOSE_SUBSEQUENT_WAIT_SECONDS=1.0`
+- `MODEL__DOOR_SESSION__YAML_RETENTION_DAYS=7` controls completed
+  door-session YAML cleanup on shutdown. Use host log rotation separately for
+  frame trace JSONL files.
 - `MODEL__VIDEO__READY_MAX_WAIT_SECONDS=2.0`
 - `MODEL__VIDEO__READY_POLL_INTERVAL_SECONDS=0.2`
 - `MODEL__VISION__TOP_CROP_POLICY=left`,

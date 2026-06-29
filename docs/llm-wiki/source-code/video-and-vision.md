@@ -23,7 +23,8 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - It tracks expected frames, decoded frames, bytes read, partial reads,
   decoder, ffprobe attempts, ffprobe wait time, return code, and stderr tail.
 - If async decode returns zero frames while ffprobe reported frames, sync/raw
-  retry paths can recover before the pipeline gives up.
+  retry paths can recover; if retries still decode zero expected frames, the
+  async processor raises `VideoProcessingError`.
 - `CV2FrameExtractor` is available as a fallback path.
 
 ## VideoProcessor
@@ -32,6 +33,17 @@ selected frames, accumulates per-camera evidence, and returns ranked
   skipped frames, frame stride, raw detections, filtered detections, YOLO count,
   YOLO total/average time, ROI/motion/hand-path filter counts.
 - `process_videos_async()` is the main latency-sensitive path.
+- Fatal async streaming failures propagate as model-service exceptions instead
+  of returning an empty no-detection result. This includes missing async
+  extractor support for a provided video path, frame queue timeout before all
+  extractors finish, zero decoded frames after retry when frames were expected,
+  and YOLO/task exceptions.
+- Existing model-service exceptions such as `YOLOGPUError` and
+  `VideoProcessingError` are re-raised; unknown task failures are wrapped in
+  `VideoProcessingError` with the task name so the trigger worker can mark the
+  session as `error`.
+- A successfully decoded video with no product detections still returns normal
+  empty candidates; the fail-closed rule is only for processing failure.
 - The async frame queue type annotation avoids importing or referencing a
   local `np` symbol in `video_processor.py`; frame payload behavior is
   unchanged.

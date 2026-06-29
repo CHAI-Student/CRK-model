@@ -852,6 +852,67 @@ async def test_trigger_service_worker_complete_writes_trace_entry(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_trigger_service_worker_marks_video_processing_error(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    import model_service.service.trigger_service as trigger_service_module
+    from model_service.core.exceptions import VideoProcessingError
+    from model_service.service.trigger_service import TriggerService
+    from model_service.session import DoorSessionStore
+
+    trace_factory = make_trace_factory(tmp_path)
+    monkeypatch.setattr(trigger_service_module, "TriggerTraceContext", trace_factory)
+    monkeypatch.setattr(
+        trigger_service_module,
+        "generate_session_id",
+        lambda zone: "worker-error-session",
+    )
+    monkeypatch.setattr(trigger_service_module.config.async_streaming, "enabled", True)
+
+    class FailingVideoProcessor:
+        async def process_videos_async(self, **kwargs):
+            raise VideoProcessingError("async video decode failed")
+
+    engine = MagicMock()
+    door_store = DoorSessionStore(yaml_dir=str(tmp_path / "sessions"))
+    try:
+        door_store.get_or_start_global_session()
+        service = TriggerService(
+            video_processor=FailingVideoProcessor(),
+            engine=engine,
+            session_store=session_store,
+            door_session_store=door_store,
+        )
+        await service.start_worker()
+
+        video_path = tmp_path / "top.avi"
+        video_path.write_bytes(b"avi")
+        output = await service.enqueue_trigger(create_input_for_delta(video_path, -365.0))
+        assert output.status == "queued"
+
+        await asyncio.wait_for(service._queue.join(), timeout=1.0)
+        await service.stop_worker()
+
+        session_data = session_store.get("worker-error-session")
+        assert session_data is not None
+        assert session_data.status == "error"
+        assert session_data.processing_stage == "error"
+        assert "async video decode failed" in session_data.processing_stage_detail
+        assert door_store.get_pending_trigger_snapshot()["pendingTriggerCount"] == 0
+        engine.judge.assert_not_called()
+
+        entries = read_trace_entries(tmp_path / "logs")
+        assert entries[0]["session_id"] == "worker-error-session"
+        assert entries[0]["status"] == "error"
+        assert "async video decode failed" in entries[0]["error"]
+    finally:
+        await service.stop_worker()
+        door_store.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_trigger_service_waits_before_queue_on_unstable_removal_tail(
     monkeypatch,
     tmp_path,

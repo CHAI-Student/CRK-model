@@ -12,6 +12,8 @@ Use this for the public model API surface and response shapes.
 - Base URL is `http://<host>:8002`.
 - Health endpoints:
   `GET /api/health` and `GET /api/health/detailed`.
+- `/api/health/detailed` includes best-effort `runtime` diagnostics for NumPy,
+  Torch CUDA, and TensorRT import/version state.
 - Trigger endpoint:
   `POST /trigger` accepts `zone`, `loadcells`, and `videos.top/side`, and can
   return a queued session id and door-session id.

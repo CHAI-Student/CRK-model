@@ -14,6 +14,12 @@ Use this to choose local verification commands and focused regression suites.
 - Acceptable uv fallback:
   `uv run --no-sync pytest services/model/tests -q`.
 - Unit tests should not require YOLO, TensorRT, or GPU startup.
+- Async video processing changes should include
+  `test_video_processor_thresholds.py`; fatal extractor, queue, or YOLO task
+  errors must propagate instead of becoming empty no-detection results.
+- Health route changes should include `test_fastapi_imports.py`; runtime
+  dependency diagnostics are best-effort and must not require Torch/TensorRT on
+  the development host.
 - `test_runtime_env.py` covers Jetson startup bootstrap and should be rerun
   when `main.py`, `runtime_env.py`, or Jetson startup scripts change.
 - Trigger inference changes should rerun decision engine and return-recovery
@@ -27,6 +33,8 @@ Use this to choose local verification commands and focused regression suites.
 
 - `services/model/tests/`
 - `services/model/tests/test_runtime_env.py`
+- `services/model/tests/test_fastapi_imports.py`
+- `services/model/tests/test_video_processor_thresholds.py`
 - `services/model/tests/test_trigger_pipeline_regressions.py`
 - `services/model/tests/test_decision_engine.py`
 - `services/model/tests/test_product_aggregator.py`

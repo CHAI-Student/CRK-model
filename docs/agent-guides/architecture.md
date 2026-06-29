@@ -64,8 +64,10 @@ If strict matching is enabled and fails:
 - `video/frame_extractor.py` no longer treats a short stdout read as EOF.
   Frames are assembled only after the full frame payload is received.
 - If `ffprobe` reports frames but async decode returns `0`, the extractor logs
-  diagnostics and retries once through the sync/raw decode path before the
-  pipeline falls back to `loadcell_only_no_vision`.
+  diagnostics and retries through sync/raw decode paths. If retries still
+  decode zero expected frames, `process_videos_async()` propagates a
+  `VideoProcessingError`; this must not become a normal no-detection or
+  loadcell-only fallback result.
 - The extractor diagnostics now include:
   `expected_frames`, `decoded_frames`, `bytes_read`, `partial_reads`,
   `stderr_tail`, and `final_branch`.

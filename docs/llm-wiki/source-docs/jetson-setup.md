@@ -21,6 +21,13 @@ Use this for full Jetson Orin Nano setup, verification, and troubleshooting.
 - Keep NumPy on `1.x`.
 - Health checks are useful on Jetson after setup, but local PC health checks do
   not prove production readiness.
+- `/api/health/detailed` reports runtime host/port/model path plus NumPy,
+  Torch CUDA, and TensorRT diagnostics.
+- `scripts/convert_engine.sh` exports repo-local TensorRT `.engine` files from
+  `.pt` only on Jetson, after checking `yolo` and CUDA-enabled Torch.
+- Completed YAML retention is app-configured; `frame_split_*.jsonl` trace logs
+  need host logrotate or equivalent OS-level rotation for long-running
+  deployment.
 - Troubleshooting covers DNS failures, CPU-only torch, missing CUDA library
   paths, missing TensorRT, NumPy 2.x, YOLO model load failures, and unwanted uv
   sync.
@@ -30,6 +37,7 @@ Use this for full Jetson Orin Nano setup, verification, and troubleshooting.
 - `scripts/setup_jetson.sh`
 - `scripts/install_jetson_torch.sh`
 - `scripts/jetson_env.sh`
+- `scripts/convert_engine.sh`
 - `services/model/model_service/main.py`
 - `services/model/model_service/core/config.py`
 

@@ -45,11 +45,32 @@ Example response:
     "port": 8002,
     "yolo_model_path": "models/0204_morning.engine"
   },
+  "runtime": {
+    "numpy": {
+      "available": true,
+      "version": "1.26.4",
+      "error": null
+    },
+    "torch_cuda": {
+      "torch_available": true,
+      "torch_version": "2.5.0",
+      "cuda_available": true,
+      "cuda_version": "12.6",
+      "error": null
+    },
+    "tensorrt": {
+      "available": true,
+      "version": "10.x",
+      "error": null
+    }
+  },
   "timestamp": 1741500000.0
 }
 ```
 
 `config` now reflects the runtime app settings, not stale import-time defaults.
+`runtime` is best-effort diagnostic data; missing optional imports are reported
+inside the block instead of making the health route fail.
 
 ## Trigger
 
