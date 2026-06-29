@@ -490,21 +490,82 @@ def _record_raw_and_filter_handled_candidates(
     product_weights: Optional[dict[int, float]],
     trace_context: Optional[TriggerTraceContext],
     log_prefix: str,
+    zone: Optional[int] = None,
 ) -> List[Any]:
     from model_service.video import VideoProcessor
 
+    raw_count = len(vote_results or [])
     if trace_context is not None:
         trace_context.record_raw_vision_candidates(
             vote_results,
             product_weights or {},
         )
-    return VideoProcessor.filter_freezer_handled_candidates(
+    filtered = VideoProcessor.filter_freezer_handled_candidates(
         vote_results,
         delta_weight=delta_weight,
         product_weights=product_weights or {},
         trace_context=trace_context,
         log_prefix=log_prefix,
     )
+    _log_freezer_candidate_filter_ops(
+        zone=zone,
+        raw_count=raw_count,
+        handled_count=len(filtered),
+        delta_weight=delta_weight,
+        trace_context=trace_context,
+    )
+    return filtered
+
+
+def _log_freezer_candidate_filter_ops(
+    *,
+    zone: Optional[int],
+    raw_count: int,
+    handled_count: int,
+    delta_weight: Optional[float],
+    trace_context: Optional[TriggerTraceContext],
+) -> None:
+    if zone is None or str(config.machine.cabinet_type).lower() != "freezer":
+        return
+    diagnostics = {}
+    if trace_context is not None:
+        diagnostics = dict(
+            (getattr(trace_context, "weight_diagnostics", {}) or {}).get(
+                "freezer_candidate_filter",
+                {},
+            )
+        )
+    camera_layout = str(config.vision.camera_layout).lower()
+    enabled = diagnostics.get(
+        "freezer_handled_filter_enabled",
+        camera_layout == "dual_top_proxy"
+        and delta_weight is not None
+        and float(delta_weight) < 0.0,
+    )
+    reason = diagnostics.get("reason", "not_recorded")
+    ops_logger.info(
+        "[OPS][FREEZER-CANDIDATE-FILTER] zone=%s camera_layout=%s "
+        "enabled=%s raw=%s handled=%s reason=%s top_k=%s "
+        "freezer_min_votes=%s freezer_min_ratio=%.3f "
+        "freezer_motion_min_px=%.1f freezer_exit_votes=%s",
+        zone,
+        camera_layout,
+        enabled,
+        diagnostics.get("raw_candidate_count", raw_count),
+        diagnostics.get("handled_candidate_count", handled_count),
+        reason,
+        int(config.vision.top_k),
+        int(config.vision.freezer_min_vote_count),
+        float(config.vision.freezer_min_vote_ratio),
+        float(config.vision.freezer_motion_min_displacement_px),
+        int(config.vision.freezer_min_exit_path_votes),
+    )
+    if camera_layout != "dual_top_proxy":
+        ops_logger.warning(
+            "[OPS][CONFIG] cabinet_type=freezer camera_layout=%s "
+            "expected=dual_top_proxy freezer_candidate_filter=disabled",
+            camera_layout,
+        )
 
 
 def _loadcell_payload_issue_reason(payload_diagnostics: Optional[dict]) -> Optional[str]:
@@ -730,6 +791,7 @@ async def trigger_judgment(
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
             f"analysis_reason={delta_analysis.reason} "
             f"cabinet_type={payload_diagnostics['cabinet_type']} "
+            f"camera_layout={config.vision.camera_layout} "
             f"loadcell_scope={payload_diagnostics['loadcell_scope']} "
             f"loadcell_source={payload_diagnostics['loadcell_source']} "
             f"effective_channels={payload_diagnostics['effective_channel_count']} "
@@ -802,6 +864,7 @@ async def trigger_judgment(
                     product_weights=product_weights,
                     trace_context=trace_context,
                     log_prefix="TRIGGER-LOW-WEIGHT",
+                    zone=request.zone,
                 )
                 stats = getattr(processing_result, "stats", None)
                 if stats is not None:
@@ -1030,6 +1093,7 @@ async def trigger_judgment(
             product_weights=product_weights,
             trace_context=trace_context,
             log_prefix="TRIGGER",
+            zone=request.zone,
         )
         stats = processing_result.stats
         trace_context.record_video_stats(stats)

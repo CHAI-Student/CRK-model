@@ -82,10 +82,20 @@ selected frames, accumulates per-camera evidence, and returns ranked
   the freezer motion floor, and freezer vote thresholds. Threshold rescue and
   ROI rescue are disabled for freezer candidates so only strong moving
   lower-half evidence reaches the decision engine.
+- `MODEL__MACHINE__CABINET_TYPE=freezer` alone is not enough to enable freezer
+  strict candidate narrowing. Dual-top freezer deployments must also set
+  `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`; otherwise the freezer handled
+  filter records `disabled_camera_layout` and OPS emits a config warning.
 - After video processing, freezer dual-top removals split raw vision top-K from
   handled candidates. The raw list is kept for trace review, while the handled
   list is narrowed to the likely picked item for single removal segments before
   OPS logging and engine judgment.
+- Freezer trigger traces now expose `camera_layout`, raw candidate count,
+  handled candidate count, freezer filter reason, and the key freezer vote,
+  motion, ROI, exit-path, and multi-candidate thresholds. OPS also writes a
+  `[FREEZER-CANDIDATE-FILTER]` line so field logs can show whether extra
+  candidates came from disabled layout, multi passthrough, or true handled
+  output.
 - Side ROI filtering protects against side-camera noise outside the useful
   left-side region with hard `center_x <= side_roi_x_max`.
 - The side ROI default is hard `center_x <= 400` plus a conditional

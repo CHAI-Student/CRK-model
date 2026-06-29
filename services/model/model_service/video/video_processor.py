@@ -656,6 +656,69 @@ class VideoProcessor:
             and float(delta_weight) < 0.0
         )
 
+    @classmethod
+    def _freezer_candidate_filter_config_payload(
+        cls,
+        *,
+        delta_weight: Optional[float],
+        raw_candidate_count: int,
+        handled_candidate_count: int,
+    ) -> dict[str, Any]:
+        target_weight: Optional[float]
+        try:
+            target_weight = (
+                round(abs(float(delta_weight)), 1)
+                if delta_weight is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            target_weight = None
+        return {
+            "cabinet_type": str(config.machine.cabinet_type).lower(),
+            "camera_layout": str(config.vision.camera_layout).lower(),
+            "freezer_handled_filter_enabled": cls._freezer_handled_filter_enabled(
+                delta_weight
+            ),
+            "raw_candidate_count": int(raw_candidate_count),
+            "handled_candidate_count": int(handled_candidate_count),
+            "target_weight": target_weight,
+            "top_k": int(config.vision.top_k),
+            "freezer_min_vote_ratio": float(config.vision.freezer_min_vote_ratio),
+            "freezer_min_vote_count": int(config.vision.freezer_min_vote_count),
+            "freezer_motion_min_displacement_px": float(
+                config.vision.freezer_motion_min_displacement_px
+            ),
+            "freezer_lower_roi_y_split": float(config.vision.freezer_lower_roi_y_split),
+            "freezer_min_exit_path_votes": int(config.vision.freezer_min_exit_path_votes),
+            "freezer_vision_multi_without_weight_enabled": bool(
+                config.weight.freezer_vision_multi_without_weight_enabled
+            ),
+            "freezer_multi_min_confidence": float(
+                config.weight.freezer_multi_min_confidence
+            ),
+        }
+
+    @classmethod
+    def _freezer_candidate_filter_passthrough_reason(
+        cls,
+        *,
+        delta_weight: Optional[float],
+        raw_candidate_count: int,
+        has_stage_evidence: bool,
+    ) -> str:
+        if str(config.vision.camera_layout).lower() != "dual_top_proxy":
+            return "disabled_camera_layout"
+        if delta_weight is None:
+            return "missing_delta_weight"
+        try:
+            if float(delta_weight) >= 0.0:
+                return "non_removal_delta"
+        except (TypeError, ValueError):
+            return "invalid_delta_weight"
+        if raw_candidate_count <= 1 and not has_stage_evidence:
+            return "single_candidate_passthrough"
+        return "filter_disabled"
+
     @staticmethod
     def _freezer_trace_has_multi_item_evidence(
         trace_context: Optional[TriggerTraceContext],
@@ -1011,6 +1074,31 @@ class VideoProcessor:
         if not cls._freezer_handled_filter_enabled(delta_weight) or (
             len(votes) <= 1 and not has_stage_evidence
         ):
+            if cls._is_freezer_mode():
+                reason = cls._freezer_candidate_filter_passthrough_reason(
+                    delta_weight=delta_weight,
+                    raw_candidate_count=len(votes),
+                    has_stage_evidence=has_stage_evidence,
+                )
+                cls._record_freezer_candidate_filter_diagnostics(
+                    trace_context,
+                    {
+                        **cls._freezer_candidate_filter_config_payload(
+                            delta_weight=delta_weight,
+                            raw_candidate_count=len(votes),
+                            handled_candidate_count=len(votes),
+                        ),
+                        "accepted": False,
+                        "reason": reason,
+                    },
+                )
+                if reason == "disabled_camera_layout":
+                    logger.warning(
+                        "[%s][FREEZER-CANDIDATE-FILTER] disabled "
+                        "cabinet_type=freezer camera_layout=%s expected=dual_top_proxy",
+                        log_prefix,
+                        config.vision.camera_layout,
+                    )
             return votes
 
         target_weight = abs(float(delta_weight))
@@ -1018,11 +1106,13 @@ class VideoProcessor:
             cls._record_freezer_candidate_filter_diagnostics(
                 trace_context,
                 {
+                    **cls._freezer_candidate_filter_config_payload(
+                        delta_weight=delta_weight,
+                        raw_candidate_count=len(votes),
+                        handled_candidate_count=len(votes),
+                    ),
                     "accepted": False,
                     "reason": "multi_item_trace_evidence_passthrough",
-                    "raw_candidate_count": len(votes),
-                    "handled_candidate_count": len(votes),
-                    "target_weight": round(target_weight, 1),
                 },
             )
             return votes
@@ -1175,12 +1265,14 @@ class VideoProcessor:
                     for item in selected_items
                 ]
                 diagnostics = {
+                    **cls._freezer_candidate_filter_config_payload(
+                        delta_weight=delta_weight,
+                        raw_candidate_count=len(votes),
+                        handled_candidate_count=len(selected_votes),
+                    ),
                     "accepted": False,
                     "reason": "freezer_multi_kind_vision_passthrough",
-                    "raw_candidate_count": len(votes),
                     "stage_only_candidate_count": len(stage_only_votes),
-                    "handled_candidate_count": len(selected_votes),
-                    "target_weight": round(target_weight, 1),
                     "minFreezerExitPathVotes": min_exit_path_votes,
                     "multiMinConfidence": round(multi_min_confidence, 4),
                     "selectedClassIds": [
@@ -1269,12 +1361,14 @@ class VideoProcessor:
             and int(item["freezer_exit_path_votes"]) >= min_exit_path_votes
         ]
         diagnostics = {
+            **cls._freezer_candidate_filter_config_payload(
+                delta_weight=delta_weight,
+                raw_candidate_count=len(votes),
+                handled_candidate_count=1,
+            ),
             "accepted": True,
             "reason": reason,
-            "raw_candidate_count": len(votes),
             "stage_only_candidate_count": len(stage_only_votes),
-            "handled_candidate_count": 1,
-            "target_weight": round(target_weight, 1),
             "confidence_band": round(confidence_band, 4),
             "minFreezerExitPathVotes": min_exit_path_votes,
             "strictResidualLimit": round(strict_residual_limit, 1),

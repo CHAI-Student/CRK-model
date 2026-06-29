@@ -58,7 +58,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   return-only handling, balanced queued-removal cancellation, regular
   motion-filter fail-closed behavior, low-weight video diagnostic-only traces,
   unstable removal waiting before queue/video/engine, and runtime vision config
-  fields.
+  fields, including freezer camera layout, handled-filter enablement, and
+  freezer threshold snapshots.
   Recent freezer coverage verifies that zone-sliced `loadcells` remain the
   effective payload, even when the deprecated compatibility field is present,
   and traces retain `loadcell_scope=zone`.
@@ -69,7 +70,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   promotion regressions, stage counts, diagnostic trace, threshold/ROI/no-motion
   rescue, and side-ROI-conflicted threshold rescue rejection.
   Freezer tests cover dual-top lower-half ROI filtering, freezer rescue
-  suppression, and same-frame multi-bbox `instance_count_hint`.
+  suppression, same-frame multi-bbox `instance_count_hint`, disabled-layout
+  warnings, and freezer filter OPS visibility.
 - [test_yolo_wrapper_geometry.py](../../../services/model/tests/test_yolo_wrapper_geometry.py):
   default left-crop and optional crop/letterbox geometry.
 - [test_voting_ensemble.py](../../../services/model/tests/test_voting_ensemble.py):
@@ -140,7 +142,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   from empty-basket CLOSE deltas, and non-chargeable pending trigger diagnostics
   for fast close finalization. Close final-weight validation also covers
   repeated-candidate correction followed by matched-only unresolved mismatch
-  exclusion when no bounded correction can explain the net removal.
+  exclusion when no bounded correction can explain the net removal, plus
+  freezer deferred repair from later unused candidate snapshots and rejection
+  of consumed or out-of-tolerance later candidates.
 
 ## Which Tests To Run
 

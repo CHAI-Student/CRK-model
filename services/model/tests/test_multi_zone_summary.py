@@ -553,6 +553,323 @@ def test_freezer_close_mismatch_preserves_detected_products_for_edge(
     assert "products=STICK_BINGGRAE_MELONA_75MLx1" in caplog.text
 
 
+def test_freezer_close_deferred_candidate_repairs_later_unused_weight_match(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    from model_service.core.config import config
+    from model_service.session.door_session import TriggerResult
+    from model_service.session.door_session_store import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    caplog.set_level(logging.INFO)
+    weights = {30: 224.0, 44: 79.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    store.get_or_start_global_session()
+    store.add_trigger_with_global(
+        3,
+        TriggerResult(
+            trigger_id="zone3-trigger",
+            session_id="zone3-session",
+            timestamp=10.0,
+            products=[
+                _product(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    1,
+                    price=3700,
+                    confidence=1.0,
+                ),
+            ],
+            delta_weight=-75.9,
+            confidence=1.0,
+            video_paths={},
+            vision_candidates=[
+                _candidate_snapshot(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    rank=1,
+                    weight=224.0,
+                    price=3700,
+                    confidence=1.0,
+                ),
+            ],
+        ),
+    )
+    store.add_trigger_with_global(
+        4,
+        TriggerResult(
+            trigger_id="zone4-trigger",
+            session_id="zone4-session",
+            timestamp=20.0,
+            products=[
+                _product(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    1,
+                    price=3700,
+                    confidence=1.0,
+                ),
+            ],
+            delta_weight=-224.1,
+            confidence=1.0,
+            video_paths={},
+            vision_candidates=[
+                _candidate_snapshot(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    rank=2,
+                    weight=224.0,
+                    price=3700,
+                    confidence=1.0,
+                ),
+                _candidate_snapshot(
+                    44,
+                    "STICK_BINGGRAE_MELONA_75ML",
+                    rank=4,
+                    weight=79.0,
+                    price=1000,
+                    confidence=0.462,
+                ),
+            ],
+        ),
+    )
+
+    global_session = store.finalize_global_session()
+
+    zone3_session = global_session.zone_sessions[3]
+    zone4_session = global_session.zone_sessions[4]
+    assert [(product.product_id, product.count) for product in zone3_session.get_active_products()] == [
+        (44, 1)
+    ]
+    assert [(product.product_id, product.count) for product in zone4_session.get_active_products()] == [
+        (30, 1)
+    ]
+    validation = zone3_session.final_weight_validation
+    assert validation["accepted"] is True
+    assert validation["reason"] == "deferred_candidate_final_weight_correction"
+    assert validation["selectedProductId"] == 44
+    assert validation["sourceZone"] == 4
+    assert validation["candidateRank"] == 4
+    assert validation["deferredCandidateRepair"]["reason"] == (
+        "later_unused_candidate_weight_match"
+    )
+    assert "[CLOSE][CANDIDATE_REPAIR] corrected zone=3" in caplog.text
+
+
+def test_freezer_close_deferred_candidate_does_not_borrow_consumed_match(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session.door_session import TriggerResult
+    from model_service.session.door_session_store import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    weights = {30: 224.0, 44: 79.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    store.get_or_start_global_session()
+    store.add_trigger_with_global(
+        3,
+        TriggerResult(
+            trigger_id="zone3-trigger",
+            session_id="zone3-session",
+            timestamp=10.0,
+            products=[
+                _product(44, "STICK_BINGGRAE_MELONA_75ML", 1, price=1000),
+            ],
+            delta_weight=-224.1,
+            confidence=0.8,
+            video_paths={},
+        ),
+    )
+    store.add_trigger_with_global(
+        4,
+        TriggerResult(
+            trigger_id="zone4-trigger",
+            session_id="zone4-session",
+            timestamp=20.0,
+            products=[
+                _product(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    1,
+                    price=3700,
+                ),
+            ],
+            delta_weight=-224.1,
+            confidence=1.0,
+            video_paths={},
+            vision_candidates=[
+                _candidate_snapshot(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    rank=1,
+                    weight=224.0,
+                    price=3700,
+                    confidence=1.0,
+                ),
+            ],
+        ),
+    )
+
+    global_session = store.finalize_global_session()
+
+    zone3_session = global_session.zone_sessions[3]
+    assert [(product.product_id, product.count) for product in zone3_session.get_active_products()] == [
+        (44, 1)
+    ]
+    validation = zone3_session.final_weight_validation
+    assert validation["reason"] == "unresolved_final_weight_mismatch"
+    repair = validation["deferredCandidateRepair"]
+    assert repair["applied"] is False
+    assert repair["reason"] == "no_later_unused_weight_match"
+    assert repair["rejectedCandidates"][0]["reason"] == "consumed_by_source_result"
+
+
+def test_freezer_close_deferred_candidate_rejects_residual_outside_tolerance(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session.door_session import TriggerResult
+    from model_service.session.door_session_store import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    weights = {30: 224.0, 55: 100.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    store.get_or_start_global_session()
+    store.add_trigger_with_global(
+        3,
+        TriggerResult(
+            trigger_id="zone3-trigger",
+            session_id="zone3-session",
+            timestamp=10.0,
+            products=[
+                _product(
+                    30,
+                    "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                    1,
+                    price=3700,
+                ),
+            ],
+            delta_weight=-75.9,
+            confidence=0.8,
+            video_paths={},
+        ),
+    )
+    store.add_trigger_with_global(
+        4,
+        TriggerResult(
+            trigger_id="zone4-trigger",
+            session_id="zone4-session",
+            timestamp=20.0,
+            products=[],
+            delta_weight=-10.0,
+            confidence=0.0,
+            video_paths={},
+            vision_candidates=[
+                _candidate_snapshot(
+                    55,
+                    "UNUSED_100G_PRODUCT",
+                    rank=1,
+                    weight=100.0,
+                    price=1000,
+                    confidence=0.9,
+                ),
+            ],
+        ),
+    )
+
+    global_session = store.finalize_global_session()
+
+    zone3_session = global_session.zone_sessions[3]
+    assert [(product.product_id, product.count) for product in zone3_session.get_active_products()] == [
+        (30, 1)
+    ]
+    repair = zone3_session.final_weight_validation["deferredCandidateRepair"]
+    assert repair["applied"] is False
+    assert repair["reason"] == "no_later_unused_weight_match"
+    assert repair["rejectedCandidates"][0]["reason"] == (
+        "weight_residual_exceeds_tolerance"
+    )
+
+
+def test_freezer_close_deferred_candidate_keeps_complete_weight_match(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session.door_session import TriggerResult
+    from model_service.session.door_session_store import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    weights = {44: 79.0, 55: 76.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    store.get_or_start_global_session()
+    store.add_trigger_with_global(
+        3,
+        TriggerResult(
+            trigger_id="zone3-trigger",
+            session_id="zone3-session",
+            timestamp=10.0,
+            products=[
+                _product(44, "STICK_BINGGRAE_MELONA_75ML", 1, price=1000),
+            ],
+            delta_weight=-75.9,
+            confidence=1.0,
+            video_paths={},
+        ),
+    )
+    store.add_trigger_with_global(
+        4,
+        TriggerResult(
+            trigger_id="zone4-trigger",
+            session_id="zone4-session",
+            timestamp=20.0,
+            products=[],
+            delta_weight=-10.0,
+            confidence=0.0,
+            video_paths={},
+            vision_candidates=[
+                _candidate_snapshot(
+                    55,
+                    "UNUSED_76G_PRODUCT",
+                    rank=1,
+                    weight=76.0,
+                    price=1000,
+                    confidence=0.9,
+                ),
+            ],
+        ),
+    )
+
+    global_session = store.finalize_global_session()
+
+    zone3_session = global_session.zone_sessions[3]
+    assert [(product.product_id, product.count) for product in zone3_session.get_active_products()] == [
+        (44, 1)
+    ]
+    assert "deferredCandidateRepair" not in zone3_session.final_weight_validation
+
+
 def test_close_final_weight_validation_keeps_clean_supported_mix(tmp_path):
     from model_service.session.door_session import TriggerResult
     from model_service.session.door_session_store import DoorSessionStore

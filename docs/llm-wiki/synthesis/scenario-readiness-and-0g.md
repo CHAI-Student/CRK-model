@@ -64,6 +64,11 @@ TensorRT runtime proof.
   first/last totals such as `+10g -> -60g` as `decision_delta=-70g` when
   stable plateau history would otherwise return no chargeable removal. Missing,
   invalid-only, and all-zero payloads still remain no-charge diagnostics.
+- Freezer deferred candidate repair is also separate from 0g handling. It runs
+  only at CLOSE for a chargeable freezer removal whose no-product or partial
+  basket does not explain the final weight, and can select a later unused
+  same-session candidate by weight. It never turns missing/all-zero loadcell
+  evidence into a charge.
 - Code review of sibling services indicates the payment path may open the door
   before Camera `/recording/start`, which can leave model-service with missing
   or all-zero loadcell history. Model-service cannot reconstruct missing

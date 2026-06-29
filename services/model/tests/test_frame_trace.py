@@ -2180,6 +2180,27 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
     monkeypatch.setattr(config.vision, "yolo_internal_conf_threshold", 0.01, raising=False)
     monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.25, raising=False)
     monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.25, raising=False)
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer", raising=False)
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy", raising=False)
+    monkeypatch.setattr(config.vision, "top_k", 7, raising=False)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.08, raising=False)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 3, raising=False)
+    monkeypatch.setattr(
+        config.vision,
+        "freezer_motion_min_displacement_px",
+        12.0,
+        raising=False,
+    )
+    monkeypatch.setattr(config.vision, "freezer_lower_roi_y_split", 240.0, raising=False)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3, raising=False)
+    monkeypatch.setattr(config.weight, "freezer_confidence_tie_band", 0.08, raising=False)
+    monkeypatch.setattr(config.weight, "freezer_multi_min_confidence", 0.45, raising=False)
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_vision_multi_without_weight_enabled",
+        True,
+        raising=False,
+    )
     monkeypatch.setattr(config.vision, "side_roi_x_max", 400.0, raising=False)
     monkeypatch.setattr(config.vision, "side_roi_soft_margin_px", 5.0, raising=False)
     monkeypatch.setattr(config.vision, "ffmpeg_top_gamma", 1.2, raising=False)
@@ -2205,6 +2226,18 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
 
     assert vision_config["yolo_model_path"] == "models/0204_morning.engine"
     assert vision_config["yolo_internal_conf_threshold"] == 0.01
+    assert vision_config["cabinet_type"] == "freezer"
+    assert vision_config["camera_layout"] == "dual_top_proxy"
+    assert vision_config["freezer_handled_filter_enabled"] is True
+    assert vision_config["top_k"] == 7
+    assert vision_config["freezer_min_vote_ratio"] == 0.08
+    assert vision_config["freezer_min_vote_count"] == 3
+    assert vision_config["freezer_motion_min_displacement_px"] == 12.0
+    assert vision_config["freezer_lower_roi_y_split"] == 240.0
+    assert vision_config["freezer_min_exit_path_votes"] == 3
+    assert vision_config["freezer_confidence_tie_band"] == 0.08
+    assert vision_config["freezer_multi_min_confidence"] == 0.45
+    assert vision_config["freezer_vision_multi_without_weight_enabled"] is True
     assert vision_config["top_confidence_threshold"] == 0.25
     assert vision_config["side_confidence_threshold"] == 0.25
     assert vision_config["regular_threshold"] == {"top": 0.25, "side": 0.25}

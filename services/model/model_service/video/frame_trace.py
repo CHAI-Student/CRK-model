@@ -875,11 +875,28 @@ class TriggerTraceContext:
         return {
             "yolo_model_path": config.vision.yolo_model_path,
             "yolo_internal_conf_threshold": config.vision.yolo_internal_conf_threshold,
+            "cabinet_type": config.machine.cabinet_type,
             "camera_layout": config.vision.camera_layout,
             "camera_roles": camera_roles_payload(config.vision.camera_layout),
+            "freezer_handled_filter_enabled": (
+                str(config.machine.cabinet_type).lower() == "freezer"
+                and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+            ),
             "top_confidence_threshold": config.vision.top_confidence_threshold,
             "side_confidence_threshold": config.vision.side_confidence_threshold,
+            "top_k": config.vision.top_k,
+            "freezer_min_vote_ratio": config.vision.freezer_min_vote_ratio,
+            "freezer_min_vote_count": config.vision.freezer_min_vote_count,
+            "freezer_motion_min_displacement_px": (
+                config.vision.freezer_motion_min_displacement_px
+            ),
+            "freezer_lower_roi_y_split": config.vision.freezer_lower_roi_y_split,
             "freezer_min_exit_path_votes": config.vision.freezer_min_exit_path_votes,
+            "freezer_confidence_tie_band": config.weight.freezer_confidence_tie_band,
+            "freezer_multi_min_confidence": config.weight.freezer_multi_min_confidence,
+            "freezer_vision_multi_without_weight_enabled": (
+                config.weight.freezer_vision_multi_without_weight_enabled
+            ),
             "regular_threshold": {
                 "top": config.vision.top_confidence_threshold,
                 "side": config.vision.side_confidence_threshold,

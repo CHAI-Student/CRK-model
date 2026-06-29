@@ -65,7 +65,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from model_service.core.config import config
 
@@ -1528,6 +1528,59 @@ class DoorSessionStore:
                     diagnostics.get("currentResidual", 0.0),
                     diagnostics.get("replacementResidual", 0.0),
                 )
+            deferred_replacement, deferred_diagnostics = (
+                self._select_deferred_close_candidate_repair(
+                    session,
+                    net_delta,
+                )
+            )
+            if deferred_diagnostics:
+                current_validation = dict(session.final_weight_validation or {})
+                previous_reason = current_validation.get("reason")
+                current_validation["deferredCandidateRepair"] = deferred_diagnostics
+                if deferred_replacement is not None:
+                    session.aggregated_products = {
+                        deferred_replacement.product_id: deferred_replacement
+                    }
+                    current_validation.update(
+                        {
+                            "accepted": True,
+                            "reason": "deferred_candidate_final_weight_correction",
+                            "previousReason": previous_reason,
+                            "targetWeight": deferred_diagnostics.get("targetWeight"),
+                            "currentWeight": deferred_diagnostics.get("currentWeight"),
+                            "currentResidual": deferred_diagnostics.get(
+                                "currentResidual"
+                            ),
+                            "replacementWeight": deferred_diagnostics.get(
+                                "replacementWeight"
+                            ),
+                            "replacementResidual": deferred_diagnostics.get(
+                                "replacementResidual"
+                            ),
+                            "allowedResidual": deferred_diagnostics.get(
+                                "allowedResidual"
+                            ),
+                            "selectedProduct": deferred_replacement.name,
+                            "selectedProductId": int(deferred_replacement.product_id),
+                            "selectedCount": int(deferred_replacement.count),
+                            "candidateRank": deferred_diagnostics.get("candidateRank"),
+                            "sourceZone": deferred_diagnostics.get("sourceZone"),
+                            "sourceSessionId": deferred_diagnostics.get(
+                                "sourceSessionId"
+                            ),
+                        }
+                    )
+                    logger.info(
+                        "[CLOSE][CANDIDATE_REPAIR] corrected zone=%s product=%s "
+                        "source_zone=%s target=%.1fg replacement_residual=%.1fg",
+                        zone,
+                        deferred_replacement.name,
+                        deferred_diagnostics.get("sourceZone"),
+                        deferred_diagnostics.get("targetWeight", 0.0),
+                        deferred_diagnostics.get("replacementResidual", 0.0),
+                    )
+                session.final_weight_validation = current_validation
             self._apply_unresolved_close_weight_mismatch_guard(session, net_delta)
 
     def _apply_unresolved_close_weight_mismatch_guard(
@@ -1859,6 +1912,305 @@ class DoorSessionStore:
             }
         )
         return replacement, diagnostics
+
+    def _select_deferred_close_candidate_repair(
+        self,
+        session: DoorSession,
+        net_delta: float,
+    ) -> Tuple[Optional[AggregatedProduct], Dict[str, object]]:
+        """Use later unused freezer candidates to repair no-charge/mismatch closes."""
+        if str(config.machine.cabinet_type).lower() != "freezer":
+            return None, {}
+        if net_delta >= 0:
+            return None, {}
+
+        blocker = self._close_final_weight_blocker(session)
+        if blocker is not None:
+            return None, {}
+
+        target_weight = abs(float(net_delta))
+        base_tolerance = max(0.0, float(config.weight.tolerance_grams))
+        if target_weight <= base_tolerance:
+            return None, {}
+
+        removal_triggers = [
+            trigger
+            for trigger in session.triggers
+            if trigger_effective_delta_weight(trigger) < 0 and not trigger.is_return
+        ]
+        active_products = [
+            product
+            for product in session.aggregated_products.values()
+            if product.count > 0 and product.weight > 0
+        ]
+        current_product_count = sum(int(product.count) for product in active_products)
+        current_weight = sum(
+            float(product.weight) * int(product.count)
+            for product in active_products
+        )
+        current_residual = abs(target_weight - current_weight)
+        allowed_residual = self._close_full_delta_match_tolerance(
+            max(1, current_product_count)
+        )
+
+        mismatch_eligible = not active_products or current_residual > allowed_residual
+        if not mismatch_eligible:
+            return None, {}
+
+        diagnostics: Dict[str, object] = {
+            "applied": False,
+            "reason": "not_evaluated",
+            "targetWeight": round(target_weight, 1),
+            "currentWeight": round(current_weight, 1),
+            "currentResidual": round(current_residual, 1),
+            "allowedResidual": round(float(allowed_residual), 1),
+            "currentProductCount": current_product_count,
+            "currentProducts": [
+                {
+                    "productId": int(product.product_id),
+                    "name": product.name,
+                    "count": int(product.count),
+                    "unitWeight": round(float(product.weight), 1),
+                }
+                for product in active_products
+            ],
+        }
+
+        if len(removal_triggers) != 1:
+            diagnostics["reason"] = "requires_single_removal_trigger"
+            diagnostics["removalTriggerCount"] = len(removal_triggers)
+            return None, diagnostics
+
+        target_trigger = removal_triggers[0]
+        diagnostics["targetTriggerId"] = target_trigger.trigger_id
+        diagnostics["targetSessionId"] = target_trigger.session_id
+        diagnostics["eligibility"] = (
+            "no_active_products" if not active_products else "final_weight_mismatch"
+        )
+
+        candidates, rejected = self._deferred_close_candidate_repair_candidates(
+            target_session=session,
+            target_trigger=target_trigger,
+            target_weight=target_weight,
+        )
+        diagnostics["candidateCount"] = len(candidates)
+        if rejected:
+            diagnostics["rejectedCandidates"] = rejected[:10]
+        if not candidates:
+            diagnostics["reason"] = "no_later_unused_weight_match"
+            return None, diagnostics
+
+        candidates.sort(
+            key=lambda item: (
+                float(item["replacement_residual"]),
+                int(item["rank"]),
+                -float(item["confidence"]),
+                float(item["source_timestamp"]),
+                int(item["source_zone"]),
+                int(item["product_id"]),
+            )
+        )
+        selected = candidates[0]
+        replacement = AggregatedProduct(
+            product_id=int(selected["product_id"]),
+            product_idx=selected.get("product_idx"),
+            name=str(selected["name"]),
+            count=1,
+            unit_price=int(selected["unit_price"]),
+            weight=float(selected["unit_weight"]),
+            total_confidence=float(selected["confidence"]),
+            detection_count=1,
+        )
+        diagnostics.update(
+            {
+                "applied": True,
+                "reason": "later_unused_candidate_weight_match",
+                "replacementWeight": round(float(selected["unit_weight"]), 1),
+                "replacementResidual": round(
+                    float(selected["replacement_residual"]),
+                    1,
+                ),
+                "selectedProduct": selected["name"],
+                "selectedProductId": int(selected["product_id"]),
+                "selectedCount": 1,
+                "candidateRank": int(selected["rank"]),
+                "candidateConfidence": round(float(selected["confidence"]), 4),
+                "candidateSource": str(selected["source"]),
+                "sourceZone": int(selected["source_zone"]),
+                "sourceTriggerId": selected["source_trigger_id"],
+                "sourceSessionId": selected["source_session_id"],
+            }
+        )
+        return replacement, diagnostics
+
+    def _deferred_close_candidate_repair_candidates(
+        self,
+        *,
+        target_session: DoorSession,
+        target_trigger: TriggerResult,
+        target_weight: float,
+    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+        candidates: List[Dict[str, object]] = []
+        rejected: List[Dict[str, object]] = []
+        allowed_residual = self._close_full_delta_match_tolerance(1)
+        target_timestamp = float(target_trigger.timestamp)
+
+        for source_zone in sorted(self._active_sessions.keys()):
+            source_session = self._active_sessions[source_zone]
+            for source_trigger in source_session.triggers:
+                if source_trigger is target_trigger:
+                    continue
+                if float(source_trigger.timestamp) <= target_timestamp:
+                    continue
+                if trigger_effective_delta_weight(source_trigger) >= 0:
+                    continue
+                if source_trigger.is_return:
+                    continue
+
+                consumed_ids = self._close_consumed_product_ids_for_trigger(
+                    source_trigger
+                )
+                for candidate in getattr(source_trigger, "vision_candidates", []) or []:
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_entry = self._deferred_close_candidate_entry(
+                        candidate=candidate,
+                        source_zone=source_zone,
+                        source_trigger=source_trigger,
+                        target_weight=target_weight,
+                        allowed_residual=allowed_residual,
+                        consumed_ids=consumed_ids,
+                    )
+                    if candidate_entry.get("accepted"):
+                        candidates.append(candidate_entry["candidate"])
+                    else:
+                        rejected.append(candidate_entry["rejection"])
+
+        return candidates, rejected
+
+    def _deferred_close_candidate_entry(
+        self,
+        *,
+        candidate: Dict[str, object],
+        source_zone: int,
+        source_trigger: TriggerResult,
+        target_weight: float,
+        allowed_residual: float,
+        consumed_ids: set[int],
+    ) -> Dict[str, Any]:
+        try:
+            product_id = int(candidate.get("product_id"))
+            unit_weight = float(candidate.get("unit_weight", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return {
+                "accepted": False,
+                "rejection": {"reason": "invalid_candidate_identity"},
+            }
+
+        name = str(candidate.get("name") or product_id)
+        base_rejection = {
+            "productId": product_id,
+            "name": name,
+            "sourceZone": int(source_zone),
+            "sourceSessionId": source_trigger.session_id,
+            "rank": int(candidate.get("rank", 999) or 999),
+        }
+        if product_id in consumed_ids:
+            return {
+                "accepted": False,
+                "rejection": {**base_rejection, "reason": "consumed_by_source_result"},
+            }
+        try:
+            unit_price = int(candidate.get("unit_price", 0) or 0)
+            stock_qty = int(candidate.get("stock_qty", 0) or 0)
+            confidence = float(candidate.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return {
+                "accepted": False,
+                "rejection": {**base_rejection, "reason": "invalid_candidate_metadata"},
+            }
+        if unit_weight <= 0 or unit_price <= 0 or stock_qty <= 0:
+            return {
+                "accepted": False,
+                "rejection": {**base_rejection, "reason": "inactive_candidate_product"},
+            }
+
+        residual = abs(target_weight - unit_weight)
+        if residual > allowed_residual:
+            return {
+                "accepted": False,
+                "rejection": {
+                    **base_rejection,
+                    "reason": "weight_residual_exceeds_tolerance",
+                    "unitWeight": round(unit_weight, 1),
+                    "weightResidual": round(residual, 1),
+                    "allowedResidual": round(float(allowed_residual), 1),
+                },
+            }
+
+        return {
+            "accepted": True,
+            "candidate": {
+                "product_id": product_id,
+                "product_idx": candidate.get("product_idx"),
+                "name": name,
+                "unit_weight": unit_weight,
+                "unit_price": unit_price,
+                "stock_qty": stock_qty,
+                "confidence": confidence,
+                "rank": int(candidate.get("rank", 999) or 999),
+                "source": str(candidate.get("source", "vision") or "vision"),
+                "replacement_residual": residual,
+                "source_zone": int(source_zone),
+                "source_trigger_id": source_trigger.trigger_id,
+                "source_session_id": source_trigger.session_id,
+                "source_timestamp": float(source_trigger.timestamp),
+            },
+        }
+
+    def _close_consumed_product_ids_for_trigger(
+        self,
+        trigger: TriggerResult,
+    ) -> set[int]:
+        products = [product for product in trigger.products if product.count > 0]
+        if not products:
+            return set()
+
+        candidate_weights: Dict[int, float] = {}
+        for candidate in getattr(trigger, "vision_candidates", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            try:
+                product_id = int(candidate.get("product_id"))
+                unit_weight = float(candidate.get("unit_weight", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if product_id >= 0 and unit_weight > 0:
+                candidate_weights[product_id] = unit_weight
+
+        total_weight = 0.0
+        product_count = 0
+        consumed_ids: set[int] = set()
+        for product in products:
+            product_id = int(product.product_id)
+            unit_weight = candidate_weights.get(product_id)
+            if unit_weight is None and self._get_product_weight is not None:
+                try:
+                    unit_weight = float(self._get_product_weight(product_id))
+                except (TypeError, ValueError):
+                    unit_weight = None
+            if unit_weight is None or unit_weight <= 0:
+                return set()
+            count = int(product.count)
+            total_weight += unit_weight * count
+            product_count += count
+            consumed_ids.add(product_id)
+
+        target_weight = abs(float(trigger_effective_delta_weight(trigger)))
+        tolerance = self._close_full_delta_match_tolerance(product_count)
+        if abs(target_weight - total_weight) <= tolerance:
+            return consumed_ids
+        return set()
 
     def _close_final_weight_blocker(self, session: DoorSession) -> Optional[str]:
         if session.unmatched_returns:

@@ -161,6 +161,14 @@ queued work can be skipped if a later return balances it before video starts.
   trigger like `+216.7g` then `-16.5g` is judged as the `-16.5g` removal, while
   the hidden return is attached to the internal DoorSession `TriggerResult` as
   `return_weight_hints` for CLOSE deferred reconciliation and delta accounting.
+- Freezer CLOSE final-weight validation can now repair a no-product or
+  final-weight-mismatch partial result by borrowing a later unused candidate
+  snapshot from the same global door session. The repair is single-removal
+  only, requires the later candidate's unit weight to match the target removal
+  inside close tolerance, excludes candidates already consumed by their own
+  matched trigger result, and records `deferredCandidateRepair` diagnostics
+  with source zone/session/rank. It does not delay the `/trigger` response and
+  does not override already complete weight-matched results.
 - Compatibility `/trigger` metadata now stays aligned with `TriggerService`:
   traces include `return_segment_targets`, mixed return diagnostics, and
   `effective_count_guard` diagnostics when return hints can reduce a raw

@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -867,6 +868,115 @@ def test_video_processor_freezer_handled_filter_keeps_weight_tiebreak_candidate(
         trace_context.weight_diagnostics["freezer_candidate_filter"]["reason"]
         == "single_removal_weight_tiebreak"
     )
+
+
+def test_video_processor_freezer_filter_warns_when_dual_top_layout_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "legacy_top_side")
+    caplog.set_level(logging.WARNING)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-layout-warning",
+        zone=2,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    vote_results = [
+        VoteResult(
+            class_id=30,
+            class_name="BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+            vote_count=20,
+            max_confidence=0.9,
+            avg_confidence=0.8,
+            weighted_confidence=0.9,
+            top_detected=True,
+            side_detected=True,
+        ),
+        VoteResult(
+            class_id=44,
+            class_name="STICK_BINGGRAE_MELONA_75ML",
+            vote_count=8,
+            max_confidence=0.7,
+            avg_confidence=0.6,
+            weighted_confidence=0.7,
+            top_detected=True,
+        ),
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-75.9,
+        product_weights={30: 224.0, 44: 79.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    assert handled == vote_results
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert diagnostics["reason"] == "disabled_camera_layout"
+    assert diagnostics["camera_layout"] == "legacy_top_side"
+    assert diagnostics["freezer_handled_filter_enabled"] is False
+    assert diagnostics["raw_candidate_count"] == 2
+    assert diagnostics["handled_candidate_count"] == 2
+    assert "expected=dual_top_proxy" in caplog.text
+
+
+def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from model_service.core.config import config
+    from model_service.service.trigger_service import TriggerService
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    caplog.set_level(logging.INFO)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-filter-ops",
+        zone=4,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.record_weight_diagnostics(
+        {
+            "freezer_candidate_filter": {
+                "freezer_handled_filter_enabled": True,
+                "raw_candidate_count": 4,
+                "handled_candidate_count": 1,
+                "reason": "single_removal_weight_tiebreak",
+            }
+        }
+    )
+
+    TriggerService._log_freezer_candidate_filter_ops(
+        zone=4,
+        raw_count=4,
+        handled_count=1,
+        delta_weight=-75.9,
+        trace_context=trace_context,
+    )
+
+    assert "[OPS][FREEZER-CANDIDATE-FILTER] zone=4" in caplog.text
+    assert "camera_layout=dual_top_proxy" in caplog.text
+    assert "raw=4 handled=1" in caplog.text
+    assert "reason=single_removal_weight_tiebreak" in caplog.text
 
 
 def test_video_processor_freezer_handled_filter_preserves_strong_multi_vision(

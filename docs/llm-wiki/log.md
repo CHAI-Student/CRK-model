@@ -1,5 +1,19 @@
 # LLM Wiki Log
 
+## [2026-06-29] maintenance | freezer deferred candidate repair and filter visibility
+
+- Documented that freezer strict handled-candidate filtering requires both
+  `MODEL__MACHINE__CABINET_TYPE=freezer` and
+  `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`; changing only cabinet type
+  leaves handled narrowing disabled and now emits OPS/config diagnostics.
+- Added freezer candidate-filter visibility to trigger traces and OPS logs:
+  camera layout, raw/handled candidate counts, filter reason, and key freezer
+  vote/motion/ROI/exit-path thresholds.
+- Added CLOSE-time freezer deferred candidate repair for single-removal
+  no-product or final-weight-mismatch partial baskets. It can select a later
+  unused same-session candidate by weight while rejecting candidates already
+  consumed by their own matched trigger result.
+
 ## [2026-06-29] maintenance | freezer endpoint loadcell fallback
 
 - Documented the freezer-only endpoint fallback for nonzero Camera loadcell
