@@ -59,6 +59,11 @@ TensorRT runtime proof.
   and use a diagnostic decision branch when the payload itself is suspect.
 - A filtered-all-zero payload with nonzero raw channels gets the distinct
   reason `filtered_all_zero_raw_nonzero`.
+- Freezer endpoint fallback is separate from the 0g diagnostic branch. A
+  nonzero freezer payload with enough continuous samples can use filtered
+  first/last totals such as `+10g -> -60g` as `decision_delta=-70g` when
+  stable plateau history would otherwise return no chargeable removal. Missing,
+  invalid-only, and all-zero payloads still remain no-charge diagnostics.
 - Code review of sibling services indicates the payment path may open the door
   before Camera `/recording/start`, which can leave model-service with missing
   or all-zero loadcell history. Model-service cannot reconstruct missing

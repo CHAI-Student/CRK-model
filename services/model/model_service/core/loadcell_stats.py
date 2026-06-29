@@ -105,12 +105,16 @@ class LoadcellDeltaAnalysis:
     ignored_loadcell_movements: list[dict[str, object]] = field(default_factory=list)
     pressure_like_event: bool = False
     decision_delta: float = 0.0
+    decision_delta_reliable: bool = False
     stable_delta_source: str = ""
     baseline_stable_avg: float = 0.0
     final_stable_avg: float = 0.0
     trailing_unstable_sample_count: int = 0
     raw_simple_delta: float = 0.0
     raw_extreme_delta: float = 0.0
+    endpoint_delta_weight: float = 0.0
+    endpoint_fallback_applied: bool = False
+    endpoint_fallback_reason: str = "not_evaluated"
 
 
 def mixed_return_hints_from_analysis(
@@ -1075,10 +1079,97 @@ def _raw_extreme_delta(values: Sequence[float]) -> float:
     return float(max(values)) - float(min(values))
 
 
+def _apply_endpoint_fallback_if_eligible(
+    analysis: LoadcellDeltaAnalysis,
+    *,
+    loadcells: Sequence[SupportsFilteredValue],
+    records: Sequence[tuple[int, str | None, float]],
+    endpoint_fallback_enabled: bool,
+) -> None:
+    """Use a conservative endpoint removal delta when stable history is absent."""
+
+    min_delta = float(config.trigger.min_weight_change_grams)
+    if analysis.stable_region_valid and not analysis.used_simple_fallback:
+        analysis.decision_delta_reliable = True
+        analysis.endpoint_fallback_reason = (
+            "already_has_chargeable_decision_delta"
+            if analysis.decision_delta < -min_delta
+            else "confirmed_stable_plateaus"
+        )
+        return
+
+    if not endpoint_fallback_enabled:
+        analysis.endpoint_fallback_reason = "disabled"
+        return
+
+    if analysis.decision_delta < -min_delta:
+        analysis.endpoint_fallback_reason = "already_has_chargeable_decision_delta"
+        return
+
+    min_samples = max(2, int(config.loadcell.endpoint_fallback_min_samples))
+    if len(records) < min_samples:
+        analysis.endpoint_fallback_reason = "insufficient_samples"
+        return
+
+    min_span_seconds = max(0.0, float(config.loadcell.endpoint_fallback_min_span_seconds))
+    if analysis.sample_span_seconds < min_span_seconds:
+        analysis.endpoint_fallback_reason = "insufficient_sample_span"
+        return
+
+    filtered_summary = _summarize_channel_field(loadcells, "filtered_value")
+    if filtered_summary["filtered_state"] != "nonzero":
+        analysis.endpoint_fallback_reason = "filtered_payload_not_nonzero"
+        return
+
+    endpoint_delta = float(analysis.raw_simple_delta)
+    analysis.endpoint_delta_weight = endpoint_delta
+    if endpoint_delta >= -min_delta:
+        analysis.endpoint_fallback_reason = "not_negative_endpoint_delta"
+        return
+
+    values = [float(record[2]) for record in records]
+    if len(values) < 2:
+        analysis.endpoint_fallback_reason = "insufficient_parsed_records"
+        return
+
+    start_value = float(values[0])
+    end_value = float(values[-1])
+    high_value = max(values)
+    low_value = min(values)
+    endpoint_margin = max(
+        float(config.loadcell.stability_threshold_grams),
+        float(config.weight.tolerance_grams),
+        float(config.door_session.weight_tolerance_grams),
+        min_delta,
+    )
+    if abs(start_value - high_value) > endpoint_margin:
+        analysis.endpoint_fallback_reason = "start_not_near_payload_high"
+        return
+    if abs(end_value - low_value) > endpoint_margin:
+        analysis.endpoint_fallback_reason = "end_not_near_payload_low"
+        return
+
+    analysis.decision_delta = endpoint_delta
+    analysis.decision_delta_reliable = True
+    analysis.endpoint_fallback_applied = True
+    analysis.endpoint_fallback_reason = "freezer_endpoint_delta"
+    analysis.stable_delta_source = "freezer_endpoint_fallback"
+    analysis.purchase_delta_candidates = [
+        _candidate_dict(
+            source="freezer_endpoint_delta",
+            weight=abs(endpoint_delta),
+            delta=endpoint_delta,
+            segment_indices=[],
+            reason="freezer_endpoint_fallback",
+        )
+    ]
+
+
 def analyze_weight_delta(
     loadcells: Sequence[SupportsFilteredValue],
     window_size: int | None = None,
     stability_threshold: float | None = None,
+    endpoint_fallback_enabled: bool = False,
 ) -> LoadcellDeltaAnalysis:
     """Analyze trigger-level loadcell movement with stable-window diagnostics."""
 
@@ -1105,6 +1196,7 @@ def analyze_weight_delta(
         analysis.start_avg = simple_start
         analysis.end_avg = simple_end
         analysis.raw_simple_delta = simple_end - simple_start
+        analysis.endpoint_delta_weight = analysis.raw_simple_delta
     analysis.raw_extreme_delta = _raw_extreme_delta(values)
     analysis.stable_plateaus = detect_stable_plateaus(
         loadcells,
@@ -1121,6 +1213,12 @@ def analyze_weight_delta(
         analysis.reason = (
             "insufficient_stable_samples" if simple_valid else "invalid_loadcell_samples"
         )
+        _apply_endpoint_fallback_if_eligible(
+            analysis,
+            loadcells=loadcells,
+            records=records,
+            endpoint_fallback_enabled=endpoint_fallback_enabled,
+        )
         return analysis
 
     filtered_values = filter_peaks(values)
@@ -1131,6 +1229,12 @@ def analyze_weight_delta(
     if len(analysis.stable_plateaus) < 2:
         analysis.reason = "unstable_or_truncated_loadcell"
         analysis.stable_delta_source = "insufficient_stable_plateaus"
+        _apply_endpoint_fallback_if_eligible(
+            analysis,
+            loadcells=loadcells,
+            records=records,
+            endpoint_fallback_enabled=endpoint_fallback_enabled,
+        )
         return analysis
 
     baseline = analysis.stable_plateaus[0]
@@ -1151,6 +1255,12 @@ def analyze_weight_delta(
         analysis.decision_delta = 0.0
         analysis.reason = "unstable_or_truncated_loadcell"
         analysis.stable_delta_source = "stable_tail_not_confirmed"
+        _apply_endpoint_fallback_if_eligible(
+            analysis,
+            loadcells=loadcells,
+            records=records,
+            endpoint_fallback_enabled=endpoint_fallback_enabled,
+        )
         return analysis
 
     analysis.delta = float(final.avg) - float(baseline.avg)
@@ -1161,6 +1271,12 @@ def analyze_weight_delta(
         analysis,
         net_delta=analysis.delta,
         stable_region_valid=True,
+    )
+    _apply_endpoint_fallback_if_eligible(
+        analysis,
+        loadcells=loadcells,
+        records=records,
+        endpoint_fallback_enabled=endpoint_fallback_enabled,
     )
     (
         analysis.channel_removal_segment_targets,

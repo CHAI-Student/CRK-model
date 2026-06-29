@@ -40,7 +40,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   removal and return segment target extraction, mixed return-hint construction,
   compatibility `/trigger` return-hint parity, pressure-like vision-required
   targets, pressure-like pair suppression, simultaneous physical-channel
-  removal target extraction, and rapid same-zone trace context.
+  removal target extraction, rapid same-zone trace context, and freezer
+  endpoint fallback trace metadata.
 - [test_scenario_matrix_contract.py](../../../services/model/tests/test_scenario_matrix_contract.py):
   Excel-derived scenario fixture counts, all 924 expanded model-contract
   basket judgments, stride-2 latency evidence shape, and explicit 0g payload
@@ -48,7 +49,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
 - [test_trigger_pipeline_regressions.py](../../../services/model/tests/test_trigger_pipeline_regressions.py):
   async frame reads, zero-frame retry, ffprobe polling, loadcell channel
   behavior, stable-tail-only chargeable delta, raw transient diagnostics, and
-  simple-fallback non-chargeable regressions.
+  simple-fallback non-chargeable regressions, including freezer endpoint
+  fallback acceptance/rejection boundaries.
 - [test_frame_trace.py](../../../services/model/tests/test_frame_trace.py):
   trace export, samples, allowed class filtering, rescue diagnostics, active
   product diagnostics, trigger worker trace behavior, and last-valid active

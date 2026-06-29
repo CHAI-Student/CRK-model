@@ -22,6 +22,18 @@ def _make_weight_series(values: list[float]) -> list[dict]:
     ]
 
 
+def _make_spanned_weight_series(
+    values: list[float],
+    *,
+    span_seconds: float = 3.0,
+) -> list[dict]:
+    step = span_seconds / max(len(values) - 1, 1)
+    return [
+        _make_loadcell(f"2026-04-02T15:00:{index * step:06.3f}Z", value)
+        for index, value in enumerate(values)
+    ]
+
+
 class _FakeAsyncStdout:
     def __init__(self, chunks: list[bytes]):
         self._chunks = deque(chunks)
@@ -361,3 +373,99 @@ def test_loadcell_analysis_marks_short_sample_simple_fallback():
     assert analysis.reason == "insufficient_stable_samples"
     assert analysis.decision_delta == 0.0
     assert analysis.stable_delta_source == "simple_fallback_diagnostic"
+
+
+def test_freezer_endpoint_fallback_uses_first_last_negative_delta():
+    from model_service.core import loadcell_stats
+
+    series = _make_spanned_weight_series(
+        [10.0, -40.0, 5.0, -45.0, 0.0, -50.0, -5.0, -55.0, -10.0, -60.0]
+    )
+
+    analysis = loadcell_stats.analyze_weight_delta(
+        series,
+        endpoint_fallback_enabled=True,
+    )
+
+    assert analysis.reason == "unstable_or_truncated_loadcell"
+    assert analysis.delta == 0.0
+    assert analysis.raw_simple_delta == pytest.approx(-70.0)
+    assert analysis.endpoint_delta_weight == pytest.approx(-70.0)
+    assert analysis.decision_delta == pytest.approx(-70.0)
+    assert analysis.decision_delta_reliable is True
+    assert analysis.endpoint_fallback_applied is True
+    assert analysis.endpoint_fallback_reason == "freezer_endpoint_delta"
+    assert analysis.stable_delta_source == "freezer_endpoint_fallback"
+    assert analysis.purchase_delta_candidates == [
+        {
+            "source": "freezer_endpoint_delta",
+            "weight": 70.0,
+            "delta": -70.0,
+            "segment_indices": [],
+            "reason": "freezer_endpoint_fallback",
+        }
+    ]
+
+
+def test_endpoint_fallback_is_disabled_for_default_refrigerated_analysis():
+    from model_service.core import loadcell_stats
+
+    series = _make_spanned_weight_series(
+        [10.0, -40.0, 5.0, -45.0, 0.0, -50.0, -5.0, -55.0, -10.0, -60.0]
+    )
+
+    analysis = loadcell_stats.analyze_weight_delta(series)
+
+    assert analysis.reason == "unstable_or_truncated_loadcell"
+    assert analysis.raw_simple_delta == pytest.approx(-70.0)
+    assert analysis.decision_delta == 0.0
+    assert analysis.endpoint_fallback_applied is False
+    assert analysis.endpoint_fallback_reason == "disabled"
+
+
+def test_endpoint_fallback_rejects_two_sample_payload():
+    from model_service.core import loadcell_stats
+
+    series = _make_spanned_weight_series([10.0, -60.0], span_seconds=3.0)
+
+    analysis = loadcell_stats.analyze_weight_delta(
+        series,
+        endpoint_fallback_enabled=True,
+    )
+
+    assert analysis.delta == pytest.approx(-70.0)
+    assert analysis.raw_simple_delta == pytest.approx(-70.0)
+    assert analysis.decision_delta == 0.0
+    assert analysis.endpoint_fallback_applied is False
+    assert analysis.endpoint_fallback_reason == "insufficient_samples"
+
+
+def test_endpoint_fallback_rejects_all_zero_and_invalid_payloads():
+    from model_service.core import loadcell_stats
+
+    all_zero = _make_spanned_weight_series([0.0] * 10)
+    invalid = [
+        {
+            "timestamp": f"2026-04-02T15:00:{index * 0.333:06.3f}Z",
+            "raw_value": ["bad", "bad"],
+            "filtered_value": ["bad", "bad"],
+            "filter_method": "exponential",
+        }
+        for index in range(10)
+    ]
+
+    zero_analysis = loadcell_stats.analyze_weight_delta(
+        all_zero,
+        endpoint_fallback_enabled=True,
+    )
+    invalid_analysis = loadcell_stats.analyze_weight_delta(
+        invalid,
+        endpoint_fallback_enabled=True,
+    )
+
+    assert zero_analysis.decision_delta == 0.0
+    assert zero_analysis.endpoint_fallback_applied is False
+    assert zero_analysis.endpoint_fallback_reason == "filtered_payload_not_nonzero"
+    assert invalid_analysis.decision_delta == 0.0
+    assert invalid_analysis.endpoint_fallback_applied is False
+    assert invalid_analysis.endpoint_fallback_reason == "filtered_payload_not_nonzero"

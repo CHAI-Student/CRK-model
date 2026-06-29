@@ -495,6 +495,18 @@ class LoadcellModel(BaseModel):
         default=15.0,
         description="Maximum per-window standard deviation for a stable loadcell region",
     )
+    freezer_endpoint_fallback_enabled: bool = Field(
+        default=True,
+        description="Use conservative first/last loadcell fallback for freezer removals",
+    )
+    endpoint_fallback_min_samples: int = Field(
+        default=10,
+        description="Minimum parsed samples required for endpoint loadcell fallback",
+    )
+    endpoint_fallback_min_span_seconds: float = Field(
+        default=2.0,
+        description="Minimum sample span required for endpoint loadcell fallback",
+    )
 
 
 class VideoModel(BaseModel):

@@ -24,7 +24,14 @@ so queue wait is a real latency dimension.
   is the last stable plateau whose tail reaches the end of the parsed payload
   within `stable_window_size - 1` samples. First/last sample deltas, raw
   extreme deltas, and simple fallbacks are diagnostics, not chargeable
-  `decision_delta` sources.
+  `decision_delta` sources except for the freezer endpoint fallback below.
+- Freezer triggers can enable a conservative endpoint fallback through
+  `MODEL__LOADCELL__FREEZER_ENDPOINT_FALLBACK_ENABLED=true`. When stable
+  history would otherwise produce no chargeable negative removal, a nonzero
+  payload with at least 10 samples over 2 seconds can use the filtered first
+  and last zone totals if the first total is near the payload high point and
+  the last total is near the payload low point. This handles freezer Camera
+  histories such as `+10g -> -60g` as `decision_delta=-70g` instead of `0g`.
 - Loadcell history is stable-plateau based. The service records
   `stable_plateaus`, `compound_segments`, paired opposite movements, ignored
   movement diagnostics, and ordered `purchase_delta_candidates`.
@@ -54,12 +61,16 @@ so queue wait is a real latency dimension.
   when product evidence exists in vision, stage counts, or diagnostics.
 - `decision_delta` is the movement used for removal judgment. It stays with the
   stable start/end net delta when that is valid, but can switch to an unpaired
-  negative segment when return/removal history is merged in one trigger.
+  negative segment when return/removal history is merged in one trigger, or to
+  the freezer endpoint delta when the freezer-only fallback is accepted.
 - Stable-tail diagnostics include `stable_delta_source`,
   `baseline_stable_avg`, `final_stable_avg`,
   `trailing_unstable_sample_count`, `raw_simple_delta`, and
-  `raw_extreme_delta`. `raw_extreme_delta` is useful for identifying transient
-  max/min swings, but it is never the chargeable movement.
+  `raw_extreme_delta`. Endpoint fallback diagnostics add
+  `decision_delta_reliable`, `endpoint_delta_weight`,
+  `endpoint_fallback_applied`, and `endpoint_fallback_reason`.
+  `raw_extreme_delta` is useful for identifying transient max/min swings, but
+  it is never the chargeable movement.
 - Opposite-sign movements within tolerance are paired out. This prevents pure
   remove-return cycles and press-hold-release patterns from becoming purchase
   candidates, while below-threshold micro bumps stay ignored.
@@ -121,7 +132,9 @@ queued work can be skipped if a later return balances it before video starts.
   `processing_stage=removal_waiting_for_stable_loadcell`, records
   `weight_diagnostics.removal_stabilization`, skips video and
   `ProductDecisionEngine.judge()`, and keeps the trigger out of
-  DoorSession/payment aggregation.
+  DoorSession/payment aggregation. The freezer endpoint fallback is the narrow
+  exception: when it marks `decision_delta_reliable=true`, the removal proceeds
+  to normal freezer judgment instead of the stable-loadcell waiting branch.
 - When that waiting path also has a missing or empty active-product inference
   snapshot, the trigger records active-product diagnostics before returning.
   `SessionData.failure_reason`, trace `final_result.failure_reason`,

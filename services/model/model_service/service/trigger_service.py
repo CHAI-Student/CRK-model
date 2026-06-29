@@ -303,6 +303,8 @@ class TriggerService:
         observed_delta = self._analysis_negative_trend(delta_analysis)
         if observed_delta >= -self.MIN_WEIGHT_CHANGE_GRAMS:
             return None
+        if delta_analysis.decision_delta_reliable:
+            return None
         if self._is_removal_stable_enough(delta_analysis):
             return None
 
@@ -383,7 +385,10 @@ class TriggerService:
             )
             await asyncio.sleep(wait_seconds)
 
-        refreshed = self._analyze_weight_delta(input_data.loadcells)
+        refreshed = self._analyze_weight_delta(
+            input_data.loadcells,
+            cabinet_type=input_data.cabinet_type,
+        )
         selected = refreshed
         if refreshed.delta <= 0 and delta_analysis.delta > 0:
             selected = delta_analysis
@@ -674,12 +679,16 @@ class TriggerService:
                     "reason": None,
                     "net_delta_weight": None,
                     "decision_delta_weight": None,
+                    "decision_delta_reliable": False,
                     "stable_delta_source": None,
                     "baseline_stable_avg": None,
                     "final_stable_avg": None,
                     "trailing_unstable_sample_count": 0,
                     "raw_simple_delta": None,
                     "raw_extreme_delta": None,
+                    "endpoint_delta_weight": None,
+                    "endpoint_fallback_applied": False,
+                    "endpoint_fallback_reason": None,
                     "stable_plateaus": [],
                     "purchase_delta_candidates": [],
                     "removal_segment_targets": [],
@@ -719,6 +728,7 @@ class TriggerService:
                 "reason": delta_analysis.reason,
                 "net_delta_weight": round(float(delta_analysis.delta), 1),
                 "decision_delta_weight": round(float(delta_analysis.decision_delta), 1),
+                "decision_delta_reliable": bool(delta_analysis.decision_delta_reliable),
                 "stable_delta_source": delta_analysis.stable_delta_source,
                 "baseline_stable_avg": round(
                     float(delta_analysis.baseline_stable_avg),
@@ -730,6 +740,11 @@ class TriggerService:
                 ),
                 "raw_simple_delta": round(float(delta_analysis.raw_simple_delta), 1),
                 "raw_extreme_delta": round(float(delta_analysis.raw_extreme_delta), 1),
+                "endpoint_delta_weight": round(float(delta_analysis.endpoint_delta_weight), 1),
+                "endpoint_fallback_applied": bool(
+                    delta_analysis.endpoint_fallback_applied
+                ),
+                "endpoint_fallback_reason": delta_analysis.endpoint_fallback_reason,
                 "stable_plateaus": [
                     plateau.to_dict()
                     for plateau in delta_analysis.stable_plateaus
@@ -1598,7 +1613,10 @@ class TriggerService:
             )
 
         # 3. 무게 변화량 조기 계산
-        delta_analysis = self._analyze_weight_delta(input_data.loadcells)
+        delta_analysis = self._analyze_weight_delta(
+            input_data.loadcells,
+            cabinet_type=input_data.cabinet_type,
+        )
         delta_weight = delta_analysis.decision_delta
         logger.info(
             f"[TRIGGER][loadcell] sample_count={delta_analysis.sample_count}, "
@@ -2942,7 +2960,10 @@ class TriggerService:
             )
 
         # 1-C. 무게 변화량 조기 계산 (v4.6 - 비디오 처리 전 검증)
-        delta_analysis = self._analyze_weight_delta(input_data.loadcells)
+        delta_analysis = self._analyze_weight_delta(
+            input_data.loadcells,
+            cabinet_type=input_data.cabinet_type,
+        )
         delta_weight = delta_analysis.decision_delta
         logger.info(f"[TRIGGER] 조기 무게 계산: delta_weight={delta_weight:.1f}g")
         payload_diagnostics = self._loadcell_trace_metadata(
@@ -3412,10 +3433,26 @@ class TriggerService:
                 return product_info.product_idx
         return None
 
+    @staticmethod
+    def _endpoint_fallback_enabled_for_cabinet(cabinet_type: Optional[str]) -> bool:
+        resolved_cabinet_type = (cabinet_type or config.machine.cabinet_type).strip().lower()
+        return (
+            resolved_cabinet_type == "freezer"
+            and config.loadcell.freezer_endpoint_fallback_enabled
+        )
+
     def _analyze_weight_delta(
-        self, loadcells: List[LoadcellReading]
+        self,
+        loadcells: List[LoadcellReading],
+        *,
+        cabinet_type: Optional[str] = None,
     ) -> loadcell_stats.LoadcellDeltaAnalysis:
-        analysis = loadcell_stats.analyze_weight_delta(loadcells)
+        analysis = loadcell_stats.analyze_weight_delta(
+            loadcells,
+            endpoint_fallback_enabled=self._endpoint_fallback_enabled_for_cabinet(
+                cabinet_type
+            ),
+        )
         logger.info(
             f"Weight delta calculated: {analysis.delta:.1f}g "
             f"(sample_count={analysis.sample_count}, parsed={analysis.parsed_sample_count}, "
@@ -3423,7 +3460,9 @@ class TriggerService:
             f"window={analysis.window_size}, threshold={analysis.stability_threshold:.1f}, "
             f"start_avg={analysis.start_avg:.1f}, end_avg={analysis.end_avg:.1f}, "
             f"start_idx={analysis.start_stable_idx}, end_idx={analysis.end_stable_idx}, "
-            f"fallback={analysis.used_simple_fallback}, reason={analysis.reason})"
+            f"fallback={analysis.used_simple_fallback}, reason={analysis.reason}, "
+            f"endpoint_fallback={analysis.endpoint_fallback_applied}, "
+            f"endpoint_reason={analysis.endpoint_fallback_reason})"
         )
         return analysis
 

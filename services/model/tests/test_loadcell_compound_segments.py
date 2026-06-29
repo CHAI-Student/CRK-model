@@ -1,6 +1,7 @@
 from model_service.core import loadcell_stats
 from model_service.service.trigger_service import (
     LoadcellReading,
+    TriggerInput,
     TriggerService,
 )
 from model_service.session import SessionStore
@@ -52,6 +53,26 @@ def _single_channel_plateau(
         )
         for offset in range(5)
     ]
+
+
+def _spanned_two_channel_series(
+    values: list[float],
+    *,
+    span_seconds: float = 3.0,
+) -> list[LoadcellReading]:
+    step = span_seconds / max(len(values) - 1, 1)
+    loadcells: list[LoadcellReading] = []
+    for index, total_weight in enumerate(values):
+        half = total_weight / 2
+        value = f"{half:+06.1f}"
+        loadcells.append(
+            LoadcellReading(
+                timestamp=f"2026-06-01T00:00:{index * step:06.3f}+00:00",
+                raw_value=[value, value],
+                filtered_value=[value, value],
+            )
+        )
+    return loadcells
 
 
 def test_compound_segments_preserve_net_delta_but_expose_internal_movements():
@@ -373,3 +394,40 @@ def test_trigger_metadata_records_compound_segments_and_recent_same_zone_returns
     ]
     assert metadata["recent_return_weights_g"] == [60.0]
     assert metadata["recent_same_zone_events"][0]["session_id"] == "previous-return"
+
+
+def test_freezer_endpoint_fallback_trace_metadata_avoids_low_weight_skip():
+    service = TriggerService(
+        video_processor=None,
+        engine=None,
+        session_store=SessionStore(),
+    )
+    loadcells = _spanned_two_channel_series(
+        [10.0, -40.0, 5.0, -45.0, 0.0, -50.0, -5.0, -55.0, -10.0, -60.0]
+    )
+    input_data = TriggerInput(
+        zone=2,
+        loadcells=loadcells,
+        top_video_path=None,
+        side_video_path=None,
+        cabinet_type="freezer",
+    )
+
+    analysis = service._analyze_weight_delta(loadcells, cabinet_type="freezer")
+    metadata = service._loadcell_trace_metadata(
+        loadcells,
+        analysis,
+        zone=2,
+        input_data=input_data,
+    )
+
+    assert analysis.decision_delta == -70.0
+    assert service._should_skip_low_weight(input_data, analysis, analysis.decision_delta) is False
+    assert service._removal_stabilization_from_analysis(analysis) is None
+    assert metadata["cabinet_type"] == "freezer"
+    assert metadata["decision_delta_weight"] == -70.0
+    assert metadata["decision_delta_reliable"] is True
+    assert metadata["endpoint_delta_weight"] == -70.0
+    assert metadata["endpoint_fallback_applied"] is True
+    assert metadata["endpoint_fallback_reason"] == "freezer_endpoint_delta"
+    assert metadata["stable_delta_source"] == "freezer_endpoint_fallback"

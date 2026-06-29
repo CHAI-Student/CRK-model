@@ -1,5 +1,18 @@
 # LLM Wiki Log
 
+## [2026-06-29] maintenance | freezer endpoint loadcell fallback
+
+- Documented the freezer-only endpoint fallback for nonzero Camera loadcell
+  histories where stable plateau analysis would otherwise leave
+  `decision_delta=0.0`. A continuous payload such as `+10g -> -60g` can now be
+  treated as `-70g` when sample count/span and endpoint high/low checks pass.
+- Clarified that missing, invalid-only, all-zero, and too-short payloads remain
+  no-charge diagnostics; the fallback is separate from the existing 0g
+  diagnostic branch.
+- Added regression coverage for endpoint fallback acceptance, default
+  refrigerated non-application, short-sample rejection, invalid/all-zero
+  rejection, and trigger trace metadata.
+
 ## [2026-06-29] maintenance | freezer vision-supported multi and no-charge diagnostics
 
 - Kept the `0g`/low-weight trigger contract fail-closed: engine judgment is
