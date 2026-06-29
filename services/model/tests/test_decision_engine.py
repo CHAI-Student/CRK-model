@@ -21,6 +21,11 @@ class MockActiveProduct:
 def reset_weight_identity_policy(monkeypatch):
     monkeypatch.setattr(config.weight, "identity_policy", "vision_first")
     monkeypatch.setattr(config.machine, "cabinet_type", "refrigerated")
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_vision_multi_without_weight_enabled",
+        True,
+    )
 
 
 def use_weight_aware_identity(monkeypatch):
@@ -38,6 +43,7 @@ def test_weight_model_defaults_to_vision_first_identity_policy():
     assert settings.fusion_vision_weight == 0.65
     assert settings.fusion_loadcell_weight == 0.25
     assert settings.fusion_count_weight == 0.10
+    assert settings.freezer_vision_multi_without_weight_enabled is True
 
 
 def make_candidate(
@@ -376,6 +382,115 @@ def test_freezer_vision_first_outputs_multi_kind_when_vision_is_strong(monkeypat
     ]
     assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
         "freezer_multi_kind_weight_supported"
+    )
+
+
+def test_freezer_vision_first_outputs_multi_kind_from_strong_vision_without_weight_fit(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_multi_min_confidence", 0.45)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "1": {
+            "class_id": 1,
+            "name": "FREEZER_A",
+            "freezerExitPathVotes": 7,
+            "freezer_roi_filtered_max_confidence": 0.93,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 4},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        },
+        "2": {
+            "class_id": 2,
+            "name": "FREEZER_B",
+            "freezerExitPathVotes": 6,
+            "freezer_roi_filtered_max_confidence": 0.89,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 3},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=1, name="FREEZER_A", confidence=0.93),
+            make_candidate(class_id=2, name="FREEZER_B", confidence=0.89),
+        ],
+        delta_weight=-999.0,
+        active_products=[
+            make_active_product(1, "FREEZER_A", weight=100.0, stock=5),
+            make_active_product(2, "FREEZER_B", weight=110.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (1, 1),
+        (2, 1),
+    ]
+    assert result.total_price == 7000
+    assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
+        "freezer_multi_kind_vision_supported"
+    )
+    assert trace.weight_diagnostics["freezer_vision_first"]["weight_reliable"] is False
+
+
+def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_vision_multi_without_weight_enabled",
+        False,
+    )
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "1": {
+            "class_id": 1,
+            "name": "FREEZER_A",
+            "freezerExitPathVotes": 7,
+            "freezer_roi_filtered_max_confidence": 0.93,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 4},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        },
+        "2": {
+            "class_id": 2,
+            "name": "FREEZER_B",
+            "freezerExitPathVotes": 6,
+            "freezer_roi_filtered_max_confidence": 0.89,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 3},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(class_id=1, name="FREEZER_A", confidence=0.93),
+            make_candidate(class_id=2, name="FREEZER_B", confidence=0.89),
+        ],
+        delta_weight=-999.0,
+        active_products=[
+            make_active_product(1, "FREEZER_A", weight=100.0, stock=5),
+            make_active_product(2, "FREEZER_B", weight=110.0, stock=5),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.PARTIAL
+    assert len(result.products) == 1
+    assert trace.weight_diagnostics["freezer_vision_first"]["reason"] != (
+        "freezer_multi_kind_vision_supported"
     )
 
 

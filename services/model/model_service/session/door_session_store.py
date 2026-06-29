@@ -431,6 +431,62 @@ class DoorSessionStore:
         with self._lock:
             return self._pending_trigger_snapshot_locked()
 
+    def record_no_charge_diagnostic(
+        self,
+        *,
+        zone: int,
+        session_id: str,
+        reason: str,
+        delta_weight: float,
+        processing_stage: str,
+        payload_diagnostics: Optional[dict] = None,
+        video_paths: Optional[dict] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        """Attach a no-charge trigger diagnostic to the active global session."""
+        diagnostic = {
+            "zone": int(zone),
+            "sessionId": str(session_id),
+            "reason": str(reason),
+            "deltaWeight": round(float(delta_weight), 1),
+            "processingStage": str(processing_stage),
+            "timestamp": time.time(),
+        }
+        if message:
+            diagnostic["message"] = str(message)
+        if video_paths:
+            diagnostic["videoPaths"] = dict(video_paths)
+        if payload_diagnostics:
+            field_map = {
+                "payload_state": "payloadState",
+                "raw_state": "rawState",
+                "filtered_state": "filteredState",
+                "first_raw_total": "firstRawTotal",
+                "last_raw_total": "lastRawTotal",
+                "first_filtered_total": "firstFilteredTotal",
+                "last_filtered_total": "lastFilteredTotal",
+                "filtered_channel_count": "filteredChannelCount",
+                "filtered_zero_channel_count": "filteredZeroChannelCount",
+            }
+            for source, target in field_map.items():
+                if source in payload_diagnostics:
+                    diagnostic[target] = payload_diagnostics[source]
+
+        with self._lock:
+            if self._global_session is None:
+                logger.debug(
+                    "[NO-CHARGE-DIAGNOSTIC] ignored without active global session: "
+                    f"zone={zone}, session_id={session_id}, reason={reason}"
+                )
+                return
+            self._global_session.no_charge_diagnostics.append(diagnostic)
+
+        logger.info(
+            "[NO-CHARGE-DIAGNOSTIC] "
+            f"zone={zone} session_id={session_id} reason={reason} "
+            f"delta={delta_weight:.1f}g"
+        )
+
     def notify_trigger_enqueued(
         self,
         zone: int,

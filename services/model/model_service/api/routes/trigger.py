@@ -478,6 +478,46 @@ def _record_raw_and_filter_handled_candidates(
     )
 
 
+def _loadcell_payload_issue_reason(payload_diagnostics: Optional[dict]) -> Optional[str]:
+    if not payload_diagnostics:
+        return None
+    payload_state = payload_diagnostics.get("payload_state")
+    raw_state = payload_diagnostics.get("raw_state")
+    if payload_state == "all_zero" and raw_state == "nonzero":
+        return "filtered_all_zero_raw_nonzero"
+    if payload_state in {"empty_payload", "invalid_only", "all_zero"}:
+        return f"loadcell_payload_{payload_state}"
+    return None
+
+
+def _record_no_charge_diagnostic(
+    *,
+    door_session_store: DoorSessionStore | None,
+    request: TriggerRequest,
+    session_id: str,
+    reason: str,
+    delta_weight: float,
+    processing_stage: str,
+    payload_diagnostics: Optional[dict],
+    message: str,
+) -> None:
+    if door_session_store is None:
+        return
+    door_session_store.record_no_charge_diagnostic(
+        zone=request.zone,
+        session_id=session_id,
+        reason=reason,
+        delta_weight=delta_weight,
+        processing_stage=processing_stage,
+        payload_diagnostics=payload_diagnostics,
+        video_paths={
+            "top": str(request.videos.top) if request.videos.top else "",
+            "side": str(request.videos.side) if request.videos.side else "",
+        },
+        message=message,
+    )
+
+
 def _validate_video_paths(videos: VideosPaths) -> None:
     if videos.top and not Path(videos.top).exists():
         raise HTTPException(status_code=400, detail=f"Top video file not found: {videos.top}")
@@ -804,6 +844,20 @@ async def trigger_judgment(
                         ),
                     ),
                 )
+                diagnostic_reason = (
+                    _loadcell_payload_issue_reason(payload_diagnostics)
+                    or "low_weight_video_diagnostic"
+                )
+                _record_no_charge_diagnostic(
+                    door_session_store=door_session_store,
+                    request=request,
+                    session_id=session_id,
+                    reason=diagnostic_reason,
+                    delta_weight=delta_weight,
+                    processing_stage="low_weight_video_diagnostic",
+                    payload_diagnostics=payload_diagnostics,
+                    message="engine skipped; excluded from close summary",
+                )
                 trace_context.finalize(status="complete")
                 return TriggerResponse(
                     success=True,
@@ -837,6 +891,19 @@ async def trigger_judgment(
                     "[TRIGGER] ignored low-weight trigger excluded from DoorSession "
                     f"summary: zone={request.zone}, session_id={session_id}, "
                     f"delta={delta_weight:.1f}g"
+                )
+                _record_no_charge_diagnostic(
+                    door_session_store=door_session_store,
+                    request=request,
+                    session_id=session_id,
+                    reason=(
+                        _loadcell_payload_issue_reason(payload_diagnostics)
+                        or "low_weight_ignored"
+                    ),
+                    delta_weight=delta_weight,
+                    processing_stage="skipped_low_weight",
+                    payload_diagnostics=payload_diagnostics,
+                    message=f"Low weight change ({abs(delta_weight):.1f}g)",
                 )
 
             trace_context.record_weight_diagnostics(

@@ -869,6 +869,105 @@ def test_video_processor_freezer_handled_filter_keeps_weight_tiebreak_candidate(
     )
 
 
+def test_video_processor_freezer_handled_filter_preserves_strong_multi_vision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_vision_multi_without_weight_enabled",
+        True,
+    )
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-vision-multi",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "41": {
+            "class_id": 41,
+            "name": "FREEZER_A",
+            "freezerExitPathVotes": 8,
+            "freezer_roi_filtered_max_confidence": 0.94,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 4},
+                "side": {"freezerExitPathVotes": 4},
+            },
+        },
+        "42": {
+            "class_id": 42,
+            "name": "FREEZER_B",
+            "freezerExitPathVotes": 6,
+            "freezer_roi_filtered_max_confidence": 0.9,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 3},
+                "side": {"freezerExitPathVotes": 3},
+            },
+        },
+    }
+    vote_results = [
+        VoteResult(
+            class_id=41,
+            class_name="FREEZER_A",
+            vote_count=12,
+            max_confidence=0.94,
+            avg_confidence=0.9,
+            weighted_confidence=0.94,
+            top_detected=True,
+            side_detected=True,
+            top_vote_count=6,
+            side_vote_count=6,
+        ),
+        VoteResult(
+            class_id=42,
+            class_name="FREEZER_B",
+            vote_count=10,
+            max_confidence=0.9,
+            avg_confidence=0.86,
+            weighted_confidence=0.9,
+            top_detected=True,
+            side_detected=True,
+            top_vote_count=5,
+            side_vote_count=5,
+        ),
+        VoteResult(
+            class_id=99,
+            class_name="STATIC_NOISE",
+            vote_count=9,
+            max_confidence=0.88,
+            avg_confidence=0.8,
+            weighted_confidence=0.88,
+            top_detected=True,
+            top_vote_count=9,
+        ),
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-999.0,
+        product_weights={41: 100.0, 42: 110.0, 99: 999.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    assert [candidate.class_id for candidate in handled] == [41, 42]
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert diagnostics["reason"] == "freezer_multi_kind_vision_passthrough"
+    assert diagnostics["handled_candidate_count"] == 2
+    assert diagnostics["selectedClassIds"] == [41, 42]
+
+
 def test_video_processor_freezer_exit_path_prefers_melona_over_static_lala(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

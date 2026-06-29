@@ -82,6 +82,10 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   residual can break the tie.
 - `MODEL__WEIGHT__FREEZER_MULTI_MIN_CONFIDENCE=0.45` is the freezer
   multi-kind vision evidence floor.
+- `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true` lets
+  strong freezer dual-camera exit-path evidence create a `partial` multi-kind
+  result even when combined loadcell residual does not fit. Set it to `false`
+  to roll back to segment/combined-weight-supported freezer multi-kind only.
 - `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` is the per-item confidence
   floor for multi-kind combinations.
 - `MODEL__WEIGHT__SAME_PRODUCT_COUNT_TOLERANCE_GRAMS=5.0` applies only to the

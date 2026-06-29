@@ -1,6 +1,6 @@
 # CRK-model LLM Wiki
 
-Last updated: 2026-06-18
+Last updated: 2026-06-29
 
 This wiki is the LLM-facing map of the CRK model service. The original
 documents under `docs/` remain the raw sources. Pages here summarize and
@@ -109,6 +109,11 @@ shape without rereading every long historical document.
   removal segment, the handled list defaults to one product; weight residual
   breaks ties inside the top confidence band, and same-class count hints are
   used only when the target weight supports that count.
+- With `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`,
+  strong freezer dual-camera exit-path evidence can preserve multiple handled
+  product identities as a `partial` multi-kind result even when combined
+  loadcell residual does not fit. Set it to `false` to restore the stricter
+  segment/combined-weight-supported freezer multi-kind behavior.
 - Side-camera ROI keeps hard `center_x <= 400` in the left 480 crop and adds a
   conditional `+5px` regular-candidate soft band. This catches Pepsi detections
   around `x=402..404` while leaving farther-right Trevi-style detections out.
@@ -220,7 +225,10 @@ shape without rereading every long historical document.
   record `count_exceeds_close_repeat_cap`.
 - Low/zero-weight tail triggers can run diagnostic video processing, but the
   trace records `engine_skipped=true` and the trigger stays excluded from
-  CLOSE/payment.
+  CLOSE/payment. Active global sessions now retain no-charge diagnostics for
+  these skipped events, surfaced at close through
+  `decisionSummary.diagnosticZoneLines` and
+  `decisionSummary.zones[*].noChargeDiagnostics`.
 - No-vision active-only forced fallback is not part of the default
   `vision_first` identity policy. The older low-weight noise guard still
   applies when `MODEL__WEIGHT__IDENTITY_POLICY=weight_aware` is explicitly

@@ -98,20 +98,25 @@ Important inputs:
   `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND` of the best confidence use
   weight residual as a tie-break.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
-  `weight_used_as=tiebreaker`, `weight_reliable`, `weight_residual`,
-  `selectionTier`, `freezerExitPathVotes`, and the full considered/selected
-  candidate list. A large residual becomes `partial`, not an automatic
-  identity rejection.
+  `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
+  `weight_residual`, `selectionTier`, `freezerExitPathVotes`, and the full
+  considered/selected candidate list. A large residual becomes `partial`, not
+  an automatic identity rejection.
 - Single freezer removal segments now use a handled-candidate narrowing step:
   raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
   engine input, and DoorSession snapshots receive the one handled product
   selected by freezer exit-path evidence and weight residual before falling
   back to top confidence-band weight residual.
-- Multi-kind freezer results are created only when segment/compound loadcell
-  evidence indicates multiple handled items, or when the combined freezer
-  candidate weights fit the target inside the existing count-scaled tolerance.
-  Same-class count greater than one is allowed only when the voting
-  `instance_count_hint` is also supported by the target weight.
+- Multi-kind freezer results prefer segment/compound loadcell evidence first,
+  then combined freezer candidate weights that fit the target inside the
+  existing count-scaled tolerance. With
+  `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`, strong
+  dual-camera exit-path evidence can also select multiple freezer candidates
+  without a loadcell fit. That path returns detected products/prices as
+  `partial`, records `freezer_multi_kind_vision_supported`, and treats the
+  loadcell residual as diagnostic. Same-class count greater than one is still
+  allowed only when the voting `instance_count_hint` is supported by the target
+  weight.
 
 ## StrictWeightMatcher
 

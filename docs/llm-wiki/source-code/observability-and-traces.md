@@ -35,6 +35,9 @@ Important patterns include:
   source.
 - `[OPS][RESULT]`: final status, products, total price.
 - `[OPS][CLOSE]`: close summary across zones.
+- `[OPS][CLOSE_DIAGNOSTIC]`: no-charge skipped-trigger diagnostics by zone,
+  such as `diagnostic=loadcell_payload_all_zero`, emitted without adding any
+  products or price to the close summary.
 
 ## Latency Events
 
@@ -98,7 +101,8 @@ start writing sample images during inference.
   reduce a raw repeated-count result, and `same_weight_candidate_collision`
   when regular candidate identity beats a same-weight active/rescue collision.
   Freezer decisions add `decision_branch=freezer_vision_first` with
-  `weight_used_as=tiebreaker`, `weight_reliable`, `weight_residual`, and
+  `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
+  `weight_residual`, `freezer_multi_kind_vision_supported`, and
   selected/considered candidate diagnostics.
 - final result and storage result
 
@@ -137,6 +141,11 @@ the user explicitly asks.
   filtered zone channels were literally zero, and `nonzero` means the payload
   had usable values but the computed delta was still within the low-weight
   threshold.
+- If CLOSE still prints `zones=none`, inspect optional
+  `decisionSummary.diagnosticZoneLines`,
+  `decisionSummary.zones[*].noChargeDiagnostics`, and
+  `[OPS][CLOSE_DIAGNOSTIC]`. These fields explain no-charge skipped loadcell
+  payloads without changing payment totals.
 - If raw detections are zero, first check `active_product_diagnostics`. An empty
   allowlist with `empty_allowlist_fail_closed` means the active inventory
   snapshot blocked inference before vision had a chance to detect products.
@@ -175,8 +184,8 @@ the user explicitly asks.
 - Multi-zone CLOSE pending responses expose `pendingTriggerCount`,
   `pendingChargeableVisionCount`, `pendingTriggerZones`, and
   `pendingTriggerSessionIds`; final CLOSE summaries expose
-  `missing_active_products` so Node/operator logs do not misread the result as
-  a vision-only miss.
+  `missing_active_products` plus optional no-charge diagnostics so
+  Node/operator logs do not misread the result as a vision-only miss.
 - If strict mismatch occurs, compare active product snapshot, candidate weights,
   `weight_diagnostics`, and `StrictWeightMatcher.last_diagnostics`.
 - If a rank-1 regular candidate and a lower-rank threshold/ROI rescue candidate
@@ -271,7 +280,9 @@ the user explicitly asks.
 - For `<=5g` tail triggers with video, `decision_branch` can be
   `low_weight_video_diagnostic`. In that branch `engine_skipped=true`,
   `excluded_from_close_summary=true`, and `candidates`/`stage_counts_by_class`
-  are diagnostic evidence only; no product should be added to DoorSession.
+  are diagnostic evidence only; no product should be added to DoorSession. An
+  active global session may still expose `noChargeDiagnostics` at CLOSE so the
+  skipped trigger is visible to operators.
 - If OPS candidates show a regular rank-1 product but the result would
   otherwise select a same-weight active product or lower-rank rescue candidate,
   inspect `weight_diagnostics.same_weight_candidate_collision`. An accepted

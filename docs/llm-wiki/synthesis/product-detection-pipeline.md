@@ -97,10 +97,13 @@ vision-supported product identity.
   the handled candidate list sent to OPS, the engine, and DoorSession is
   narrowed for single freezer removal segments. In that case one product is
   selected by freezer exit-path evidence and weight residual, with top
-  confidence-band weight residual used only as fallback. Multi-kind or
-  same-class multi-count freezer results require segment/compound evidence or a
-  combined weight/count fit; visible products are not summed by confidence
-  alone.
+  confidence-band weight residual used only as fallback. Weak/static multi-kind
+  freezer noise is not summed by confidence alone. With
+  `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`, however,
+  strong dual-camera freezer exit-path evidence can pass multiple handled
+  candidates to the engine and return those identities as `partial` even when
+  loadcell residual does not fit. Setting the flag to `false` restores the
+  stricter segment/compound or combined weight/count requirement.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count
@@ -250,7 +253,11 @@ vision-supported product identity.
   strong repeat evidence such as Sky Barley `x3`, while rejecting impossible
   corrections such as HomeRunBall `x33`.
 - Low/zero-weight tail triggers can run video diagnostics when configured, but
-  they skip engine judgment and stay excluded from CLOSE/payment.
+  they skip engine judgment and stay excluded from CLOSE/payment. Active global
+  sessions expose optional no-charge close diagnostics, such as
+  `decisionSummary.diagnosticZoneLines` and zone-level
+  `noChargeDiagnostics`, so a `0.0g` loadcell payload is visible without
+  creating products or price.
 - Active-only forced fallback does not convert tiny no-vision shelf movement
   into the nearest small product. If a `6-10g` negative delta has no candidate
   evidence and sits below the lightest active product minus strict tolerance,

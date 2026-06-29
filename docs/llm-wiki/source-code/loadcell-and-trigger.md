@@ -169,7 +169,9 @@ queued work can be skipped if a later return balances it before video starts.
 - If `abs(delta_weight)` is less than or equal to
   `MODEL__TRIGGER__MIN_WEIGHT_CHANGE_GRAMS`, the trigger is non-chargeable.
 - Ignored low-weight triggers save a skipped session and trace diagnostics, but
-  are excluded from DoorSession/global close aggregation.
+  are excluded from DoorSession/global close aggregation. If a global door
+  session is active, the service also records a no-charge diagnostic on the
+  global session; this does not add products, counts, prices, or trigger count.
 - When `MODEL__TRIGGER__LOW_WEIGHT_VISION_FALLBACK=true` and a video path is
   present, the service and compatibility `/trigger` route run video processing
   for diagnostics only. They record candidates/stage counts, save
@@ -181,6 +183,12 @@ queued work can be skipped if a later return balances it before video starts.
 - Low-weight traces include `low_weight_ignored`, `threshold_grams`, and
   `excluded_from_close_summary` style diagnostics so field logs do not look
   like a vision miss.
+- CLOSE responses expose skipped low-weight/loadcell-payload diagnostics
+  through optional `decisionSummary.diagnosticZoneLines` and
+  `decisionSummary.zones[*].noChargeDiagnostics`. The summary text and payment
+  totals remain unchanged, so a zone can show
+  `diagnostic=loadcell_payload_all_zero` while `zones=none` and
+  `total_price=0` are still correct.
 - Low-weight skip behavior remains non-chargeable, but suspect payloads now get
   an explicit `loadcell_payload_diagnostic` branch in weight diagnostics.
   `loadcell_payload_reason` distinguishes empty payloads, invalid-only filtered

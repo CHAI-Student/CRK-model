@@ -1193,6 +1193,43 @@ def test_complete_close_response_exposes_missing_active_products_failure():
     assert "reason=missing_active_products" in response["decisionSummaryText"]
 
 
+def test_complete_close_response_exposes_no_charge_loadcell_diagnostic():
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.session.global_door_session import GlobalDoorSession
+
+    global_session = GlobalDoorSession(
+        global_session_id="global-zone-1-zero",
+        status="complete",
+        no_charge_diagnostics=[
+            {
+                "zone": 1,
+                "sessionId": "zone-1-zero-session",
+                "reason": "loadcell_payload_all_zero",
+                "deltaWeight": 0.0,
+                "processingStage": "skipped_loadcell_payload_all_zero",
+                "payloadState": "all_zero",
+            }
+        ],
+        finalized_at=time.time(),
+    )
+
+    response = _handle_door_close(FakeCloseReadyStore(global_session))
+    summary = response["decisionSummary"]
+    zone_1 = summary["zones"][0]
+
+    assert response["status"] == "complete_no_products"
+    assert zone_1["products"] == []
+    assert zone_1["weightDelta"] == 0.0
+    assert zone_1["triggerCount"] == 0
+    assert zone_1["noChargeDiagnostics"][0]["reason"] == "loadcell_payload_all_zero"
+    assert summary["diagnosticZoneLines"] == [
+        "zone=1 weight_delta=0.0g diagnostic=loadcell_payload_all_zero"
+    ]
+    assert response["decisionSummaryText"] == (
+        "zones=none; total_weight_delta=0.0g total_price=0"
+    )
+
+
 def test_close_signal_uses_short_default_initial_wait(tmp_path):
     from model_service.session import DoorSessionStore
 

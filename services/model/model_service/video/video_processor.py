@@ -1122,6 +1122,88 @@ class VideoProcessor:
                 }
             )
 
+        def considered_entry(item: dict[str, Any]) -> dict[str, Any]:
+            unit_weight = item["unit_weight"]
+            return {
+                "rank": int(item["index"]) + 1,
+                "class_id": int(item["vote"].class_id),
+                "name": item["vote"].class_name,
+                "confidence": round(float(item["confidence"]), 4),
+                "unitWeight": round(float(unit_weight), 1)
+                if unit_weight is not None
+                else None,
+                "weightResidual": round(float(item["residual"]), 1),
+                "freezerExitPathVotes": int(item["freezer_exit_path_votes"]),
+                "source": str(item["source"]),
+                "stageOnly": bool(item["stage_only"]),
+                "identitySupported": bool(item["identity_supported"]),
+                "cameraExitCounts": dict(item["camera_exit_counts"]),
+                "dualCameraExitPath": bool(item["dual_camera_exit_path"]),
+                "roiXAvg": (
+                    round(float(item["roi_x_avg"]), 1)
+                    if item["roi_x_avg"] is not None
+                    else None
+                ),
+                "roiYAvg": (
+                    round(float(item["roi_y_avg"]), 1)
+                    if item["roi_y_avg"] is not None
+                    else None
+                ),
+                "selectionTier": str(item["reason"]),
+            }
+
+        if bool(config.weight.freezer_vision_multi_without_weight_enabled):
+            multi_min_confidence = float(config.weight.freezer_multi_min_confidence)
+            strong_multi_items = [
+                item
+                for item in scored
+                if float(item["confidence"]) >= multi_min_confidence
+                and int(item["freezer_exit_path_votes"]) >= min_exit_path_votes
+                and bool(item["dual_camera_exit_path"])
+                and bool(item["identity_supported"])
+            ]
+            if len(strong_multi_items) >= 2:
+                strong_multi_items.sort(
+                    key=lambda item: (int(item["index"]), -float(item["confidence"]))
+                )
+                selected_items = strong_multi_items[: max(2, int(config.vision.top_k))]
+                selected_votes = [
+                    replace(
+                        item["vote"],
+                        freezer_exit_path_votes=int(item["freezer_exit_path_votes"]),
+                    )
+                    for item in selected_items
+                ]
+                diagnostics = {
+                    "accepted": False,
+                    "reason": "freezer_multi_kind_vision_passthrough",
+                    "raw_candidate_count": len(votes),
+                    "stage_only_candidate_count": len(stage_only_votes),
+                    "handled_candidate_count": len(selected_votes),
+                    "target_weight": round(target_weight, 1),
+                    "minFreezerExitPathVotes": min_exit_path_votes,
+                    "multiMinConfidence": round(multi_min_confidence, 4),
+                    "selectedClassIds": [
+                        int(item["vote"].class_id) for item in selected_items
+                    ],
+                    "selected": [
+                        considered_entry(item) for item in selected_items
+                    ],
+                    "considered": [considered_entry(item) for item in scored],
+                }
+                cls._record_freezer_candidate_filter_diagnostics(
+                    trace_context,
+                    diagnostics,
+                )
+                logger.info(
+                    "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=%s "
+                    "reason=freezer_multi_kind_vision_passthrough",
+                    log_prefix,
+                    len(votes),
+                    len(selected_votes),
+                )
+                return selected_votes
+
         handled_pool = [item for item in scored if int(item["tier"]) < 2]
         if handled_pool:
             selected_item = min(
@@ -1153,36 +1235,6 @@ class VideoProcessor:
                 ),
             )
             reason = "single_removal_weight_tiebreak"
-
-        def considered_entry(item: dict[str, Any]) -> dict[str, Any]:
-            unit_weight = item["unit_weight"]
-            return {
-                "rank": int(item["index"]) + 1,
-                "class_id": int(item["vote"].class_id),
-                "name": item["vote"].class_name,
-                "confidence": round(float(item["confidence"]), 4),
-                "unitWeight": round(float(unit_weight), 1)
-                if unit_weight is not None
-                else None,
-                "weightResidual": round(float(item["residual"]), 1),
-                "freezerExitPathVotes": int(item["freezer_exit_path_votes"]),
-                "source": str(item["source"]),
-                "stageOnly": bool(item["stage_only"]),
-                "identitySupported": bool(item["identity_supported"]),
-                "cameraExitCounts": dict(item["camera_exit_counts"]),
-                "dualCameraExitPath": bool(item["dual_camera_exit_path"]),
-                "roiXAvg": (
-                    round(float(item["roi_x_avg"]), 1)
-                    if item["roi_x_avg"] is not None
-                    else None
-                ),
-                "roiYAvg": (
-                    round(float(item["roi_y_avg"]), 1)
-                    if item["roi_y_avg"] is not None
-                    else None
-                ),
-                "selectionTier": str(item["reason"]),
-            }
 
         selected_index = int(selected_item["index"])
         selected_vote = selected_item["vote"]

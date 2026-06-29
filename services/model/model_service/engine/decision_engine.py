@@ -1152,9 +1152,44 @@ class ProductDecisionEngine:
                     )
                 )
         if not viable:
+            vision_supported = self._select_freezer_vision_supported_multi_options(
+                high_confidence,
+                max_kinds=max_kinds,
+            )
+            if vision_supported is not None:
+                return vision_supported, "freezer_multi_kind_vision_supported"
             return None
         viable.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
         return viable[0][4], "freezer_multi_kind_weight_supported"
+
+    @staticmethod
+    def _select_freezer_vision_supported_multi_options(
+        options: list[dict[str, Any]],
+        *,
+        max_kinds: int,
+    ) -> Optional[list[dict[str, Any]]]:
+        if not bool(config.weight.freezer_vision_multi_without_weight_enabled):
+            return None
+
+        min_exit_path_votes = max(
+            0,
+            int(getattr(config.vision, "freezer_min_exit_path_votes", 3)),
+        )
+        strong_options = [
+            option
+            for option in options
+            if int(option.get("freezer_exit_path_votes", 0) or 0)
+            >= min_exit_path_votes
+            and bool(option.get("dual_camera_exit_path"))
+            and bool(option.get("diagnostics", {}).get("motion_gate_passed", True))
+        ]
+        if len(strong_options) < 2:
+            return None
+
+        strong_options.sort(
+            key=lambda item: (int(item["rank"]), -float(item["confidence"]))
+        )
+        return strong_options[: min(max_kinds, len(strong_options))]
 
     @staticmethod
     def _freezer_trace_has_multi_item_evidence(trace_context: Optional[object]) -> bool:
@@ -1220,7 +1255,11 @@ class ProductDecisionEngine:
             "explained_weight": round(explained_weight, 1),
             "weight_residual": round(residual, 1),
             "tolerance": round(tolerance, 1),
-            "weight_used_as": "tiebreaker",
+            "weight_used_as": (
+                "diagnostic"
+                if reason == "freezer_multi_kind_vision_supported"
+                else "tiebreaker"
+            ),
             "weight_reliable": weight_reliable,
             "selected": [option["diagnostics"] for option in selected_options],
             "considered": considered,

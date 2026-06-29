@@ -628,11 +628,16 @@ def _build_zone_result(
         Zone 결과 딕셔너리
     """
     door_session = global_session.zone_sessions.get(zone)
+    no_charge_diagnostics = [
+        dict(item)
+        for item in getattr(global_session, "no_charge_diagnostics", [])
+        if int(item.get("zone", 0) or 0) == int(zone)
+    ]
 
     if door_session is None:
         # 해당 zone에 trigger가 없는 경우
         if is_complete:
-            return {
+            result = {
                 "zone": zone,
                 "products": [],
                 "productNames": [],
@@ -641,8 +646,11 @@ def _build_zone_result(
                 "productCount": 0,
                 "weightDelta": 0.0,
             }
+            if no_charge_diagnostics:
+                result["noChargeDiagnostics"] = no_charge_diagnostics
+            return result
         else:
-            return {
+            result = {
                 "zone": zone,
                 "interim_products": [],
                 "interimProductNames": [],
@@ -651,6 +659,9 @@ def _build_zone_result(
                 "interimProductCount": 0,
                 "weightDelta": 0.0,
             }
+            if no_charge_diagnostics:
+                result["noChargeDiagnostics"] = no_charge_diagnostics
+            return result
 
     # 활성 상품 조회 (count > 0)
     active_products = door_session.get_active_products()
@@ -704,6 +715,8 @@ def _build_zone_result(
         }
         if final_weight_validation:
             result["finalWeightValidation"] = final_weight_validation
+        if no_charge_diagnostics:
+            result["noChargeDiagnostics"] = no_charge_diagnostics
         return result
     else:
         result = {
@@ -719,6 +732,8 @@ def _build_zone_result(
         }
         if final_weight_validation:
             result["finalWeightValidation"] = final_weight_validation
+        if no_charge_diagnostics:
+            result["noChargeDiagnostics"] = no_charge_diagnostics
         return result
 
 
@@ -727,6 +742,7 @@ def _build_decision_summary(global_session: GlobalDoorSession, zones: List[dict]
     summary_zones = []
     zone_lines = []
     active_zone_lines = []
+    diagnostic_zone_lines = []
     for zone in zones:
         products = zone.get("products", [])
         product_text = ", ".join(
@@ -760,6 +776,16 @@ def _build_decision_summary(global_session: GlobalDoorSession, zones: List[dict]
             "products": products,
             "failureReasons": failure_reasons,
         }
+        no_charge_diagnostics = zone.get("noChargeDiagnostics", [])
+        if no_charge_diagnostics:
+            summary_zone["noChargeDiagnostics"] = no_charge_diagnostics
+            for diagnostic in no_charge_diagnostics:
+                diagnostic_line = (
+                    f"zone={zone.get('zone')} "
+                    f"weight_delta={float(diagnostic.get('deltaWeight', 0.0)):.1f}g "
+                    f"diagnostic={diagnostic.get('reason', 'no_charge')}"
+                )
+                diagnostic_zone_lines.append(diagnostic_line)
         if zone.get("finalWeightValidation"):
             summary_zone["finalWeightValidation"] = zone["finalWeightValidation"]
         summary_zones.append(summary_zone)
@@ -776,6 +802,8 @@ def _build_decision_summary(global_session: GlobalDoorSession, zones: List[dict]
         "zones": summary_zones,
         "zoneLines": zone_lines,
     }
+    if diagnostic_zone_lines:
+        summary["diagnosticZoneLines"] = diagnostic_zone_lines
     summary_text = (
         "; ".join(active_zone_lines or ["zones=none"])
         + f"; total_weight_delta={total_weight_delta:.1f}g "
@@ -808,6 +836,8 @@ def _build_decision_summary(global_session: GlobalDoorSession, zones: List[dict]
             f"products={product_text}{failure_text}"
         )
     ops_logger.info(f"[OPS][CLOSE] {summary_text}")
+    for diagnostic_line in diagnostic_zone_lines:
+        ops_logger.info(f"[OPS][CLOSE_DIAGNOSTIC] {diagnostic_line}")
 
     return summary
 

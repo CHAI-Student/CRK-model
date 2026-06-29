@@ -25,7 +25,7 @@ v4.7 변경사항:
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .door_session import DoorSession
 
@@ -62,6 +62,7 @@ class GlobalDoorSession:
     last_trigger_at: Optional[float] = None  # 마지막 trigger 시각 (v4.6)
     pending_close: bool = False  # 첫 CLOSE 수신 여부 (v4.7)
     first_close_at: Optional[float] = None  # 첫 CLOSE 시각 (v4.7)
+    no_charge_diagnostics: List[dict] = field(default_factory=list)
 
     @property
     def total_price(self) -> int:
@@ -168,6 +169,9 @@ class GlobalDoorSession:
             "last_trigger_at": self.last_trigger_at,
             "pending_close": self.pending_close,  # v4.7
             "first_close_at": self.first_close_at,  # v4.7
+            "no_charge_diagnostics": [
+                dict(item) for item in self.no_charge_diagnostics
+            ],
             "summary": {
                 "total_price": self.total_price,
                 "total_product_count": self.total_product_count,

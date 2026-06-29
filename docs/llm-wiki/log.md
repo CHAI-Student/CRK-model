@@ -1,5 +1,24 @@
 # LLM Wiki Log
 
+## [2026-06-29] maintenance | freezer vision-supported multi and no-charge diagnostics
+
+- Kept the `0g`/low-weight trigger contract fail-closed: engine judgment is
+  skipped, products/prices stay out of DoorSession/payment, and diagnostic
+  video processing remains trace-only when enabled.
+- Added close-time no-charge visibility for skipped loadcell payloads.
+  `decisionSummary.diagnosticZoneLines` and
+  `decisionSummary.zones[*].noChargeDiagnostics` now expose reasons such as
+  `loadcell_payload_all_zero` so a zone 1 `0.0g` event is not mistaken for a
+  pure vision miss.
+- Added the freezer rollback flag
+  `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true`.
+  When enabled, strong dual-camera freezer exit-path evidence can preserve
+  multiple product identities as a `partial` freezer result even when the
+  combined loadcell residual does not fit.
+- Updated freezer handled-candidate policy: weak/static freezer noise is still
+  narrowed to a single handled candidate, but strong multi-product freezer
+  exit-path evidence is passed through to the decision engine.
+
 ## [2026-06-19] maintenance | freezer handled-candidate narrowing
 
 - Documented the freezer dual-top handled-candidate split: raw top-K vision
