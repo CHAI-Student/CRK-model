@@ -93,11 +93,12 @@ Important inputs:
   in the active-product snapshot. Loadcell-only, active-only, or weight-nearest
   products that are absent from candidates remain no-charge misses.
 - The normal `MODEL__WEIGHT__TOLERANCE_GRAMS` value is not a hard product
-  reject gate in freezer mode. Single-item freezer selection ranks by vision
-  confidence first; only candidates within
-  `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND` of the best confidence use
-  weight residual as a tie-break. A single freezer result is weight-reliable
-  when residual is within
+  reject gate in freezer mode. Single-item freezer selection first assigns a
+  weight/exit-path tier, then sorts same-tier options by interaction penalty,
+  source support, weight residual, dual-camera exit-path support,
+  `freezerExitPathVotes`, confidence, and rank. The confidence-band residual
+  fallback is still used when no strict/near weight-gate option exists. A
+  single freezer result is weight-reliable when residual is within
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
@@ -110,7 +111,10 @@ Important inputs:
   raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
   engine input, and DoorSession snapshots receive the one handled product
   selected by freezer exit-path evidence and weight residual before falling
-  back to top confidence-band weight residual.
+  back to top confidence-band weight residual. Multi-segment trace evidence is
+  diagnostic support, not a sufficient reason to keep raw freezer candidates:
+  viable multi-kind weight fits are preserved, otherwise strict/near single or
+  same-product repeat narrowing can still run.
 - Multi-kind freezer results require segment/compound or combined-candidate
   weight support inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`.
   Strong dual-camera exit-path evidence alone no longer selects multiple

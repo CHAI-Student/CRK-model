@@ -1,5 +1,22 @@
 # LLM Wiki Log
 
+## [2026-06-30] maintenance | freezer same-tier residual ordering
+
+- Updated freezer handled-candidate and direct `freezer_vision_first`
+  documentation so same-tier single candidates sort by weight residual before
+  raw freezer exit-path vote volume. Exit-path votes still gate candidates and
+  resolve residual ties, but no longer let a worse-residual top-only candidate
+  beat a tighter supported single.
+- Documented the multi-segment freezer trace behavior change: compound or
+  multiple removal segment evidence no longer automatically passes raw
+  candidates through. The filter first checks viable multi-kind weight fits,
+  strict/near single fits, and same-product repeats, then records
+  `multi_item_trace_evidence_passthrough_unresolved` only when it must fail
+  open.
+- Added regression coverage for the zone4 Melona/Yomamte collision in both the
+  video handled-filter path and direct decision engine path, plus unresolved
+  multi-segment fail-open coverage.
+
 ## [2026-06-30] maintenance | freezer env template and auto launcher
 
 - Documented the user-level `model-service` launcher installed by

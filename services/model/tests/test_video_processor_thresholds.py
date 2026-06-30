@@ -1586,6 +1586,185 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
     assert diagnostics["selected"]["freezerExitPathVotes"] == 13
 
 
+def test_video_processor_freezer_compound_trace_prefers_melona_residual_over_yomamte_votes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_k", 10)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-zone4-melona-yomamte",
+        zone=4,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.record_loadcell_delta(
+        -78.8,
+        target_weight_abs=78.8,
+        compound_event=True,
+        compound_negative_segment_count=2,
+        removal_segment_targets=[
+            {"weight": 55.8, "segment_index": 0},
+            {"weight": 23.0, "segment_index": 1},
+        ],
+    )
+    trace_context.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "freezer_roi_passed": 52,
+            "pathDisplacementPx": 66.7,
+            "trajectoryExitPathPassed": True,
+            "cameras": {"top": {"freezerExitPathVotes": 52}},
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "freezer_roi_passed": 36,
+            "pathDisplacementPx": 422.4,
+            "trajectoryExitPathPassed": True,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 23},
+                "side": {"freezerExitPathVotes": 13},
+            },
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                30,
+                "BOX_BINGGRAE_YOMAMTE_150ML",
+                103,
+                0.8223,
+                0.62,
+                weighted_confidence=0.5075,
+                top_detected=True,
+                top_vote_count=52,
+            ),
+            VoteResult(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                44,
+                0.9164,
+                0.88,
+                weighted_confidence=1.0,
+                top_detected=True,
+                side_detected=True,
+                top_vote_count=23,
+                side_vote_count=13,
+            ),
+        ],
+        delta_weight=-78.8,
+        product_weights={30: 82.0, 44: 79.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    yomamte = next(item for item in diagnostics["considered"] if item["class_id"] == 30)
+    assert [candidate.class_id for candidate in handled] == [44]
+    assert diagnostics["reason"] == "multi_item_trace_single_narrowed"
+    assert diagnostics["selectionReason"] == "weight_gate_exit_path"
+    assert diagnostics["handled_candidate_count"] == 1
+    assert diagnostics["multiItemTraceEvidence"] is True
+    assert diagnostics["selected"]["class_id"] == 44
+    assert diagnostics["selected"]["weight_residual"] == 0.2
+    assert diagnostics["selected"]["dualCameraExitPath"] is True
+    assert yomamte["selectionTier"] == "weight_gate_exit_path"
+    assert yomamte["weightResidual"] == 3.2
+    assert yomamte["dualCameraExitPath"] is False
+
+
+def test_video_processor_freezer_compound_trace_fail_opens_when_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-compound-unresolved",
+        zone=4,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.record_loadcell_delta(
+        -78.8,
+        target_weight_abs=78.8,
+        compound_event=True,
+        compound_negative_segment_count=2,
+        removal_segment_targets=[
+            {"weight": 55.8, "segment_index": 0},
+            {"weight": 23.0, "segment_index": 1},
+        ],
+    )
+    trace_context.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "FAR_WEIGHT_A",
+            "freezer_roi_passed": 5,
+            "cameras": {"top": {"freezerExitPathVotes": 5}},
+        },
+        "102": {
+            "class_id": 102,
+            "name": "FAR_WEIGHT_B",
+            "freezer_roi_passed": 4,
+            "cameras": {"top": {"freezerExitPathVotes": 4}},
+        },
+    }
+    vote_results = [
+        VoteResult(
+            101,
+            "FAR_WEIGHT_A",
+            5,
+            0.8,
+            0.7,
+            weighted_confidence=0.8,
+            top_detected=True,
+        ),
+        VoteResult(
+            102,
+            "FAR_WEIGHT_B",
+            4,
+            0.7,
+            0.6,
+            weighted_confidence=0.7,
+            top_detected=True,
+        ),
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-78.8,
+        product_weights={101: 180.0, 102: 220.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert handled == vote_results
+    assert diagnostics["reason"] == "multi_item_trace_evidence_passthrough_unresolved"
+    assert diagnostics["handled_candidate_count"] == 2
+    assert diagnostics["multiItemTraceEvidence"] is True
+
+
 def test_video_processor_freezer_filter_prefers_count_supported_bagel_repeat(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

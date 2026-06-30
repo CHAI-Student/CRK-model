@@ -81,6 +81,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   disabled-layout warnings, `15g` weight-fit multi selection, top-three
   mismatch narrowing, same-product repeat recovery for the zone5 bagel `x2`
   collision, repeat rejection when freezer exit-path evidence is too weak,
+  compound-trace Melona/Yomamte same-tier residual ordering, unresolved
+  multi-segment fail-open passthrough,
   dual-camera single preference over top-only repeats, static top-only ranking
   demotion, upper-ROI hand proximity, hand-path hard reject with alternative
   candidates, hand-path all-blocked fail-open behavior, and freezer filter OPS
@@ -126,7 +128,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   coverage also proves ranked regular candidates beat same-weight unseen
   active-only repeats, and no-final-candidate stage-count combinations run
   before active-only forced fallback, including direct threshold/ROI rescue and
-  diagnostic detection evidence. Full-delta regressions cover the
+  diagnostic detection evidence. Direct freezer coverage now keeps
+  Melona/Yomamte residual ordering consistent with the video handled-filter
+  path. Full-delta regressions cover the
   Haluyache/Letsbe/Jagabee `-503g` segmented removal, rejection of
   `last_unpaired_negative_segment` as a standalone forced fallback target, and
   no-charge `UNCERTAIN` results when a successful branch does not explain the

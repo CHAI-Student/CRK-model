@@ -135,6 +135,13 @@ shape without rereading every long historical document.
   static shelf candidates are softly demoted, and valid hand-path blocks can
   hard-reject a candidate only when at least one hand-near alternative remains;
   no-near/all-blocked hand-path cases still fail open.
+- Freezer same-tier single selection now puts weight residual ahead of raw
+  exit-path vote volume. Exit-path votes still gate candidates and break
+  residual ties, but a high-vote top-only candidate no longer beats a
+  better-weighted supported single. Compound/multi-segment loadcell traces no
+  longer automatically pass raw candidates through; they first try viable
+  multi-fit, single, and same-product repeat explanations, then fail open only
+  when unresolved.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their

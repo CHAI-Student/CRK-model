@@ -553,6 +553,9 @@ class ProductDecisionEngine:
             strict_residual_limit,
             self._freezer_weight_tolerance_grams(),
         )
+        has_multi_item_trace_evidence = self._freezer_trace_has_multi_item_evidence(
+            trace_context
+        )
         vision_candidates = self._augment_freezer_stage_exit_path_candidates(
             vision_candidates=vision_candidates,
             active_products=active_products,
@@ -640,6 +643,7 @@ class ProductDecisionEngine:
                 "handNearVoteRatio": interaction_evidence["handNearVoteRatio"],
                 "minHandDistancePx": interaction_evidence["minHandDistancePx"],
                 "interactionPenalty": interaction_evidence["interactionPenalty"],
+                "multiItemTraceEvidence": has_multi_item_trace_evidence,
                 "instance_count_hint": max(
                     1,
                     int(getattr(candidate, "instance_count_hint", 1) or 1),
@@ -1314,8 +1318,9 @@ class ProductDecisionEngine:
                     item[0] + int(item[2].get("interaction_penalty", False)),
                     int(item[2].get("interaction_penalty", False)),
                     int(item[2].get("source_priority", 0) or 0),
-                    -int(item[2].get("freezer_exit_path_votes", 0) or 0),
                     float(item[2]["residual"]),
+                    int(not bool(item[2].get("dual_camera_exit_path"))),
+                    -int(item[2].get("freezer_exit_path_votes", 0) or 0),
                     -float(item[2]["confidence"]),
                     int(item[2]["rank"]),
                 ),
@@ -1739,6 +1744,9 @@ class ProductDecisionEngine:
             "freezer_weight_tolerance": round(tolerance, 1),
             "weight_used_as": "tiebreaker",
             "weight_reliable": weight_reliable,
+            "multiItemTraceEvidence": bool(
+                self._freezer_trace_has_multi_item_evidence(trace_context)
+            ),
             "selected": [option["diagnostics"] for option in selected_options],
             "considered": considered,
         }
