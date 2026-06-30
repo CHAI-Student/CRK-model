@@ -142,6 +142,12 @@ shape without rereading every long historical document.
   longer automatically pass raw candidates through; they first try viable
   multi-fit, single, and same-product repeat explanations, then fail open only
   when unresolved.
+- Freezer stage-only rescue is candidate-miss recovery, not an override for
+  already handled candidates. If the handled-filter accepted one supported
+  product, direct `freezer_vision_first` rejects stage-only resurrection of
+  considered-but-unselected classes; non-stage strict weight-gate candidates
+  also keep ambiguous dual-camera stage-only evidence out of the special
+  priority tier.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their

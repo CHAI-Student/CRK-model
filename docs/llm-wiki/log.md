@@ -1,5 +1,19 @@
 # LLM Wiki Log
 
+## [2026-06-30] maintenance | freezer stage-only rescue guard
+
+- Documented that freezer stage-only rescue is candidate-miss recovery, not an
+  override for a supported product already selected by the video handled
+  filter. Direct `freezer_vision_first` now rejects stage-only resurrection for
+  classes the handled-filter considered but did not select.
+- Recorded the ambiguous dual-camera stage-only priority guard: when a
+  non-stage candidate has a strict freezer weight-gate fit, stage-only
+  ambiguous evidence is demoted into normal single ranking instead of taking
+  the special priority tier.
+- Added regression coverage for the zone2 Yomamte/Melona collision where the
+  video handled-filter selected Yomamte but engine stage-only rescue had
+  previously switched the result to Melona.
+
 ## [2026-06-30] maintenance | freezer same-tier residual ordering
 
 - Updated freezer handled-candidate and direct `freezer_vision_first`

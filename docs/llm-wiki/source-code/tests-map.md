@@ -130,7 +130,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   before active-only forced fallback, including direct threshold/ROI rescue and
   diagnostic detection evidence. Direct freezer coverage now keeps
   Melona/Yomamte residual ordering consistent with the video handled-filter
-  path. Full-delta regressions cover the
+  path and prevents stage-only freezer rescue from resurrecting
+  handled-filter-rejected classes or preempting strict non-stage weight-gate
+  candidates. Full-delta regressions cover the
   Haluyache/Letsbe/Jagabee `-503g` segmented removal, rejection of
   `last_unpaired_negative_segment` as a standalone forced fallback target, and
   no-charge `UNCERTAIN` results when a successful branch does not explain the

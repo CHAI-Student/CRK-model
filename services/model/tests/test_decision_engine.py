@@ -837,6 +837,174 @@ def test_freezer_vision_first_prefers_melona_residual_over_yomamte_exit_votes(
     assert yomamte["dualCameraExitPath"] is False
 
 
+def test_freezer_vision_first_keeps_video_handled_yomamte_over_stage_melona(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "top_k", 10)
+    trace = FakeLoadcellTrace(
+        {
+            "delta_weight": -87.1,
+            "target_weight_abs": 87.1,
+            "compound_event": True,
+            "compound_positive_segment_count": 1,
+            "compound_negative_segment_count": 1,
+            "removal_segment_targets": [
+                {"weight": 136.6, "segment_index": 1},
+            ],
+            "return_segment_targets": [
+                {"weight": 49.4, "segment_index": 0},
+            ],
+        }
+    )
+    trace.record_weight_diagnostics(
+        {
+            "freezer_candidate_filter": {
+                "accepted": True,
+                "reason": "multi_item_trace_single_narrowed",
+                "handled_candidate_count": 1,
+                "selected": {
+                    "class_id": 30,
+                    "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+                },
+                "considered": [
+                    {"class_id": 30, "name": "BOX_BINGGRAE_YOMAMTE_150ML"},
+                    {"class_id": 44, "name": "STICK_BINGGRAE_MELONA_75ML"},
+                ],
+            }
+        }
+    )
+    trace.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "freezer_roi_passed": 24,
+            "freezerExitPathVotes": 24,
+            "pathDisplacementPx": 41.6,
+            "trajectoryExitPathPassed": True,
+            "cameras": {"top": {"freezerExitPathVotes": 24}},
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "raw": 108,
+            "raw_max_confidence": 0.6842,
+            "threshold_passed": 18,
+            "threshold_passed_max_confidence": 0.6842,
+            "freezer_roi_passed": 18,
+            "freezerExitPathVotes": 18,
+            "freezer_roi_passed_max_confidence": 0.6842,
+            "pathDisplacementPx": 29.8,
+            "trajectoryExitPathPassed": True,
+            "cameras": {
+                "top": {
+                    "freezerExitPathVotes": 12,
+                    "freezer_roi_passed": 12,
+                    "raw_max_confidence": 0.6842,
+                },
+                "side": {
+                    "freezerExitPathVotes": 6,
+                    "freezer_roi_passed": 6,
+                    "raw_max_confidence": 0.3324,
+                },
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                30,
+                "BOX_BINGGRAE_YOMAMTE_150ML",
+                confidence=0.5149,
+            ),
+        ],
+        delta_weight=-87.1,
+        active_products=[
+            make_active_product(30, "BOX_BINGGRAE_YOMAMTE_150ML", weight=82.0),
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=79.0),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (30, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
+    assert diagnostics["selected"][0]["class_id"] == 30
+    assert diagnostics["selected"][0]["weight_residual"] == 5.1
+    rejected = diagnostics["rejectedStageOnlyCandidates"]
+    assert rejected[0]["class_id"] == 44
+    assert rejected[0]["reason"] == "rejected_by_video_handled_filter"
+    assert rejected[0]["selectedClassIds"] == [30]
+
+
+def test_freezer_vision_first_strict_vision_candidate_blocks_stage_only_priority(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "top_k", 10)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "30": {
+            "class_id": 30,
+            "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+            "freezer_roi_passed": 24,
+            "freezerExitPathVotes": 24,
+            "cameras": {"top": {"freezerExitPathVotes": 24}},
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "raw": 108,
+            "raw_max_confidence": 0.6842,
+            "threshold_passed": 18,
+            "threshold_passed_max_confidence": 0.6842,
+            "freezer_roi_passed": 18,
+            "freezerExitPathVotes": 18,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 12, "raw_max_confidence": 0.6842},
+                "side": {"freezerExitPathVotes": 6, "raw_max_confidence": 0.3324},
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                30,
+                "BOX_BINGGRAE_YOMAMTE_150ML",
+                confidence=0.5149,
+            ),
+        ],
+        delta_weight=-87.1,
+        active_products=[
+            make_active_product(30, "BOX_BINGGRAE_YOMAMTE_150ML", weight=82.0),
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=79.0),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (30, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    melona = next(item for item in diagnostics["considered"] if item["class_id"] == 44)
+    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
+    assert melona["selectionTier"] == "freezer_single_near_weight_exit_path"
+    assert melona["stageOnlyPriorityRejectedReason"] == (
+        "strict_vision_weight_gate_preferred"
+    )
+    rejected = diagnostics["rejectedStageOnlyCandidates"]
+    assert rejected[0]["class_id"] == 44
+    assert rejected[0]["reason"] == "strict_vision_weight_gate_preferred"
+
+
 def test_freezer_vision_first_rescues_yomamte_stage_only_dual_camera(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     monkeypatch.setattr(config.vision, "top_k", 5)

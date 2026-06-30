@@ -556,6 +556,7 @@ class ProductDecisionEngine:
         has_multi_item_trace_evidence = self._freezer_trace_has_multi_item_evidence(
             trace_context
         )
+        rejected_stage_only_candidates: list[dict[str, Any]] = []
         vision_candidates = self._augment_freezer_stage_exit_path_candidates(
             vision_candidates=vision_candidates,
             active_products=active_products,
@@ -563,17 +564,23 @@ class ProductDecisionEngine:
             target_weight=target_weight,
             min_exit_path_votes=min_exit_path_votes,
             near_residual_limit=near_residual_limit,
+            rejected_stage_only_candidates=rejected_stage_only_candidates,
         )
         if not vision_candidates:
+            diagnostics = {
+                "accepted": False,
+                "reason": "no_vision_candidates",
+                "target_weight": round(target_weight, 1),
+            }
+            if rejected_stage_only_candidates:
+                diagnostics["rejectedStageOnlyCandidates"] = (
+                    rejected_stage_only_candidates
+                )
             self._record_weight_diagnostics(
                 trace_context,
                 {
                     "decision_branch": "freezer_vision_first",
-                    "freezer_vision_first": {
-                        "accepted": False,
-                        "reason": "no_vision_candidates",
-                        "target_weight": round(target_weight, 1),
-                    },
+                    "freezer_vision_first": diagnostics,
                 },
             )
             return self._create_no_detection_result(delta_weight, timestamp)
@@ -783,16 +790,21 @@ class ProductDecisionEngine:
             considered.append(diag)
 
         if not options:
+            diagnostics = {
+                "accepted": False,
+                "reason": "no_supported_vision_candidates",
+                "target_weight": round(target_weight, 1),
+                "considered": considered,
+            }
+            if rejected_stage_only_candidates:
+                diagnostics["rejectedStageOnlyCandidates"] = (
+                    rejected_stage_only_candidates
+                )
             self._record_weight_diagnostics(
                 trace_context,
                 {
                     "decision_branch": "freezer_vision_first",
-                    "freezer_vision_first": {
-                        "accepted": False,
-                        "reason": "no_supported_vision_candidates",
-                        "target_weight": round(target_weight, 1),
-                        "considered": considered,
-                    },
+                    "freezer_vision_first": diagnostics,
                 },
             )
             return self._create_no_detection_result(delta_weight, timestamp)
@@ -816,6 +828,7 @@ class ProductDecisionEngine:
                 trace_context=trace_context,
                 considered=considered,
                 interaction_rejected_options=interaction_rejected_options,
+                rejected_stage_only_candidates=rejected_stage_only_candidates,
                 reason=reason,
             )
 
@@ -828,6 +841,7 @@ class ProductDecisionEngine:
             trace_context=trace_context,
             considered=considered,
             interaction_rejected_options=interaction_rejected_options,
+            rejected_stage_only_candidates=rejected_stage_only_candidates,
             reason=reason,
         )
 
@@ -1088,6 +1102,52 @@ class ProductDecisionEngine:
             y_avg = None
         return x_avg, y_avg
 
+    @staticmethod
+    def _freezer_single_handled_filter_class_sets(
+        trace_context: Optional[object],
+    ) -> tuple[set[int], set[int], Optional[str]]:
+        diagnostics = getattr(trace_context, "weight_diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return set(), set(), None
+        filter_diagnostics = diagnostics.get("freezer_candidate_filter")
+        if not isinstance(filter_diagnostics, dict):
+            return set(), set(), None
+        if filter_diagnostics.get("accepted") is not True:
+            return set(), set(), None
+        try:
+            handled_count = int(
+                filter_diagnostics.get("handled_candidate_count", 0) or 0
+            )
+        except (TypeError, ValueError):
+            return set(), set(), None
+        if handled_count != 1:
+            return set(), set(), None
+
+        def collect_class_ids(payload: object) -> set[int]:
+            if isinstance(payload, dict):
+                items = [payload]
+            elif isinstance(payload, list):
+                items = [item for item in payload if isinstance(item, dict)]
+            else:
+                items = []
+            class_ids: set[int] = set()
+            for item in items:
+                try:
+                    class_ids.add(int(item.get("class_id")))
+                except (TypeError, ValueError):
+                    continue
+            return class_ids
+
+        selected_class_ids = collect_class_ids(filter_diagnostics.get("selected"))
+        considered_class_ids = collect_class_ids(filter_diagnostics.get("considered"))
+        if not selected_class_ids or not considered_class_ids:
+            return set(), set(), None
+        return (
+            selected_class_ids,
+            considered_class_ids - selected_class_ids,
+            str(filter_diagnostics.get("reason") or ""),
+        )
+
     def _augment_freezer_stage_exit_path_candidates(
         self,
         *,
@@ -1097,6 +1157,7 @@ class ProductDecisionEngine:
         target_weight: float,
         min_exit_path_votes: int,
         near_residual_limit: float,
+        rejected_stage_only_candidates: Optional[list[dict[str, Any]]] = None,
     ) -> List[EnsembleResult]:
         stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
         if not isinstance(stage_counts, dict) or not active_products:
@@ -1114,6 +1175,11 @@ class ProductDecisionEngine:
         augmented = list(vision_candidates)
         min_stage_votes = max(1, int(config.weight.detected_single_fallback_min_votes))
         min_confidence = float(config.weight.multi_kind_min_confidence)
+        (
+            filter_selected_class_ids,
+            filter_rejected_class_ids,
+            filter_reason,
+        ) = self._freezer_single_handled_filter_class_sets(trace_context)
 
         for raw_class_id, entry in stage_counts.items():
             if not isinstance(entry, dict):
@@ -1158,6 +1224,30 @@ class ProductDecisionEngine:
                 or threshold_votes < min_stage_votes
                 or confidence < min_confidence
             ):
+                continue
+
+            camera_exit_counts = self._freezer_stage_camera_exit_counts(entry)
+            if class_id in filter_rejected_class_ids:
+                if rejected_stage_only_candidates is not None:
+                    rejected_stage_only_candidates.append(
+                        {
+                            "class_id": class_id,
+                            "name": str(
+                                entry.get("name")
+                                or getattr(product, "product_name", "")
+                            ),
+                            "source": "freezer_stage_exit_path",
+                            "reason": "rejected_by_video_handled_filter",
+                            "filterReason": filter_reason,
+                            "selectedClassIds": sorted(filter_selected_class_ids),
+                            "confidence": round(confidence, 4),
+                            "unit_weight": round(unit_weight, 1),
+                            "weight_residual": round(residual, 1),
+                            "freezerExitPathVotes": exit_path_votes,
+                            "cameraExitCounts": dict(camera_exit_counts),
+                            "dualCameraExitPath": len(camera_exit_counts) >= 2,
+                        }
+                    )
                 continue
 
             cameras = entry.get("cameras") if isinstance(entry.get("cameras"), dict) else {}
@@ -1251,6 +1341,27 @@ class ProductDecisionEngine:
         return max(values or [0])
 
     @classmethod
+    def _is_freezer_ambiguous_stage_priority_candidate(
+        cls,
+        option: dict[str, Any],
+        *,
+        min_exit_path_votes: int,
+        near_residual_limit: float,
+    ) -> bool:
+        try:
+            class_id = int(getattr(option.get("candidate"), "class_id", -1))
+        except (TypeError, ValueError):
+            return False
+        return (
+            bool(option.get("stage_only"))
+            and class_id in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
+            and bool(option.get("dual_camera_exit_path"))
+            and float(option["residual"]) <= near_residual_limit
+            and int(option.get("freezer_exit_path_votes", 0) or 0)
+            >= min_exit_path_votes
+        )
+
+    @classmethod
     def _freezer_handled_tier(
         cls,
         option: dict[str, Any],
@@ -1258,16 +1369,17 @@ class ProductDecisionEngine:
         min_exit_path_votes: int,
         strict_residual_limit: float,
         near_residual_limit: float,
+        allow_ambiguous_stage_priority: bool = True,
     ) -> tuple[int, str]:
         residual = float(option["residual"])
         exit_path_votes = int(option.get("freezer_exit_path_votes", 0) or 0)
         if (
-            bool(option.get("stage_only"))
-            and int(getattr(option.get("candidate"), "class_id", -1))
-            in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
-            and bool(option.get("dual_camera_exit_path"))
-            and residual <= near_residual_limit
-            and exit_path_votes >= min_exit_path_votes
+            allow_ambiguous_stage_priority
+            and cls._is_freezer_ambiguous_stage_priority_candidate(
+                option,
+                min_exit_path_votes=min_exit_path_votes,
+                near_residual_limit=near_residual_limit,
+            )
         ):
             return -1, "freezer_single_ambiguous_dual_camera_stage_exit_path"
         if residual <= strict_residual_limit and exit_path_votes >= min_exit_path_votes:
@@ -1292,13 +1404,38 @@ class ProductDecisionEngine:
             0.0,
             float(config.weight.same_product_count_tolerance_grams),
         )
+        has_non_stage_strict = any(
+            not bool(option.get("stage_only"))
+            and bool(option.get("diagnostics", {}).get("reason") == "candidate")
+            and float(option["residual"]) <= strict_residual_limit
+            and int(option.get("freezer_exit_path_votes", 0) or 0)
+            >= min_exit_path_votes
+            for option in options
+        )
         scored: list[tuple[int, str, dict[str, Any]]] = []
         for option in options:
+            ambiguous_stage_priority_candidate = (
+                self._is_freezer_ambiguous_stage_priority_candidate(
+                    option,
+                    min_exit_path_votes=min_exit_path_votes,
+                    near_residual_limit=near_residual_limit,
+                )
+            )
+            if has_non_stage_strict and ambiguous_stage_priority_candidate:
+                option["stage_only_priority_rejected_reason"] = (
+                    "strict_vision_weight_gate_preferred"
+                )
+                option["diagnostics"]["stageOnlyPriorityRejectedReason"] = (
+                    "strict_vision_weight_gate_preferred"
+                )
             tier, reason = self._freezer_handled_tier(
                 option,
                 min_exit_path_votes=min_exit_path_votes,
                 strict_residual_limit=strict_residual_limit,
                 near_residual_limit=near_residual_limit,
+                allow_ambiguous_stage_priority=not (
+                    has_non_stage_strict and ambiguous_stage_priority_candidate
+                ),
             )
             option["selection_tier"] = reason
             option["freezer_min_exit_path_votes"] = min_exit_path_votes
@@ -1703,6 +1840,7 @@ class ProductDecisionEngine:
         considered: list[dict[str, Any]],
         reason: str,
         interaction_rejected_options: Optional[list[dict[str, Any]]] = None,
+        rejected_stage_only_candidates: Optional[list[dict[str, Any]]] = None,
     ) -> JudgmentResult:
         products: list[ProductJudgment] = []
         total_price = 0
@@ -1771,6 +1909,17 @@ class ProductDecisionEngine:
             diagnostics["rejectedInteractionCandidates"] = [
                 option["diagnostics"] for option in interaction_rejected_options
             ]
+        stage_only_rejections = list(rejected_stage_only_candidates or [])
+        stage_only_rejections.extend(
+            {
+                **item,
+                "reason": str(item["stageOnlyPriorityRejectedReason"]),
+            }
+            for item in considered
+            if item.get("stageOnlyPriorityRejectedReason")
+        )
+        if stage_only_rejections:
+            diagnostics["rejectedStageOnlyCandidates"] = stage_only_rejections
         ambiguous_candidates = [
             item
             for item in considered

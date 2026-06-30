@@ -115,6 +115,13 @@ Important inputs:
   diagnostic support, not a sufficient reason to keep raw freezer candidates:
   viable multi-kind weight fits are preserved, otherwise strict/near single or
   same-product repeat narrowing can still run.
+- Stage-only freezer rescue is limited to candidate-miss recovery. When the
+  video handled-filter has already accepted one supported freezer candidate,
+  direct `freezer_vision_first` will not recreate considered-but-unselected
+  classes as `freezer_stage_exit_path`. If a non-stage candidate has a strict
+  freezer weight-gate fit, ambiguous dual-camera stage-only evidence is
+  demoted into normal single ranking instead of taking the special priority
+  tier.
 - Multi-kind freezer results require segment/compound or combined-candidate
   weight support inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`.
   Strong dual-camera exit-path evidence alone no longer selects multiple
