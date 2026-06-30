@@ -1,5 +1,21 @@
 # LLM Wiki Log
 
+## [2026-06-30] maintenance | freezer count-aware handled candidate filtering
+
+- Documented freezer same-product repeat inference for handled candidates and
+  direct `freezer_vision_first` selection. A final vision candidate can become
+  `same_product_repeat_weight_gate` from `target_weight / unit_weight` even
+  when `instance_count_hint=1`, while still requiring freezer exit-path votes,
+  vote count, confidence, stock/count caps, and both freezer/count-scaled
+  residual gates.
+- Recorded the conservative selection guards: a repeat may beat a top-only
+  single only within the configured repeat residual gap, and dual-camera
+  exit-path singles stay preferred over weaker top-only repeats.
+- Added trace diagnostics for `sameProductRepeatCandidates`,
+  `rejectedSameProductRepeatCandidates`, selected `count`, `expectedWeight`,
+  and `countWeightResidual`, plus regression coverage for the zone5
+  `BAG_NULLDAM_BAGEL_140G x2` versus jajangbab single collision.
+
 ## [2026-06-29] maintenance | freezer weight-gated multi-candidate repair
 
 - Recorded that freezer loadcell matching is again reliable enough to gate

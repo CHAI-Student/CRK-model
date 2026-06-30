@@ -491,6 +491,7 @@ def _record_raw_and_filter_handled_candidates(
     trace_context: Optional[TriggerTraceContext],
     log_prefix: str,
     zone: Optional[int] = None,
+    product_stocks: Optional[dict[int, int]] = None,
 ) -> List[Any]:
     from model_service.video import VideoProcessor
 
@@ -504,6 +505,7 @@ def _record_raw_and_filter_handled_candidates(
         vote_results,
         delta_weight=delta_weight,
         product_weights=product_weights or {},
+        product_stocks=product_stocks or {},
         trace_context=trace_context,
         log_prefix=log_prefix,
     )
@@ -643,15 +645,27 @@ async def trigger_judgment(
         snapshot_metadata,
     ) = _effective_active_product_snapshot(active_product_store)
     product_weights: dict[int, float] = {}
+    product_stocks: dict[int, int] = {}
     for product_info in active_products_snapshot:
         class_id = getattr(product_info, "yolo_class_id", None)
         product_weight = getattr(product_info, "product_weight", None)
-        if class_id is None or product_weight is None:
+        if class_id is None:
             continue
         try:
-            product_weights[int(class_id)] = float(product_weight)
+            class_id_int = int(class_id)
         except (TypeError, ValueError):
             continue
+        if product_weight is not None:
+            try:
+                product_weights[class_id_int] = float(product_weight)
+            except (TypeError, ValueError):
+                pass
+        stock_qty = getattr(product_info, "stock_qty", None)
+        if stock_qty is not None:
+            try:
+                product_stocks[class_id_int] = int(stock_qty)
+            except (TypeError, ValueError):
+                pass
     effective_loadcells, loadcell_metadata = _select_effective_loadcells(request)
 
     logger.info("[TRIGGER] ========== inference start ==========")
@@ -862,6 +876,7 @@ async def trigger_judgment(
                     vote_results=vote_results,
                     delta_weight=delta_weight,
                     product_weights=product_weights,
+                    product_stocks=product_stocks,
                     trace_context=trace_context,
                     log_prefix="TRIGGER-LOW-WEIGHT",
                     zone=request.zone,
@@ -1091,6 +1106,7 @@ async def trigger_judgment(
             vote_results=vote_results,
             delta_weight=delta_weight,
             product_weights=product_weights,
+            product_stocks=product_stocks,
             trace_context=trace_context,
             log_prefix="TRIGGER",
             zone=request.zone,

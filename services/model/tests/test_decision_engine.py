@@ -907,6 +907,79 @@ def test_freezer_vision_first_uses_instance_hint_for_same_class_count(monkeypatc
     ] == 2
 
 
+def test_freezer_vision_first_prefers_count_supported_bagel_repeat(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "37": {
+            "class_id": 37,
+            "name": "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+            "freezerExitPathVotes": 40,
+            "freezer_roi_filtered": 40,
+            "cameras": {"top": {"freezerExitPathVotes": 40}},
+        },
+        "27": {
+            "class_id": 27,
+            "name": "BAG_NULLDAM_BAGEL_140G",
+            "freezerExitPathVotes": 9,
+            "freezer_roi_filtered": 9,
+            "cameras": {"top": {"freezerExitPathVotes": 9}},
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=37,
+                name="BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                confidence=1.0,
+                raw_vote_count=147,
+                instance_count_hint=3,
+            ),
+            make_candidate(
+                class_id=27,
+                name="BAG_NULLDAM_BAGEL_140G",
+                confidence=0.52,
+                raw_vote_count=4,
+                instance_count_hint=1,
+            ),
+        ],
+        delta_weight=-307.2,
+        active_products=[
+            make_active_product(
+                37,
+                "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                weight=309.0,
+                stock=93,
+            ),
+            make_active_product(
+                27,
+                "BAG_NULLDAM_BAGEL_140G",
+                weight=156.0,
+                stock=97,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (27, 2)
+    ]
+    assert result.weight_explained == 312.0
+    assert result.weight_residual == pytest.approx(4.8)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["selected"][0]["class_id"] == 27
+    assert diagnostics["selected"][0]["count"] == 2
+    assert diagnostics["selected"][0]["expected_weight"] == 312.0
+    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(4.8)
+    assert [item["class_id"] for item in diagnostics["sameProductRepeatCandidates"]] == [
+        27
+    ]
+
+
 def test_loadcell_only_returns_nearest_single_within_5g():
     engine = ProductDecisionEngine(strict_mode=True)
 

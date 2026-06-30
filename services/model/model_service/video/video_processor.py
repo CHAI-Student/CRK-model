@@ -790,6 +790,24 @@ class VideoProcessor:
         return weight_value if weight_value > 0.0 else None
 
     @staticmethod
+    def _freezer_candidate_stock(
+        vote: VoteResult,
+        product_stocks: Optional[Dict[int, int]],
+    ) -> Optional[int]:
+        if not product_stocks:
+            return None
+        try:
+            stock = product_stocks.get(int(vote.class_id))
+        except (TypeError, ValueError):
+            return None
+        if stock is None:
+            return None
+        try:
+            return int(stock)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _freezer_weight_tolerance_grams() -> float:
         return max(0.0, float(config.weight.freezer_weight_tolerance_grams))
 
@@ -824,6 +842,99 @@ class VideoProcessor:
                 best_count = count
                 best_residual = residual
         return best_count
+
+    @classmethod
+    def _freezer_count_allowed_residual(cls, count: int) -> float:
+        count_scaled = float(config.weight.tolerance_grams) + (
+            float(config.weight.same_product_count_tolerance_grams) * max(1, int(count))
+        )
+        return min(cls._freezer_weight_tolerance_grams(), count_scaled)
+
+    @classmethod
+    def _freezer_same_product_repeat_diagnostic(
+        cls,
+        vote: VoteResult,
+        *,
+        target_weight: float,
+        unit_weight: Optional[float],
+        single_residual: float,
+        confidence: float,
+        exit_path_votes: int,
+        source: str,
+        product_stocks: Optional[Dict[int, int]],
+    ) -> Optional[dict[str, Any]]:
+        if unit_weight is None or unit_weight <= 0.0:
+            return None
+        nearest_count = int(round(target_weight / unit_weight))
+        if nearest_count < 2:
+            return None
+
+        stock = cls._freezer_candidate_stock(vote, product_stocks)
+        caps = [
+            max(1, int(config.weight.max_items_per_segment)),
+            max(1, int(config.weight.same_product_max_count)),
+            max(1, int(config.weight.max_count_per_item)),
+        ]
+        if stock is not None:
+            caps.append(max(0, stock))
+        max_count = min(caps)
+        base = {
+            "class_id": int(vote.class_id),
+            "name": vote.class_name,
+            "nearestCount": nearest_count,
+            "maxCount": int(max_count),
+            "unitWeight": round(float(unit_weight), 1),
+            "stock": stock,
+        }
+        if max_count < 2:
+            return {**base, "accepted": False, "reason": "count_cap_below_repeat"}
+
+        best_count = 1
+        best_residual = float(single_residual)
+        for count in range(2, max_count + 1):
+            residual = abs(target_weight - (unit_weight * count))
+            if residual < best_residual:
+                best_count = count
+                best_residual = residual
+
+        if best_count < 2:
+            return None
+
+        expected_weight = unit_weight * best_count
+        allowed_residual = cls._freezer_count_allowed_residual(best_count)
+        vote_count = max(
+            int(getattr(vote, "vote_count", 0) or 0),
+            int(getattr(vote, "raw_vote_count", 0) or 0),
+        )
+        min_votes = max(
+            int(config.vision.freezer_min_vote_count),
+            int(config.weight.detected_single_fallback_min_votes),
+        )
+        diagnostic = {
+            **base,
+            "count": int(best_count),
+            "expectedWeight": round(float(expected_weight), 1),
+            "countWeightResidual": round(float(best_residual), 1),
+            "countAllowedResidual": round(float(allowed_residual), 1),
+            "confidence": round(float(confidence), 4),
+            "freezerExitPathVotes": int(exit_path_votes),
+            "voteCount": int(vote_count),
+            "accepted": False,
+        }
+        if str(source) != "vision":
+            diagnostic["reason"] = "not_regular_vision_candidate"
+        elif confidence < float(config.weight.freezer_multi_min_confidence):
+            diagnostic["reason"] = "confidence_below_repeat_floor"
+        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
+            diagnostic["reason"] = "insufficient_exit_path_votes"
+        elif vote_count < min_votes:
+            diagnostic["reason"] = "insufficient_repeat_votes"
+        elif best_residual > allowed_residual:
+            diagnostic["reason"] = "repeat_residual_exceeds_tolerance"
+        else:
+            diagnostic["accepted"] = True
+            diagnostic["reason"] = "same_product_repeat_weight_gate"
+        return diagnostic
 
     @staticmethod
     def _freezer_stage_entry(
@@ -1100,6 +1211,7 @@ class VideoProcessor:
         *,
         delta_weight: Optional[float],
         product_weights: Optional[Dict[int, float]] = None,
+        product_stocks: Optional[Dict[int, int]] = None,
         trace_context: Optional[TriggerTraceContext] = None,
         log_prefix: str = "VIDEO",
     ) -> List[VoteResult]:
@@ -1200,6 +1312,16 @@ class VideoProcessor:
             identity_supported = source != "vision" or confidence >= 0.3
             dual_camera_exit_path = len(camera_exit_counts) >= 2
             roi_x_avg, roi_y_avg = cls._freezer_stage_center(stage_entry)
+            repeat_diagnostic = cls._freezer_same_product_repeat_diagnostic(
+                vote,
+                target_weight=target_weight,
+                unit_weight=unit_weight,
+                single_residual=residual,
+                confidence=confidence,
+                exit_path_votes=exit_path_votes,
+                source=source,
+                product_stocks=product_stocks,
+            )
             if (
                 stage_only
                 and int(vote.class_id) in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
@@ -1245,12 +1367,18 @@ class VideoProcessor:
                     "source_priority": 1 if stage_only else 0,
                     "tier": tier,
                     "reason": reason,
+                    "same_product_repeat": repeat_diagnostic
+                    if repeat_diagnostic and repeat_diagnostic.get("accepted")
+                    else None,
+                    "same_product_repeat_rejection": repeat_diagnostic
+                    if repeat_diagnostic and not repeat_diagnostic.get("accepted")
+                    else None,
                 }
             )
 
         def considered_entry(item: dict[str, Any]) -> dict[str, Any]:
             unit_weight = item["unit_weight"]
-            return {
+            entry = {
                 "rank": int(item["index"]) + 1,
                 "class_id": int(item["vote"].class_id),
                 "name": item["vote"].class_name,
@@ -1277,6 +1405,28 @@ class VideoProcessor:
                 ),
                 "selectionTier": str(item["reason"]),
             }
+            repeat = item.get("same_product_repeat")
+            if repeat:
+                entry.update(
+                    {
+                        "sameProductRepeatCandidate": True,
+                        "count": int(repeat["count"]),
+                        "expectedWeight": round(float(repeat["expectedWeight"]), 1),
+                        "countWeightResidual": round(
+                            float(repeat["countWeightResidual"]), 1
+                        ),
+                        "countAllowedResidual": round(
+                            float(repeat["countAllowedResidual"]), 1
+                        ),
+                    }
+                )
+            rejection = item.get("same_product_repeat_rejection")
+            if rejection:
+                entry["sameProductRepeatRejectedReason"] = str(
+                    rejection.get("reason", "rejected")
+                )
+                entry["nearestRepeatCount"] = int(rejection.get("count", 0) or 0)
+            return entry
 
         rejected_multi_diagnostics: Optional[dict[str, Any]] = None
         if bool(config.weight.freezer_vision_multi_without_weight_enabled):
@@ -1443,14 +1593,55 @@ class VideoProcessor:
             )
             reason = "single_removal_weight_tiebreak"
 
+        repeat_candidates = [
+            item for item in scored if item.get("same_product_repeat") is not None
+        ]
+        rejected_repeat_selection: list[dict[str, Any]] = []
+        if repeat_candidates:
+            repeat_item = min(
+                repeat_candidates,
+                key=lambda item: (
+                    float(item["same_product_repeat"]["countWeightResidual"]),
+                    int(item["index"]),
+                    -float(item["confidence"]),
+                    -int(item["freezer_exit_path_votes"]),
+                ),
+            )
+            repeat_residual = float(
+                repeat_item["same_product_repeat"]["countWeightResidual"]
+            )
+            selected_single_residual = float(selected_item["residual"])
+            residual_grace = float(config.weight.same_product_count_tolerance_grams)
+            if bool(selected_item["dual_camera_exit_path"]):
+                rejected_repeat_selection.append(
+                    {
+                        **considered_entry(repeat_item),
+                        "reason": "dual_camera_single_preferred",
+                    }
+                )
+            elif repeat_residual > selected_single_residual + residual_grace:
+                rejected_repeat_selection.append(
+                    {
+                        **considered_entry(repeat_item),
+                        "reason": "single_residual_gap_preferred",
+                    }
+                )
+            else:
+                selected_item = repeat_item
+                reason = "same_product_repeat_weight_gate"
+
         selected_index = int(selected_item["index"])
         selected_vote = selected_item["vote"]
 
-        supported_count = cls._freezer_supported_instance_count(
-            selected_vote,
-            target_weight=target_weight,
-            product_weights=product_weights,
-        )
+        selected_repeat = selected_item.get("same_product_repeat")
+        if reason == "same_product_repeat_weight_gate" and selected_repeat:
+            supported_count = int(selected_repeat["count"])
+        else:
+            supported_count = cls._freezer_supported_instance_count(
+                selected_vote,
+                target_weight=target_weight,
+                product_weights=product_weights,
+            )
         selected = replace(
             selected_vote,
             instance_count_hint=supported_count,
@@ -1458,7 +1649,7 @@ class VideoProcessor:
         )
         unit_weight = cls._freezer_candidate_unit_weight(selected_vote, product_weights)
         residual = (
-            abs(target_weight - unit_weight)
+            abs(target_weight - (unit_weight * supported_count))
             if unit_weight is not None
             else target_weight
         )
@@ -1501,6 +1692,9 @@ class VideoProcessor:
                 "identitySupported": bool(selected_item["identity_supported"]),
                 "unit_weight": round(unit_weight, 1) if unit_weight is not None else None,
                 "weight_residual": round(residual, 1),
+                "count": int(supported_count),
+                "expectedWeight": round(float(unit_weight or 0.0) * supported_count, 1),
+                "countWeightResidual": round(residual, 1),
                 "instance_count_hint": supported_count,
                 "freezerExitPathVotes": int(selected.freezer_exit_path_votes),
                 "cameraExitCounts": dict(selected_item["camera_exit_counts"]),
@@ -1508,6 +1702,17 @@ class VideoProcessor:
                 "selectionTier": reason,
             },
             "considered": [considered_entry(item) for item in scored],
+            "sameProductRepeatCandidates": [
+                considered_entry(item)
+                for item in scored
+                if item.get("same_product_repeat") is not None
+            ],
+            "rejectedSameProductRepeatCandidates": [
+                considered_entry(item)
+                for item in scored
+                if item.get("same_product_repeat_rejection") is not None
+            ]
+            + rejected_repeat_selection,
             "ambiguousCandidates": ambiguous_candidates,
             "hardNegativeCandidates": ambiguous_candidates,
         }

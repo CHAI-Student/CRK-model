@@ -153,6 +153,7 @@ class QueueItem:
     cached_active_products: Optional[List] = None
     active_product_snapshot_metadata: Optional[dict] = None
     product_weights: Optional[Dict[int, float]] = None
+    product_stocks: Optional[Dict[int, int]] = None
     trace_context: Optional[TriggerTraceContext] = None
     return_weight_hints: List[Dict[str, object]] = field(default_factory=list)
 
@@ -1088,6 +1089,20 @@ class TriggerService:
                 continue
         return product_weights
 
+    @staticmethod
+    def _product_stocks_from_snapshot(active_products: Optional[List]) -> Dict[int, int]:
+        product_stocks: Dict[int, int] = {}
+        for product_info in active_products or []:
+            class_id = getattr(product_info, "yolo_class_id", None)
+            stock_qty = getattr(product_info, "stock_qty", None)
+            if class_id is None or stock_qty is None:
+                continue
+            try:
+                product_stocks[int(class_id)] = int(stock_qty)
+            except (TypeError, ValueError):
+                continue
+        return product_stocks
+
     def _register_loadcell_event(
         self,
         *,
@@ -1376,6 +1391,7 @@ class TriggerService:
         trace_context: Optional[TriggerTraceContext],
         log_prefix: str,
         zone: Optional[int] = None,
+        product_stocks: Optional[Dict[int, int]] = None,
     ) -> List[VoteResult]:
         raw_count = len(vote_results or [])
         if trace_context is not None:
@@ -1387,6 +1403,7 @@ class TriggerService:
             vote_results,
             delta_weight=delta_weight,
             product_weights=product_weights or {},
+            product_stocks=product_stocks or {},
             trace_context=trace_context,
             log_prefix=log_prefix,
         )
@@ -1855,6 +1872,7 @@ class TriggerService:
 
         # 5. active_products 캐시 (v4.11: 조회 시점 통일)
         product_weights = self._product_weights_from_snapshot(cached_active_products)
+        product_stocks = self._product_stocks_from_snapshot(cached_active_products)
         if cached_active_products:
             logger.info(
                 f"[TRIGGER] v4.11: active_products {len(cached_active_products)}개 캐시됨 "
@@ -1918,6 +1936,7 @@ class TriggerService:
             cached_active_products=cached_active_products,
             active_product_snapshot_metadata=snapshot_metadata,
             product_weights=product_weights,
+            product_stocks=product_stocks,
             trace_context=trace_context,
             return_weight_hints=return_weight_hints,
         )
@@ -1992,6 +2011,7 @@ class TriggerService:
         )
         active_products = cached_active_products or []
         product_weights = self._product_weights_from_snapshot(active_products)
+        product_stocks = self._product_stocks_from_snapshot(active_products)
         self._record_active_product_diagnostics(
             trace_context=trace_context,
             active_products=active_products,
@@ -2064,6 +2084,7 @@ class TriggerService:
             vote_results=vote_results,
             delta_weight=delta_weight,
             product_weights=product_weights,
+            product_stocks=product_stocks,
             trace_context=trace_context,
             log_prefix="TRIGGER-LOW-WEIGHT",
             zone=input_data.zone,
@@ -2680,6 +2701,7 @@ class TriggerService:
             vote_results=vote_results,
             delta_weight=item.delta_weight,
             product_weights=item.product_weights or {},
+            product_stocks=item.product_stocks or {},
             trace_context=trace_context,
             log_prefix="TRIGGER-WORKER",
             zone=input_data.zone,
@@ -3174,6 +3196,7 @@ class TriggerService:
         # 문제: 비디오 처리 중(~22초) Door session finalize 콜백이 active_product_store.clear() 호출
         # 해결: 비디오 처리 전에 캐시하여 처리 후에도 동일한 데이터 사용
         product_weights = self._product_weights_from_snapshot(cached_active_products)
+        product_stocks = self._product_stocks_from_snapshot(cached_active_products)
         if cached_active_products:
             logger.info(
                 f"[TRIGGER] v4.11: active_products {len(cached_active_products)}개 캐시됨 "
@@ -3248,6 +3271,7 @@ class TriggerService:
             vote_results=vote_results,
             delta_weight=delta_weight,
             product_weights=product_weights,
+            product_stocks=product_stocks,
             trace_context=trace_context,
             log_prefix="TRIGGER",
             zone=input_data.zone,

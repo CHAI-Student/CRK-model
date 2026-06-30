@@ -1504,6 +1504,252 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
     assert diagnostics["selected"]["freezerExitPathVotes"] == 13
 
 
+def test_video_processor_freezer_filter_prefers_count_supported_bagel_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-zone5-bagel-repeat",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "37": {
+            "class_id": 37,
+            "name": "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+            "freezerExitPathVotes": 40,
+            "freezer_roi_filtered": 40,
+            "cameras": {"top": {"freezerExitPathVotes": 40}},
+        },
+        "27": {
+            "class_id": 27,
+            "name": "BAG_NULLDAM_BAGEL_140G",
+            "freezerExitPathVotes": 9,
+            "freezer_roi_filtered": 9,
+            "cameras": {"top": {"freezerExitPathVotes": 9}},
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                class_id=37,
+                class_name="BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                vote_count=147,
+                max_confidence=1.0,
+                avg_confidence=1.0,
+                weighted_confidence=1.0,
+                top_detected=True,
+                top_vote_count=147,
+                instance_count_hint=3,
+            ),
+            VoteResult(
+                class_id=27,
+                class_name="BAG_NULLDAM_BAGEL_140G",
+                vote_count=4,
+                max_confidence=0.9511,
+                avg_confidence=0.52,
+                weighted_confidence=0.52,
+                top_detected=True,
+                top_vote_count=4,
+                instance_count_hint=1,
+            ),
+        ],
+        delta_weight=-307.2,
+        product_weights={37: 309.0, 27: 156.0},
+        product_stocks={37: 93, 27: 97},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [27]
+    assert handled[0].instance_count_hint == 2
+    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["selected"]["class_id"] == 27
+    assert diagnostics["selected"]["count"] == 2
+    assert diagnostics["selected"]["expectedWeight"] == 312.0
+    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(4.8)
+    repeat_candidates = diagnostics["sameProductRepeatCandidates"]
+    assert [candidate["class_id"] for candidate in repeat_candidates] == [27]
+    assert repeat_candidates[0]["count"] == 2
+
+
+def test_video_processor_freezer_repeat_requires_exit_path_votes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-repeat-low-exit-path",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "37": {
+            "class_id": 37,
+            "name": "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+            "freezerExitPathVotes": 40,
+            "freezer_roi_filtered": 40,
+            "cameras": {"top": {"freezerExitPathVotes": 40}},
+        },
+        "27": {
+            "class_id": 27,
+            "name": "BAG_NULLDAM_BAGEL_140G",
+            "freezerExitPathVotes": 2,
+            "freezer_roi_filtered": 2,
+            "cameras": {"top": {"freezerExitPathVotes": 2}},
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                class_id=37,
+                class_name="BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                vote_count=147,
+                max_confidence=1.0,
+                avg_confidence=1.0,
+                weighted_confidence=1.0,
+                top_detected=True,
+                top_vote_count=147,
+                instance_count_hint=3,
+            ),
+            VoteResult(
+                class_id=27,
+                class_name="BAG_NULLDAM_BAGEL_140G",
+                vote_count=4,
+                max_confidence=0.9511,
+                avg_confidence=0.52,
+                weighted_confidence=0.52,
+                top_detected=True,
+                top_vote_count=4,
+                instance_count_hint=1,
+            ),
+        ],
+        delta_weight=-307.2,
+        product_weights={37: 309.0, 27: 156.0},
+        product_stocks={37: 93, 27: 97},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [37]
+    assert diagnostics["reason"] == "weight_gate_exit_path"
+    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
+    assert [candidate["class_id"] for candidate in rejected] == [27]
+    assert rejected[0]["sameProductRepeatRejectedReason"] == (
+        "insufficient_exit_path_votes"
+    )
+
+
+def test_video_processor_freezer_repeat_does_not_override_dual_camera_single(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-repeat-dual-camera-single",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "37": {
+            "class_id": 37,
+            "name": "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+            "freezerExitPathVotes": 40,
+            "freezer_roi_filtered": 40,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 24},
+                "side": {"freezerExitPathVotes": 16},
+            },
+        },
+        "27": {
+            "class_id": 27,
+            "name": "BAG_NULLDAM_BAGEL_140G",
+            "freezerExitPathVotes": 9,
+            "freezer_roi_filtered": 9,
+            "cameras": {"top": {"freezerExitPathVotes": 9}},
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                class_id=37,
+                class_name="BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+                vote_count=147,
+                max_confidence=1.0,
+                avg_confidence=1.0,
+                weighted_confidence=1.0,
+                top_detected=True,
+                side_detected=True,
+                top_vote_count=90,
+                side_vote_count=57,
+                instance_count_hint=3,
+            ),
+            VoteResult(
+                class_id=27,
+                class_name="BAG_NULLDAM_BAGEL_140G",
+                vote_count=4,
+                max_confidence=0.9511,
+                avg_confidence=0.52,
+                weighted_confidence=0.52,
+                top_detected=True,
+                top_vote_count=4,
+                instance_count_hint=1,
+            ),
+        ],
+        delta_weight=-307.2,
+        product_weights={37: 309.0, 27: 156.0},
+        product_stocks={37: 93, 27: 97},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [37]
+    assert diagnostics["selected"]["dualCameraExitPath"] is True
+    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
+    assert any(
+        candidate["class_id"] == 27
+        and candidate.get("reason") == "dual_camera_single_preferred"
+        for candidate in rejected
+    )
+
+
 def test_video_processor_freezer_stage_only_rescues_yomamte_dual_camera(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

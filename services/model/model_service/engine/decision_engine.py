@@ -671,6 +671,16 @@ class ProductDecisionEngine:
                 if expected_weight > 0
                 else target_weight
             )
+            repeat_diagnostic = self._freezer_same_product_repeat_diagnostic(
+                candidate=candidate,
+                target_weight=target_weight,
+                unit_weight=unit_weight,
+                stock=stock,
+                single_residual=abs(target_weight - max(0.0, unit_weight)),
+                confidence=confidence,
+                exit_path_votes=int(diag["freezerExitPathVotes"]),
+                source=source,
+            )
             diag.update(
                 {
                     "product_name": getattr(product, "product_name", candidate.class_name),
@@ -687,6 +697,30 @@ class ProductDecisionEngine:
                     "reason": "candidate",
                 }
             )
+            if repeat_diagnostic is not None:
+                if repeat_diagnostic.get("accepted"):
+                    diag.update(
+                        {
+                            "sameProductRepeatCandidate": True,
+                            "repeatCount": int(repeat_diagnostic["count"]),
+                            "repeatExpectedWeight": round(
+                                float(repeat_diagnostic["expectedWeight"]), 1
+                            ),
+                            "repeatWeightResidual": round(
+                                float(repeat_diagnostic["countWeightResidual"]), 1
+                            ),
+                            "repeatAllowedResidual": round(
+                                float(repeat_diagnostic["countAllowedResidual"]), 1
+                            ),
+                        }
+                    )
+                else:
+                    diag["sameProductRepeatRejectedReason"] = str(
+                        repeat_diagnostic.get("reason", "rejected")
+                    )
+                    diag["nearestRepeatCount"] = int(
+                        repeat_diagnostic.get("count", 0) or 0
+                    )
             option = {
                 "rank": rank,
                 "candidate": candidate,
@@ -703,6 +737,10 @@ class ProductDecisionEngine:
                 "source": source,
                 "source_priority": 1 if source == "freezer_stage_exit_path" else 0,
                 "diagnostics": diag,
+                "same_product_repeat": repeat_diagnostic
+                if repeat_diagnostic is not None
+                and repeat_diagnostic.get("accepted")
+                else None,
             }
             options.append(option)
             considered.append(diag)
@@ -1057,6 +1095,13 @@ class ProductDecisionEngine:
                     int(item[2]["rank"]),
                 ),
             )
+            repeat_selected = self._select_freezer_repeat_over_single(
+                options=options,
+                selected=selected,
+            )
+            if repeat_selected is not None:
+                self._apply_freezer_repeat_option(repeat_selected)
+                return repeat_selected, "same_product_repeat_weight_gate"
             return selected, reason
 
         best_confidence = max(option["confidence"] for option in options)
@@ -1074,7 +1119,50 @@ class ProductDecisionEngine:
                 -float(option["confidence"]),
             ),
         )
+        repeat_selected = self._select_freezer_repeat_over_single(
+            options=options,
+            selected=selected,
+        )
+        if repeat_selected is not None:
+            self._apply_freezer_repeat_option(repeat_selected)
+            return repeat_selected, "same_product_repeat_weight_gate"
         return selected, "freezer_single_confidence_weight_tiebreak"
+
+    def _select_freezer_repeat_over_single(
+        self,
+        *,
+        options: list[dict[str, Any]],
+        selected: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        repeat_options = [
+            option for option in options if option.get("same_product_repeat") is not None
+        ]
+        if not repeat_options:
+            return None
+
+        repeat = min(
+            repeat_options,
+            key=lambda option: (
+                float(option["same_product_repeat"]["countWeightResidual"]),
+                int(option["rank"]),
+                -float(option["confidence"]),
+                -int(option.get("freezer_exit_path_votes", 0) or 0),
+            ),
+        )
+        repeat_residual = float(repeat["same_product_repeat"]["countWeightResidual"])
+        selected_residual = float(selected["residual"])
+        residual_grace = float(config.weight.same_product_count_tolerance_grams)
+        if bool(selected.get("dual_camera_exit_path")):
+            repeat["diagnostics"]["repeatSelectionRejectedReason"] = (
+                "dual_camera_single_preferred"
+            )
+            return None
+        if repeat_residual > selected_residual + residual_grace:
+            repeat["diagnostics"]["repeatSelectionRejectedReason"] = (
+                "single_residual_gap_preferred"
+            )
+            return None
+        return repeat
 
     def _freezer_supported_count(
         self,
@@ -1105,6 +1193,122 @@ class ProductDecisionEngine:
                 best_count = count
                 best_residual = residual
         return best_count
+
+    def _freezer_count_allowed_residual(self, count: int) -> float:
+        count_scaled = float(config.weight.tolerance_grams) + (
+            float(config.weight.same_product_count_tolerance_grams) * max(1, int(count))
+        )
+        return min(self._freezer_weight_tolerance_grams(), count_scaled)
+
+    def _freezer_same_product_repeat_diagnostic(
+        self,
+        *,
+        candidate: EnsembleResult,
+        target_weight: float,
+        unit_weight: float,
+        stock: int,
+        single_residual: float,
+        confidence: float,
+        exit_path_votes: int,
+        source: str,
+    ) -> Optional[dict[str, Any]]:
+        if unit_weight <= 0.0:
+            return None
+        nearest_count = int(round(target_weight / unit_weight))
+        if nearest_count < 2:
+            return None
+
+        max_count = min(
+            max(1, int(stock)),
+            max(1, int(config.weight.max_items_per_segment)),
+            max(1, int(config.weight.same_product_max_count)),
+            max(1, int(config.weight.max_count_per_item)),
+        )
+        base = {
+            "class_id": int(candidate.class_id),
+            "name": candidate.class_name,
+            "nearestCount": nearest_count,
+            "maxCount": int(max_count),
+            "unitWeight": round(float(unit_weight), 1),
+            "stock": int(stock),
+        }
+        if max_count < 2:
+            return {**base, "accepted": False, "reason": "count_cap_below_repeat"}
+
+        best_count = 1
+        best_residual = float(single_residual)
+        for count in range(2, max_count + 1):
+            residual = abs(target_weight - (unit_weight * count))
+            if residual < best_residual:
+                best_count = count
+                best_residual = residual
+
+        if best_count < 2:
+            return None
+
+        expected_weight = unit_weight * best_count
+        allowed_residual = self._freezer_count_allowed_residual(best_count)
+        vote_count = max(
+            int(getattr(candidate, "vote_count", 0) or 0),
+            int(getattr(candidate, "raw_vote_count", 0) or 0),
+        )
+        min_votes = max(
+            int(config.vision.freezer_min_vote_count),
+            int(config.weight.detected_single_fallback_min_votes),
+        )
+        diagnostic = {
+            **base,
+            "count": int(best_count),
+            "expectedWeight": round(float(expected_weight), 1),
+            "countWeightResidual": round(float(best_residual), 1),
+            "countAllowedResidual": round(float(allowed_residual), 1),
+            "confidence": round(float(confidence), 4),
+            "freezerExitPathVotes": int(exit_path_votes),
+            "voteCount": int(vote_count),
+            "accepted": False,
+        }
+        if str(source) != "vision":
+            diagnostic["reason"] = "not_regular_vision_candidate"
+        elif confidence < float(config.weight.freezer_multi_min_confidence):
+            diagnostic["reason"] = "confidence_below_repeat_floor"
+        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
+            diagnostic["reason"] = "insufficient_exit_path_votes"
+        elif vote_count < min_votes:
+            diagnostic["reason"] = "insufficient_repeat_votes"
+        elif best_residual > allowed_residual:
+            diagnostic["reason"] = "repeat_residual_exceeds_tolerance"
+        else:
+            diagnostic["accepted"] = True
+            diagnostic["reason"] = "same_product_repeat_weight_gate"
+        return diagnostic
+
+    @staticmethod
+    def _apply_freezer_repeat_option(option: dict[str, Any]) -> None:
+        repeat = option.get("same_product_repeat")
+        if not repeat:
+            return
+        count = int(repeat["count"])
+        expected_weight = float(repeat["expectedWeight"])
+        residual = float(repeat["countWeightResidual"])
+        option["count"] = count
+        option["expected_weight"] = expected_weight
+        option["residual"] = residual
+        diagnostics = option["diagnostics"]
+        diagnostics.update(
+            {
+                "count": count,
+                "instance_count_hint": count,
+                "expected_weight": round(expected_weight, 1),
+                "weight_residual": round(residual, 1),
+                "weight_reliable": residual
+                <= float(config.weight.freezer_weight_tolerance_grams),
+                "selectionTier": "same_product_repeat_weight_gate",
+                "countWeightResidual": round(residual, 1),
+                "countAllowedResidual": round(
+                    float(repeat["countAllowedResidual"]), 1
+                ),
+            }
+        )
 
     def _select_freezer_multi_kind_options(
         self,
@@ -1288,6 +1492,23 @@ class ProductDecisionEngine:
             "selected": [option["diagnostics"] for option in selected_options],
             "considered": considered,
         }
+        same_product_repeat_candidates = [
+            item for item in considered if item.get("sameProductRepeatCandidate")
+        ]
+        rejected_same_product_repeat_candidates = [
+            item
+            for item in considered
+            if item.get("sameProductRepeatRejectedReason")
+            or item.get("repeatSelectionRejectedReason")
+        ]
+        if same_product_repeat_candidates:
+            diagnostics["sameProductRepeatCandidates"] = (
+                same_product_repeat_candidates
+            )
+        if rejected_same_product_repeat_candidates:
+            diagnostics["rejectedSameProductRepeatCandidates"] = (
+                rejected_same_product_repeat_candidates
+            )
         ambiguous_candidates = [
             item
             for item in considered

@@ -103,6 +103,13 @@ vision-supported product identity.
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Strong dual-camera evidence
   without a weight fit records `freezer_multi_kind_weight_mismatch` and falls
   back to one handled freezer product.
+- Freezer same-product repeats are allowed as a conservative candidate-filter
+  and vision-first engine override. The repeat count is inferred from
+  `target_weight / unit_weight`, then checked against freezer exit-path votes,
+  vote count, confidence, stock/count caps, and both freezer and count-scaled
+  residual tolerances. A top-only repeat can beat a top-only single only within
+  the configured repeat residual gap; a dual-camera exit-path single remains
+  preferred.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count

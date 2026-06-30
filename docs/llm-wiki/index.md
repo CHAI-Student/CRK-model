@@ -1,6 +1,6 @@
 # CRK-model LLM Wiki
 
-Last updated: 2026-06-29
+Last updated: 2026-06-30
 
 This wiki is the LLM-facing map of the CRK model service. The original
 documents under `docs/` remain the raw sources. Pages here summarize and
@@ -114,8 +114,11 @@ shape without rereading every long historical document.
   candidates stay in trace diagnostics, while OPS candidates, engine input, and
   DoorSession close snapshots use handled candidates. For a single freezer
   removal segment, the handled list defaults to one product; weight residual
-  breaks ties inside the top confidence band, and same-class count hints are
-  used only when the target weight supports that count.
+  breaks ties inside the top confidence band. Same-product `x2+` candidates can
+  now be inferred from target weight even when `instance_count_hint=1`, but only
+  for final vision candidates with freezer exit-path votes, enough vote
+  evidence, confidence above the freezer multi floor, stock/count caps, and a
+  residual inside the freezer/count-scaled tolerance.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their

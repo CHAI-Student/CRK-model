@@ -104,6 +104,14 @@ selected frames, accumulates per-camera evidence, and returns ranked
   OPS logging and engine judgment. Multiple handled freezer candidates pass
   only when their combined weight fits
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`.
+- The freezer handled filter is count-aware for same-product repeats. A final
+  vision candidate can become a `same_product_repeat_weight_gate` selection
+  when `target_weight / unit_weight` supports `x2+`, freezer exit-path votes,
+  vote count, confidence, stock, `max_items_per_segment`,
+  `same_product_max_count`, and `max_count_per_item` all allow it. This can
+  override a tighter top-only single candidate only inside the
+  `same_product_count_tolerance` residual gap; dual-camera exit-path singles
+  remain preferred.
 - Freezer trigger traces now expose `camera_layout`, raw candidate count,
   handled candidate count, freezer filter reason, and the key freezer vote,
   motion, ROI, exit-path, and multi-candidate thresholds. OPS also writes a

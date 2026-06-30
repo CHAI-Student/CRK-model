@@ -114,8 +114,18 @@ Important inputs:
   Strong dual-camera exit-path evidence alone no longer selects multiple
   freezer candidates for ordinary nonzero deltas; rejected sets record
   `freezer_multi_kind_weight_mismatch` and fall back to the single handled
-  freezer selection path. Same-class count greater than one is still allowed
-  only when the voting `instance_count_hint` is supported by the target weight.
+  freezer selection path.
+- Same-product freezer repeats can be inferred from weight even when
+  `instance_count_hint=1`. The candidate must still be a final vision
+  candidate with freezer exit-path votes, enough vote evidence, confidence
+  above the freezer multi floor, positive stock, and a count bounded by stock,
+  `max_items_per_segment`, `same_product_max_count`, and
+  `max_count_per_item`. The repeat residual must fit both
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS` and the normal
+  `tolerance_grams + count * same_product_count_tolerance_grams` window. Trace
+  diagnostics expose `sameProductRepeatCandidates`,
+  `rejectedSameProductRepeatCandidates`, `count`, `expectedWeight`, and
+  `countWeightResidual`.
 
 ## StrictWeightMatcher
 
