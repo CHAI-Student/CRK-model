@@ -631,12 +631,12 @@ def test_freezer_vision_first_prefers_melona_exit_path_over_static_lala(monkeypa
         "46": {
             "class_id": 46,
             "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
-            "freezer_roi_filtered": 1,
+            "freezer_roi_passed": 1,
         },
         "44": {
             "class_id": 44,
             "name": "STICK_BINGGRAE_MELONA_75ML",
-            "freezer_roi_filtered": 19,
+            "freezer_roi_passed": 19,
         },
     }
     engine = ProductDecisionEngine(strict_mode=True)
@@ -700,21 +700,21 @@ def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
                 "side": {"raw": 6, "raw_max_confidence": 0.1214},
             },
         },
-        "46": {
-            "class_id": 46,
-            "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
-            "freezer_roi_filtered": 0,
-        },
-        "44": {
-            "class_id": 44,
-            "name": "STICK_BINGGRAE_MELONA_75ML",
-            "freezer_roi_filtered": 4,
-        },
-        "42": {
-            "class_id": 42,
-            "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
-            "freezer_roi_filtered": 13,
-        },
+            "46": {
+                "class_id": 46,
+                "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                "freezer_roi_passed": 0,
+            },
+            "44": {
+                "class_id": 44,
+                "name": "STICK_BINGGRAE_MELONA_75ML",
+                "freezer_roi_passed": 4,
+            },
+            "42": {
+                "class_id": 42,
+                "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
+                "freezer_roi_passed": 13,
+            },
     }
     engine = ProductDecisionEngine(strict_mode=True)
 
@@ -1051,6 +1051,77 @@ def test_freezer_vision_first_static_single_loses_to_trajectory_candidate(monkey
     )
     assert static_candidate["interactionPenalty"] is True
     assert diagnostics["selected"][0]["trajectoryExitPathPassed"] is True
+
+
+def test_freezer_vision_first_hand_far_static_single_is_rejected(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "HAND_FAR_STATIC_TIGHT_SINGLE",
+            "freezerExitPathVotes": 40,
+            "handPathValid": True,
+            "handPathValidUpperRoi": True,
+            "handInteractionPassed": False,
+            "handNearFrameCount": 0,
+            "handPathPassed": False,
+            "handPathBlocked": True,
+            "staticShelfLikely": True,
+            "cameras": {"top": {"freezerExitPathVotes": 40}},
+        },
+        "102": {
+            "class_id": 102,
+            "name": "HAND_NEAR_SINGLE",
+            "freezerExitPathVotes": 6,
+            "handPathValid": True,
+            "handPathValidUpperRoi": True,
+            "handInteractionPassed": True,
+            "handNearFrameCount": 3,
+            "handNearVoteRatio": 0.6,
+            "minHandDistancePx": 12.0,
+            "handPathPassed": True,
+            "handPathBlocked": False,
+            "cameras": {"top": {"freezerExitPathVotes": 6}},
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=101,
+                name="HAND_FAR_STATIC_TIGHT_SINGLE",
+                confidence=1.0,
+                raw_vote_count=80,
+            ),
+            make_candidate(
+                class_id=102,
+                name="HAND_NEAR_SINGLE",
+                confidence=0.7,
+                raw_vote_count=8,
+            ),
+        ],
+        delta_weight=-100.0,
+        active_products=[
+            make_active_product(101, "HAND_FAR_STATIC_TIGHT_SINGLE", weight=100.0),
+            make_active_product(102, "HAND_NEAR_SINGLE", weight=106.0),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (102, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["selected"][0]["handInteractionPassed"] is True
+    assert [item["class_id"] for item in diagnostics["rejectedInteractionCandidates"]] == [
+        101
+    ]
+    assert diagnostics["rejectedInteractionCandidates"][0][
+        "interactionRejectedReason"
+    ] == "hand_path_blocked"
 
 
 def test_loadcell_only_returns_nearest_single_within_5g():

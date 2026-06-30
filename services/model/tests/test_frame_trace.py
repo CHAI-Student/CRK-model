@@ -2299,6 +2299,8 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
         12.0,
         raising=False,
     )
+    monkeypatch.setattr(config.vision, "freezer_roi_vertical_region", "upper", raising=False)
+    monkeypatch.setattr(config.vision, "freezer_roi_y_split", 240.0, raising=False)
     monkeypatch.setattr(config.vision, "freezer_lower_roi_y_split", 240.0, raising=False)
     monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3, raising=False)
     monkeypatch.setattr(config.weight, "freezer_confidence_tie_band", 0.08, raising=False)
@@ -2341,7 +2343,9 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
     assert vision_config["freezer_min_vote_ratio"] == 0.08
     assert vision_config["freezer_min_vote_count"] == 3
     assert vision_config["freezer_motion_min_displacement_px"] == 12.0
-    assert vision_config["freezer_lower_roi_y_split"] == 240.0
+    assert vision_config["freezer_roi_vertical_region"] == "upper"
+    assert vision_config["freezer_roi_y_split"] == 240.0
+    assert vision_config["freezer_lower_roi_y_split_legacy"] == 240.0
     assert vision_config["freezer_min_exit_path_votes"] == 3
     assert vision_config["freezer_confidence_tie_band"] == 0.08
     assert vision_config["freezer_multi_min_confidence"] == 0.45

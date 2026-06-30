@@ -75,14 +75,16 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   promotion, far-right Trevi filtering, Bibigo/Pepero/Letsbe candidate
   promotion regressions, stage counts, diagnostic trace, threshold/ROI/no-motion
   rescue, and side-ROI-conflicted threshold rescue rejection.
-  Freezer tests cover dual-top lower-half ROI filtering, freezer rescue
-  suppression, same-frame multi-bbox `instance_count_hint`, disabled-layout
-  warnings, `15g` weight-fit multi selection, top-three mismatch narrowing,
-  same-product repeat recovery for the zone5 bagel `x2` collision, repeat
-  rejection when freezer exit-path evidence is too weak, dual-camera single
-  preference over top-only repeats, static top-only ranking demotion,
-  hand-path hard reject with alternative candidates, hand-path all-blocked
-  fail-open behavior, and freezer filter OPS visibility.
+  Freezer tests cover dual-top upper-half ROI filtering, separation of
+  `freezer_roi_passed` from rejected `freezer_roi_filtered` evidence, freezer
+  rescue suppression, same-frame multi-bbox `instance_count_hint`,
+  disabled-layout warnings, `15g` weight-fit multi selection, top-three
+  mismatch narrowing, same-product repeat recovery for the zone5 bagel `x2`
+  collision, repeat rejection when freezer exit-path evidence is too weak,
+  dual-camera single preference over top-only repeats, static top-only ranking
+  demotion, upper-ROI hand proximity, hand-path hard reject with alternative
+  candidates, hand-path all-blocked fail-open behavior, and freezer filter OPS
+  visibility.
   Async failure tests cover model-service exception re-raise, unknown task
   wrapping, missing async extractor support, frame queue timeout, and zero-frame
   failure after retry.

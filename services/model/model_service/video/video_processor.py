@@ -745,7 +745,13 @@ class VideoProcessor:
             "freezer_motion_min_displacement_px": float(
                 config.vision.freezer_motion_min_displacement_px
             ),
-            "freezer_lower_roi_y_split": float(config.vision.freezer_lower_roi_y_split),
+            "freezer_roi_vertical_region": str(
+                config.vision.freezer_roi_vertical_region
+            ).lower(),
+            "freezer_roi_y_split": float(cls._freezer_configured_roi_y_split()),
+            "freezer_lower_roi_y_split_legacy": float(
+                config.vision.freezer_lower_roi_y_split
+            ),
             "freezer_min_exit_path_votes": int(config.vision.freezer_min_exit_path_votes),
             "freezer_vision_multi_without_weight_enabled": bool(
                 config.weight.freezer_vision_multi_without_weight_enabled
@@ -1079,16 +1085,48 @@ class VideoProcessor:
             stage_entry,
             "handPathValid",
             "hand_path_valid",
+            "handPathValidUpperRoi",
+            "hand_path_valid_upper_roi",
+        )
+        hand_path_valid_upper_roi = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathValidUpperRoi",
+            "hand_path_valid_upper_roi",
+        )
+        hand_interaction_passed = cls._freezer_stage_bool(
+            stage_entry,
+            "handInteractionPassed",
+            "hand_interaction_passed",
         )
         hand_path_passed = cls._freezer_stage_bool(
             stage_entry,
             "handPathPassed",
             "hand_path_passed",
-        )
+        ) or hand_interaction_passed
         hand_path_blocked = cls._freezer_stage_bool(
             stage_entry,
             "handPathBlocked",
             "hand_path_blocked",
+        )
+        hand_near_frame_count = cls._freezer_stage_int(
+            stage_entry,
+            "handNearFrameCount",
+            "hand_near_frame_count",
+        )
+        hand_near_vote_ratio = cls._freezer_stage_float(
+            stage_entry,
+            "handNearVoteRatio",
+            "hand_near_vote_ratio",
+        )
+        min_hand_distance_values = [
+            cls._freezer_stage_float(
+                stage_entry,
+                "minHandDistancePx",
+                "min_hand_distance_px",
+            )
+        ]
+        min_hand_distance = min(
+            [value for value in min_hand_distance_values if value > 0.0] or [0.0]
         )
         top_only = (
             not bool(dual_camera_exit_path)
@@ -1129,8 +1167,17 @@ class VideoProcessor:
             "trajectoryExitPathPassed": bool(trajectory_passed),
             "staticShelfLikely": bool(static_likely),
             "handPathValid": bool(hand_path_valid),
+            "handPathValidUpperRoi": bool(hand_path_valid_upper_roi),
             "handPathPassed": bool(hand_path_passed),
             "handPathBlocked": bool(hand_path_blocked),
+            "handInteractionPassed": bool(hand_interaction_passed),
+            "handNearFrameCount": int(hand_near_frame_count),
+            "handNearVoteRatio": round(float(hand_near_vote_ratio), 4),
+            "minHandDistancePx": (
+                round(float(min_hand_distance), 1)
+                if min_hand_distance > 0.0
+                else None
+            ),
             "interactionPenalty": interaction_penalty,
             "handPathHardReject": hand_path_hard_reject,
         }
@@ -1152,7 +1199,7 @@ class VideoProcessor:
                 camera_entry,
                 "freezerExitPathVotes",
                 "freezer_exit_path_votes",
-                "freezer_roi_filtered",
+                "freezer_roi_passed",
             )
             if count > 0:
                 exit_counts[str(camera)] = count
@@ -1215,7 +1262,7 @@ class VideoProcessor:
             entry,
             "freezerExitPathVotes",
             "freezer_exit_path_votes",
-            "freezer_roi_filtered",
+            "freezer_roi_passed",
         )
         threshold_votes = cls._freezer_stage_int(
             entry,
@@ -1242,6 +1289,7 @@ class VideoProcessor:
 
         stage_confidence = cls._freezer_stage_float(
             entry,
+            "freezer_roi_passed_max_confidence",
             "freezer_roi_filtered_max_confidence",
             "threshold_passed_max_confidence",
             "raw_max_confidence",
@@ -1259,12 +1307,14 @@ class VideoProcessor:
 
         top_confidence = cls._freezer_stage_float(
             top_entry,
+            "freezer_roi_passed_max_confidence",
             "freezer_roi_filtered_max_confidence",
             "threshold_passed_max_confidence",
             "raw_max_confidence",
         )
         side_confidence = cls._freezer_stage_float(
             side_entry,
+            "freezer_roi_passed_max_confidence",
             "freezer_roi_filtered_max_confidence",
             "threshold_passed_max_confidence",
             "raw_max_confidence",
@@ -1272,14 +1322,14 @@ class VideoProcessor:
         top_votes = cls._freezer_stage_int(
             top_entry,
             "freezerExitPathVotes",
-            "freezer_roi_filtered",
+            "freezer_roi_passed",
             "threshold_passed",
             "raw",
         )
         side_votes = cls._freezer_stage_int(
             side_entry,
             "freezerExitPathVotes",
-            "freezer_roi_filtered",
+            "freezer_roi_passed",
             "threshold_passed",
             "raw",
         )
@@ -1363,7 +1413,7 @@ class VideoProcessor:
                 pass
 
         entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
-        for key in ("freezerExitPathVotes", "freezer_exit_path_votes", "freezer_roi_filtered"):
+        for key in ("freezerExitPathVotes", "freezer_exit_path_votes", "freezer_roi_passed"):
             try:
                 values.append(int(entry.get(key, 0) or 0))
             except (TypeError, ValueError):
@@ -1593,8 +1643,17 @@ class VideoProcessor:
                         interaction.get("staticShelfLikely")
                     ),
                     "handPathValid": bool(interaction.get("handPathValid")),
+                    "handPathValidUpperRoi": bool(
+                        interaction.get("handPathValidUpperRoi")
+                    ),
                     "handPathPassed": bool(interaction.get("handPathPassed")),
                     "handPathBlocked": bool(interaction.get("handPathBlocked")),
+                    "handInteractionPassed": bool(
+                        interaction.get("handInteractionPassed")
+                    ),
+                    "handNearFrameCount": interaction.get("handNearFrameCount"),
+                    "handNearVoteRatio": interaction.get("handNearVoteRatio"),
+                    "minHandDistancePx": interaction.get("minHandDistancePx"),
                     "interactionPenalty": bool(item.get("interaction_penalty")),
                 }
             )
@@ -1723,6 +1782,42 @@ class VideoProcessor:
                                 int(item["vote"].class_id)
                             ],
                             freezer_exit_path_votes=int(item["freezer_exit_path_votes"]),
+                            hand_path_valid=bool(
+                                (item.get("interaction") or {}).get("handPathValid")
+                            ),
+                            hand_path_valid_upper_roi=bool(
+                                (item.get("interaction") or {}).get(
+                                    "handPathValidUpperRoi"
+                                )
+                            ),
+                            hand_path_passed=bool(
+                                (item.get("interaction") or {}).get("handPathPassed")
+                            ),
+                            hand_path_blocked=bool(
+                                (item.get("interaction") or {}).get("handPathBlocked")
+                            ),
+                            hand_interaction_passed=bool(
+                                (item.get("interaction") or {}).get(
+                                    "handInteractionPassed"
+                                )
+                            ),
+                            hand_near_frame_count=int(
+                                (item.get("interaction") or {}).get(
+                                    "handNearFrameCount",
+                                    0,
+                                )
+                                or 0
+                            ),
+                            hand_near_vote_ratio=float(
+                                (item.get("interaction") or {}).get(
+                                    "handNearVoteRatio",
+                                    0.0,
+                                )
+                                or 0.0
+                            ),
+                            min_hand_distance_px=(item.get("interaction") or {}).get(
+                                "minHandDistancePx"
+                            ),
                         )
                         for item in selected_items
                     ]
@@ -1877,6 +1972,38 @@ class VideoProcessor:
             selected_vote,
             instance_count_hint=supported_count,
             freezer_exit_path_votes=int(selected_item["freezer_exit_path_votes"]),
+            hand_path_valid=bool(
+                (selected_item.get("interaction") or {}).get("handPathValid")
+            ),
+            hand_path_valid_upper_roi=bool(
+                (selected_item.get("interaction") or {}).get("handPathValidUpperRoi")
+            ),
+            hand_path_passed=bool(
+                (selected_item.get("interaction") or {}).get("handPathPassed")
+            ),
+            hand_path_blocked=bool(
+                (selected_item.get("interaction") or {}).get("handPathBlocked")
+            ),
+            hand_interaction_passed=bool(
+                (selected_item.get("interaction") or {}).get("handInteractionPassed")
+            ),
+            hand_near_frame_count=int(
+                (selected_item.get("interaction") or {}).get(
+                    "handNearFrameCount",
+                    0,
+                )
+                or 0
+            ),
+            hand_near_vote_ratio=float(
+                (selected_item.get("interaction") or {}).get(
+                    "handNearVoteRatio",
+                    0.0,
+                )
+                or 0.0
+            ),
+            min_hand_distance_px=(selected_item.get("interaction") or {}).get(
+                "minHandDistancePx"
+            ),
         )
         unit_weight = cls._freezer_candidate_unit_weight(selected_vote, product_weights)
         residual = (
@@ -1953,12 +2080,31 @@ class VideoProcessor:
                 "handPathValid": bool(
                     (selected_item.get("interaction") or {}).get("handPathValid")
                 ),
+                "handPathValidUpperRoi": bool(
+                    (selected_item.get("interaction") or {}).get(
+                        "handPathValidUpperRoi"
+                    )
+                ),
                 "handPathPassed": bool(
                     (selected_item.get("interaction") or {}).get("handPathPassed")
                 ),
                 "handPathBlocked": bool(
                     (selected_item.get("interaction") or {}).get("handPathBlocked")
                 ),
+                "handInteractionPassed": bool(
+                    (selected_item.get("interaction") or {}).get(
+                        "handInteractionPassed"
+                    )
+                ),
+                "handNearFrameCount": (
+                    selected_item.get("interaction") or {}
+                ).get("handNearFrameCount"),
+                "handNearVoteRatio": (
+                    selected_item.get("interaction") or {}
+                ).get("handNearVoteRatio"),
+                "minHandDistancePx": (
+                    selected_item.get("interaction") or {}
+                ).get("minHandDistancePx"),
                 "interactionPenalty": bool(selected_item.get("interaction_penalty")),
                 "selectionTier": reason,
             },
@@ -2005,8 +2151,37 @@ class VideoProcessor:
         existing["freezer_candidate_filter"] = diagnostics
         trace_context.record_weight_diagnostics(existing)
 
+    @staticmethod
+    def _freezer_configured_roi_y_split() -> float:
+        configured = getattr(config.vision, "freezer_roi_y_split", None)
+        if configured is None:
+            return float(config.vision.freezer_lower_roi_y_split)
+        return float(configured)
+
     def _freezer_roi_y_split(self) -> float:
-        return float(config.vision.freezer_lower_roi_y_split)
+        return self._freezer_configured_roi_y_split()
+
+    @staticmethod
+    def _freezer_roi_vertical_region() -> str:
+        region = str(
+            getattr(config.vision, "freezer_roi_vertical_region", "upper")
+        ).strip().lower()
+        return region if region in {"upper", "lower"} else "upper"
+
+    def _freezer_roi_direction(self) -> str:
+        return f"freezer_{self._freezer_roi_vertical_region()}_half"
+
+    def _new_hand_path_tracker(self) -> HandPathTracker:
+        if (
+            self._is_freezer_mode()
+            and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+        ):
+            return HandPathTracker(
+                roi_y_split=self._freezer_roi_y_split(),
+                roi_vertical_region=self._freezer_roi_vertical_region(),
+                max_distance_px=float(config.vision.max_distance_px),
+            )
+        return HandPathTracker(max_distance_px=float(config.vision.max_distance_px))
 
     def _effective_min_vote_ratio(self) -> float:
         if self._is_freezer_mode():
@@ -2037,10 +2212,17 @@ class VideoProcessor:
         center_y = detection.center[1]
         return center_y >= self.top_roi_y_split, direction
 
-    def _freezer_lower_roi_accepts(self, detection: YOLODetection) -> bool:
+    def _freezer_roi_accepts(self, detection: YOLODetection) -> bool:
         if not self.top_roi_enabled:
             return True
-        return float(detection.center[1]) >= self._freezer_roi_y_split()
+        center_y = float(detection.center[1])
+        split = self._freezer_roi_y_split()
+        if self._freezer_roi_vertical_region() == "lower":
+            return center_y >= split
+        return center_y <= split
+
+    def _freezer_lower_roi_accepts(self, detection: YOLODetection) -> bool:
+        return self._freezer_roi_accepts(detection)
 
     def _freezer_motion_floor(self) -> float:
         if self._is_freezer_mode():
@@ -2066,7 +2248,7 @@ class VideoProcessor:
         delta_weight: Optional[float],
     ) -> bool:
         if self._uses_freezer_dual_top_profile(camera_type):
-            return self._freezer_lower_roi_accepts(detection)
+            return self._freezer_roi_accepts(detection)
         if camera_type == "top":
             roi_eligible, _ = self._top_roi_accepts(detection, delta_weight)
             return roi_eligible
@@ -2244,9 +2426,11 @@ class VideoProcessor:
         hand_path_valid: bool,
         hand_path_passed: bool,
         hand_path_blocked: bool,
+        hand_metrics: Optional[dict[str, Any]] = None,
     ) -> None:
         if trace_context is None:
             return
+        metrics = hand_metrics or {}
         trace_context.record_hand_path_evidence(
             class_id=result.class_id,
             class_name=result.class_name,
@@ -2254,6 +2438,16 @@ class VideoProcessor:
             hand_path_valid=hand_path_valid,
             hand_path_passed=hand_path_passed,
             hand_path_blocked=hand_path_blocked,
+            hand_interaction_passed=bool(
+                metrics.get("handInteractionPassed", hand_path_passed)
+            ),
+            hand_near_frame_count=int(metrics.get("handNearFrameCount", 0) or 0),
+            hand_near_vote_ratio=float(metrics.get("handNearVoteRatio", 0.0) or 0.0),
+            min_hand_distance_px=metrics.get("minHandDistancePx"),
+            hand_path_valid_upper_roi=metrics.get(
+                "handPathValidUpperRoi",
+                hand_path_valid,
+            ),
         )
 
     @staticmethod
@@ -2821,6 +3015,104 @@ class VideoProcessor:
             return results, 0
         return filtered_results, removed_count
 
+    def _apply_hand_path_filter_with_trace(
+        self,
+        results: List[VoteResult],
+        hand_path_tracker: HandPathTracker,
+        trace_context: Optional[TriggerTraceContext],
+        stats: VideoProcessingStats,
+        log_prefix: str,
+    ) -> List[VoteResult]:
+        candidate_class_ids = [int(result.class_id) for result in results]
+        hand_path_valid = hand_path_tracker.has_valid_hand_path()
+        metrics_by_class = hand_path_tracker.hand_interaction_metrics(
+            candidate_class_ids
+        )
+        valid_class_ids_set = {
+            int(class_id)
+            for class_id, metrics in metrics_by_class.items()
+            if bool(metrics.get("handInteractionPassed"))
+        }
+        has_hand_near_candidate = bool(hand_path_valid and valid_class_ids_set)
+
+        for result in results:
+            metrics = metrics_by_class.get(
+                int(result.class_id),
+                {
+                    "handPathValid": hand_path_valid,
+                    "handPathValidUpperRoi": hand_path_valid,
+                    "handInteractionPassed": False,
+                    "handNearFrameCount": 0,
+                    "handNearVoteRatio": 0.0,
+                    "minHandDistancePx": None,
+                },
+            )
+            hand_path_passed = bool(
+                hand_path_valid and metrics.get("handInteractionPassed")
+            )
+            hand_path_blocked = bool(
+                has_hand_near_candidate and not hand_path_passed
+            )
+            self._record_hand_path_evidence(
+                trace_context,
+                result=result,
+                hand_path_valid=hand_path_valid,
+                hand_path_passed=hand_path_passed,
+                hand_path_blocked=hand_path_blocked,
+                hand_metrics=metrics,
+            )
+
+        before_count = len(results)
+        if not has_hand_near_candidate:
+            stats.hand_path_filtered_classes = 0
+            if hand_path_valid and before_count > 0:
+                logger.warning(
+                    "[%s] fallback=kept_candidates reason=hand_path_no_near_candidate",
+                    log_prefix,
+                )
+            return results
+
+        filtered_results = [
+            result for result in results if int(result.class_id) in valid_class_ids_set
+        ]
+        removed_results = [
+            result
+            for result in results
+            if int(result.class_id) not in valid_class_ids_set
+        ]
+        if not filtered_results:
+            stats.hand_path_filtered_classes = 0
+            logger.warning(
+                "[%s] fallback=kept_candidates reason=hand_path_removed_all",
+                log_prefix,
+            )
+            return results
+
+        stats.hand_path_filtered_classes = before_count - len(filtered_results)
+        for result in filtered_results:
+            self._record_stage(
+                trace_context,
+                class_id=result.class_id,
+                class_name=result.class_name,
+                stage="hand_path_passed",
+                camera="top",
+            )
+        for result in removed_results:
+            self._record_stage(
+                trace_context,
+                class_id=result.class_id,
+                class_name=result.class_name,
+                stage="hand_path_filtered",
+                camera="top",
+            )
+        if stats.hand_path_filtered_classes > 0:
+            logger.info(
+                "[%s] hand_path_filtered=%s",
+                log_prefix,
+                stats.hand_path_filtered_classes,
+            )
+        return filtered_results
+
     def process_videos(
         self,
         top_path: Optional[str] = None,
@@ -2867,7 +3159,7 @@ class VideoProcessor:
         # v4.6: 손 경로 추적기 생성 (Top 카메라에서만 사용)
         top_hand_tracker: Optional[HandPathTracker] = None
         if self.hand_path_filter_enabled:
-            top_hand_tracker = HandPathTracker()
+            top_hand_tracker = self._new_hand_path_tracker()
 
         # Process top camera video
         if top_path:
@@ -2906,7 +3198,11 @@ class VideoProcessor:
             logger.info("[VIDEO] Side 카메라 처리 시작...")
             side_stats = self._process_single_video(
                 side_path, side_ensemble, "side", inference_allowed_class_ids,
-                hand_path_tracker=None,  # Side 카메라에서는 손 경로 필터링 안 함
+                hand_path_tracker=(
+                    top_hand_tracker
+                    if self._uses_freezer_dual_top_profile("side")
+                    else None
+                ),
                 trace_context=trace_context,
                 low_confidence_stats=low_confidence_stats,
                 roi_filtered_stats=roi_filtered_stats,
@@ -2952,6 +3248,16 @@ class VideoProcessor:
 
         # v4.6: 손 경로 필터링 적용 (Top 카메라 기준)
         if top_hand_tracker is not None and self.hand_path_filter_enabled:
+            combined_results = self._apply_hand_path_filter_with_trace(
+                combined_results,
+                top_hand_tracker,
+                trace_context,
+                stats,
+                "VIDEO",
+            )
+
+        # Deprecated average-center hand filter path kept unreachable for context.
+        if False and top_hand_tracker is not None and self.hand_path_filter_enabled:
             candidate_class_ids = [r.class_id for r in combined_results]
             hand_path_valid = top_hand_tracker.has_valid_hand_path()
             valid_class_ids = top_hand_tracker.filter_products_by_path(candidate_class_ids)
@@ -3130,7 +3436,7 @@ class VideoProcessor:
         # v5.3: 손 경로 추적기 (Top 카메라에서만 사용)
         top_hand_tracker: Optional[HandPathTracker] = None
         if self.hand_path_filter_enabled:
-            top_hand_tracker = HandPathTracker()
+            top_hand_tracker = self._new_hand_path_tracker()
 
         # 프레임 큐: (camera_type, frame_idx, frame, extractor_done)
         # None frame = EOF marker
@@ -3294,10 +3600,18 @@ class VideoProcessor:
                 stats.yolo_inference_count += 1
                 self._record_preprocess(trace_context, camera_type)
 
+                if top_hand_tracker is not None and self._uses_freezer_dual_top_profile(
+                    camera_type
+                ):
+                    top_hand_tracker.update_frame(detections, frame_idx)
+
                 # 카메라별 처리
                 if camera_type == "top":
                     # 손 경로 추적 업데이트
-                    if top_hand_tracker is not None:
+                    if (
+                        top_hand_tracker is not None
+                        and not self._uses_freezer_dual_top_profile("top")
+                    ):
                         top_hand_tracker.update_frame(detections, frame_idx)
 
                     for det in detections:
@@ -3348,9 +3662,10 @@ class VideoProcessor:
                             camera="top",
                             confidence=det.conf,
                         )
-                        if self._uses_freezer_dual_top_profile("top"):
-                            top_roi_passed = self._freezer_lower_roi_accepts(det)
-                            top_roi_direction = "freezer_lower_half"
+                        freezer_dual_top = self._uses_freezer_dual_top_profile("top")
+                        if freezer_dual_top:
+                            top_roi_passed = self._freezer_roi_accepts(det)
+                            top_roi_direction = self._freezer_roi_direction()
                             top_roi_y_limit = self._freezer_roi_y_split()
                         else:
                             top_roi_passed, top_roi_direction = self._top_roi_accepts(
@@ -3366,7 +3681,7 @@ class VideoProcessor:
                                 class_name=det.name,
                                 stage=(
                                     "freezer_roi_filtered"
-                                    if top_roi_direction == "freezer_lower_half"
+                                    if freezer_dual_top
                                     else "roi_filtered"
                                 ),
                                 camera="top",
@@ -3380,9 +3695,16 @@ class VideoProcessor:
                             trace_context,
                             class_id=det.cls,
                             class_name=det.name,
-                            stage="roi_passed",
+                            stage=(
+                                "freezer_roi_passed"
+                                if freezer_dual_top
+                                else "roi_passed"
+                            ),
                             camera="top",
+                            confidence=det.conf if freezer_dual_top else None,
                             center=det.center,
+                            roi_y_limit=top_roi_y_limit if freezer_dual_top else None,
+                            roi_direction=top_roi_direction if freezer_dual_top else None,
                         )
 
                         class_id = det.cls
@@ -3462,7 +3784,7 @@ class VideoProcessor:
                         freezer_dual_top_side = self._uses_freezer_dual_top_profile("side")
                         side_roi_soft_passed = False
                         if freezer_dual_top_side:
-                            side_roi_passed = self._freezer_lower_roi_accepts(det)
+                            side_roi_passed = self._freezer_roi_accepts(det)
                         else:
                             side_roi_passed, side_roi_soft_passed = self._side_roi_accepts(
                                 center_x
@@ -3502,7 +3824,7 @@ class VideoProcessor:
                                     else None
                                 ),
                                 roi_direction=(
-                                    "freezer_lower_half"
+                                    self._freezer_roi_direction()
                                     if freezer_dual_top_side
                                     else None
                                 ),
@@ -3533,9 +3855,24 @@ class VideoProcessor:
                             trace_context,
                             class_id=det.cls,
                             class_name=det.name,
-                            stage="roi_passed",
+                            stage=(
+                                "freezer_roi_passed"
+                                if freezer_dual_top_side
+                                else "roi_passed"
+                            ),
                             camera="side",
+                            confidence=det.conf if freezer_dual_top_side else None,
                             center=det.center,
+                            roi_y_limit=(
+                                self._freezer_roi_y_split()
+                                if freezer_dual_top_side
+                                else None
+                            ),
+                            roi_direction=(
+                                self._freezer_roi_direction()
+                                if freezer_dual_top_side
+                                else None
+                            ),
                         )
 
                         class_id = det.cls
@@ -3707,6 +4044,15 @@ class VideoProcessor:
 
         # 손 경로 필터링
         if top_hand_tracker is not None and self.hand_path_filter_enabled:
+            combined_results = self._apply_hand_path_filter_with_trace(
+                combined_results,
+                top_hand_tracker,
+                trace_context,
+                stats,
+                "VIDEO-ASYNC",
+            )
+
+        if False and top_hand_tracker is not None and self.hand_path_filter_enabled:
             candidate_class_ids = [r.class_id for r in combined_results]
             hand_path_valid = top_hand_tracker.has_valid_hand_path()
             valid_class_ids = top_hand_tracker.filter_products_by_path(candidate_class_ids)
@@ -4091,9 +4437,10 @@ class VideoProcessor:
 
                 # Top camera ROI changes by weight direction.
                 if camera_type == "top" or self._uses_freezer_dual_top_profile(camera_type):
-                    if self._uses_freezer_dual_top_profile(camera_type):
-                        top_roi_passed = self._freezer_lower_roi_accepts(det)
-                        top_roi_direction = "freezer_lower_half"
+                    freezer_dual_top = self._uses_freezer_dual_top_profile(camera_type)
+                    if freezer_dual_top:
+                        top_roi_passed = self._freezer_roi_accepts(det)
+                        top_roi_direction = self._freezer_roi_direction()
                         top_roi_y_limit = self._freezer_roi_y_split()
                     else:
                         top_roi_passed, top_roi_direction = self._top_roi_accepts(
@@ -4109,7 +4456,7 @@ class VideoProcessor:
                             class_name=det.name,
                             stage=(
                                 "freezer_roi_filtered"
-                                if top_roi_direction == "freezer_lower_half"
+                                if freezer_dual_top
                                 else "roi_filtered"
                             ),
                             camera=camera_type,
@@ -4179,9 +4526,22 @@ class VideoProcessor:
                     trace_context,
                     class_id=det.cls,
                     class_name=det.name,
-                    stage="roi_passed",
+                    stage=(
+                        "freezer_roi_passed"
+                        if self._uses_freezer_dual_top_profile(camera_type)
+                        else "roi_passed"
+                    ),
                     camera=camera_type,
+                    confidence=det.conf
+                    if self._uses_freezer_dual_top_profile(camera_type)
+                    else None,
                     center=det.center,
+                    roi_y_limit=self._freezer_roi_y_split()
+                    if self._uses_freezer_dual_top_profile(camera_type)
+                    else None,
+                    roi_direction=self._freezer_roi_direction()
+                    if self._uses_freezer_dual_top_profile(camera_type)
+                    else None,
                 )
 
                 class_id = det.cls

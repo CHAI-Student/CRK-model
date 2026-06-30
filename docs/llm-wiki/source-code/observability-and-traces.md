@@ -85,9 +85,12 @@ start writing sample images during inference.
 - stage counts by class, including ROI-filtered counts and ROI center/limit
   metadata such as `roi_y_limit=240` and `roi_direction` for top-camera
   removal/return filtering. Freezer dual-top filtering records
-  `freezer_roi_filtered` style stage evidence, lower-half ROI metadata,
-  `freezerExitPathVotes` handled-exit evidence, freezer motion/vote outcomes,
-  and `instance_count_hint` for multi-bbox same-class evidence.
+  `freezer_roi_passed` for handled-exit evidence and `freezer_roi_filtered`
+  for rejected ROI evidence. `freezerExitPathVotes` increments only from
+  passed ROI evidence or explicit legacy fields; rejected ROI counts are kept
+  as `freezerRoiFilteredVotes`. Freezer traces also expose motion,
+  trajectory, upper-ROI hand proximity fields, and `instance_count_hint` for
+  multi-bbox same-class evidence.
 - runtime vision config such as `yolo_model_path`,
   `yolo_internal_conf_threshold`, and the top/side `regular_threshold`
 - extractor diagnostics

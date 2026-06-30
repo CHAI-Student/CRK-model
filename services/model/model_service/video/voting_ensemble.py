@@ -114,6 +114,14 @@ class VoteResult:
     rescue_weight_residual_g: Optional[float] = None
     instance_count_hint: int = 1
     freezer_exit_path_votes: int = 0
+    hand_path_valid: bool = False
+    hand_path_valid_upper_roi: bool = False
+    hand_path_passed: bool = False
+    hand_path_blocked: bool = False
+    hand_interaction_passed: bool = False
+    hand_near_frame_count: int = 0
+    hand_near_vote_ratio: float = 0.0
+    min_hand_distance_px: Optional[float] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -154,6 +162,18 @@ class VoteResult:
             ),
             "instance_count_hint": int(self.instance_count_hint),
             "freezer_exit_path_votes": int(self.freezer_exit_path_votes),
+            "hand_path_valid": bool(self.hand_path_valid),
+            "hand_path_valid_upper_roi": bool(self.hand_path_valid_upper_roi),
+            "hand_path_passed": bool(self.hand_path_passed),
+            "hand_path_blocked": bool(self.hand_path_blocked),
+            "hand_interaction_passed": bool(self.hand_interaction_passed),
+            "hand_near_frame_count": int(self.hand_near_frame_count),
+            "hand_near_vote_ratio": round(float(self.hand_near_vote_ratio), 4),
+            "min_hand_distance_px": (
+                round(float(self.min_hand_distance_px), 1)
+                if self.min_hand_distance_px is not None
+                else None
+            ),
         }
         if self.roi_x_min is not None:
             payload.update(

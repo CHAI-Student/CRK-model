@@ -229,13 +229,21 @@ class TriggerTraceContext:
         if class_name and not entry.get("name"):
             entry["name"] = class_name
         entry[stage] = int(entry.get(stage, 0)) + int(amount)
-        if stage == "freezer_roi_filtered":
+        if stage == "freezer_roi_passed":
             entry["freezerExitPathVotes"] = int(entry.get("freezerExitPathVotes", 0)) + int(amount)
+        if stage == "freezer_roi_filtered":
+            entry["freezerRoiFilteredVotes"] = (
+                int(entry.get("freezerRoiFilteredVotes", 0)) + int(amount)
+            )
         camera_counts = entry["cameras"].setdefault(camera, {})
         camera_counts[stage] = int(camera_counts.get(stage, 0)) + int(amount)
-        if stage == "freezer_roi_filtered":
+        if stage == "freezer_roi_passed":
             camera_counts["freezerExitPathVotes"] = (
                 int(camera_counts.get("freezerExitPathVotes", 0)) + int(amount)
+            )
+        if stage == "freezer_roi_filtered":
+            camera_counts["freezerRoiFilteredVotes"] = (
+                int(camera_counts.get("freezerRoiFilteredVotes", 0)) + int(amount)
             )
         if confidence is not None:
             confidence_key = f"{stage}_max_confidence"
@@ -397,6 +405,11 @@ class TriggerTraceContext:
         hand_path_valid: bool,
         hand_path_passed: bool,
         hand_path_blocked: bool,
+        hand_interaction_passed: bool = False,
+        hand_near_frame_count: int = 0,
+        hand_near_vote_ratio: float = 0.0,
+        min_hand_distance_px: Optional[float] = None,
+        hand_path_valid_upper_roi: Optional[bool] = None,
     ) -> None:
         key = str(class_id)
         entry = self.stage_counts_by_class.setdefault(
@@ -414,6 +427,19 @@ class TriggerTraceContext:
             "handPathValid": bool(hand_path_valid),
             "handPathPassed": bool(hand_path_passed),
             "handPathBlocked": bool(hand_path_blocked),
+            "handInteractionPassed": bool(hand_interaction_passed),
+            "handNearFrameCount": int(hand_near_frame_count),
+            "handNearVoteRatio": round(float(hand_near_vote_ratio), 4),
+            "minHandDistancePx": (
+                round(float(min_hand_distance_px), 1)
+                if min_hand_distance_px is not None
+                else None
+            ),
+            "handPathValidUpperRoi": (
+                bool(hand_path_valid_upper_roi)
+                if hand_path_valid_upper_roi is not None
+                else bool(hand_path_valid)
+            ),
         }
         camera_counts.update(payload)
         entry["handPathValid"] = bool(entry.get("handPathValid")) or bool(
@@ -422,6 +448,27 @@ class TriggerTraceContext:
         entry["handPathPassed"] = bool(entry.get("handPathPassed")) or bool(
             hand_path_passed
         )
+        entry["handInteractionPassed"] = bool(
+            entry.get("handInteractionPassed")
+        ) or bool(hand_interaction_passed)
+        entry["handPathValidUpperRoi"] = bool(
+            entry.get("handPathValidUpperRoi")
+        ) or bool(payload["handPathValidUpperRoi"])
+        entry["handNearFrameCount"] = max(
+            int(entry.get("handNearFrameCount", 0) or 0),
+            int(hand_near_frame_count),
+        )
+        entry["handNearVoteRatio"] = max(
+            float(entry.get("handNearVoteRatio", 0.0) or 0.0),
+            float(hand_near_vote_ratio),
+        )
+        if min_hand_distance_px is not None:
+            current_distance = entry.get("minHandDistancePx")
+            entry["minHandDistancePx"] = (
+                round(float(min_hand_distance_px), 1)
+                if current_distance is None
+                else min(float(current_distance), round(float(min_hand_distance_px), 1))
+            )
         if entry["handPathPassed"]:
             entry["handPathBlocked"] = False
         else:
@@ -960,6 +1007,26 @@ class TriggerTraceContext:
                 "handPathBlocked",
                 raw.get("hand_path_blocked"),
             ),
+            "handInteractionPassed": raw.get(
+                "handInteractionPassed",
+                raw.get("hand_interaction_passed"),
+            ),
+            "handNearFrameCount": raw.get(
+                "handNearFrameCount",
+                raw.get("hand_near_frame_count"),
+            ),
+            "handNearVoteRatio": raw.get(
+                "handNearVoteRatio",
+                raw.get("hand_near_vote_ratio"),
+            ),
+            "minHandDistancePx": raw.get(
+                "minHandDistancePx",
+                raw.get("min_hand_distance_px"),
+            ),
+            "handPathValidUpperRoi": raw.get(
+                "handPathValidUpperRoi",
+                raw.get("hand_path_valid_upper_roi"),
+            ),
             "instance_count_hint": raw.get(
                 "instance_count_hint",
                 raw.get("instanceCountHint"),
@@ -1012,7 +1079,15 @@ class TriggerTraceContext:
             "freezer_motion_min_displacement_px": (
                 config.vision.freezer_motion_min_displacement_px
             ),
-            "freezer_lower_roi_y_split": config.vision.freezer_lower_roi_y_split,
+            "freezer_roi_vertical_region": config.vision.freezer_roi_vertical_region,
+            "freezer_roi_y_split": (
+                config.vision.freezer_roi_y_split
+                if config.vision.freezer_roi_y_split is not None
+                else config.vision.freezer_lower_roi_y_split
+            ),
+            "freezer_lower_roi_y_split_legacy": (
+                config.vision.freezer_lower_roi_y_split
+            ),
             "freezer_min_exit_path_votes": config.vision.freezer_min_exit_path_votes,
             "freezer_confidence_tie_band": config.weight.freezer_confidence_tie_band,
             "freezer_multi_min_confidence": config.weight.freezer_multi_min_confidence,

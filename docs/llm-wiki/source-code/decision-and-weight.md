@@ -102,8 +102,10 @@ Important inputs:
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
   `weight_residual`, `selectionTier`, `freezerExitPathVotes`, and the full
-  considered/selected candidate list. A large residual becomes `partial`, not
-  an automatic identity rejection.
+  considered/selected candidate list. `freezerExitPathVotes` comes from
+  `freezer_roi_passed` or explicit legacy vote fields, not ROI-rejected
+  detections. A large residual becomes `partial`, not an automatic identity
+  rejection.
 - Single freezer removal segments now use a handled-candidate narrowing step:
   raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
   engine input, and DoorSession snapshots receive the one handled product
@@ -128,10 +130,13 @@ Important inputs:
   `countWeightResidual`.
 - Direct `freezer_vision_first` selection reads the same interaction evidence
   as the video handled-filter path. `staticShelfLikely` top-only candidates are
-  softly demoted unless trajectory or hand-path support exists, and
-  `handPathBlocked` candidates are hard-rejected only when another supported
-  option remains. This keeps direct engine calls and video-trigger filtering
-  aligned without adding product-name-specific rules.
+  softly demoted unless trajectory or hand-path support exists. The hand
+  fields include `handPathValidUpperRoi`, `handInteractionPassed`,
+  `handNearFrameCount`, `handNearVoteRatio`, `minHandDistancePx`,
+  `handPathPassed`, and `handPathBlocked`. A `handPathBlocked` candidate is
+  hard-rejected only when another supported option remains. This keeps direct
+  engine calls and video-trigger filtering aligned without adding
+  product-name-specific rules.
 
 ## StrictWeightMatcher
 

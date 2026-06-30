@@ -89,11 +89,14 @@ selected frames, accumulates per-camera evidence, and returns ranked
   (`delta_weight < 0`) and returns (`delta_weight > 0`): detections pass when
   `center_y >= 240`. Zero or missing delta skips top ROI.
 - In freezer mode with `dual_top_proxy`, both public streams are treated as
-  top cameras. Freezer candidates must pass the lower-half ROI
-  (`center_y >= MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT`, default `240`),
-  the freezer motion floor, and freezer vote thresholds. Threshold rescue and
-  ROI rescue are disabled for freezer candidates so only strong moving
-  lower-half evidence reaches the decision engine.
+  top cameras. Freezer candidates must pass the configured vertical ROI.
+  The freezer template uses the upper half:
+  `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper` and
+  `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT` (default `240`).
+  `lower` remains a rollback mode, and
+  `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` is only a deprecated split
+  fallback. Threshold rescue and ROI rescue are disabled for freezer
+  candidates so only strong in-ROI evidence reaches the decision engine.
 - `MODEL__MACHINE__CABINET_TYPE=freezer` alone is not enough to enable freezer
   strict candidate narrowing. Dual-top freezer deployments must also set
   `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`; otherwise the freezer handled
@@ -112,14 +115,20 @@ selected frames, accumulates per-camera evidence, and returns ranked
   override a tighter top-only single candidate only inside the
   `same_product_count_tolerance` residual gap; dual-camera exit-path singles
   remain preferred.
+- Freezer ROI stage names are split by meaning: `freezer_roi_passed` is the
+  only stage that increments `freezerExitPathVotes`; `freezer_roi_filtered`
+  records rejected ROI evidence and `freezerRoiFilteredVotes` only.
 - Freezer handled filtering now records and uses interaction evidence:
   `pathDisplacementPx`, `maxDistancePx`, `centerSpanX/Y`,
   `trajectoryExitPathPassed`, `staticShelfLikely`, `handPathValid`,
-  `handPathPassed`, and `handPathBlocked`. Top-only static candidates are
-  demoted in ranking when they have no trajectory/hand support. A valid
-  hand-path block removes a top-only candidate only if another candidate
-  remains, preserving fail-open behavior when hand evidence would remove
-  everything.
+  `handPathValidUpperRoi`, `handInteractionPassed`, `handNearFrameCount`,
+  `handNearVoteRatio`, `minHandDistancePx`, `handPathPassed`, and
+  `handPathBlocked`. In freezer dual-top, hand evidence is only tracked inside
+  the active upper ROI, so lower-shelf detections misclassified as hands do not
+  create hand support. Top-only static candidates are demoted when they have
+  no trajectory/hand support. A valid hand-path block removes a top-only
+  candidate only when at least one hand-near alternative remains, preserving
+  fail-open behavior when hand evidence would remove everything.
 - Freezer trigger traces now expose `camera_layout`, raw candidate count,
   handled candidate count, freezer filter reason, and the key freezer vote,
   motion, ROI, exit-path, and multi-candidate thresholds. OPS also writes a

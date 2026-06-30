@@ -628,8 +628,17 @@ class ProductDecisionEngine:
                 ],
                 "staticShelfLikely": interaction_evidence["staticShelfLikely"],
                 "handPathValid": interaction_evidence["handPathValid"],
+                "handPathValidUpperRoi": interaction_evidence[
+                    "handPathValidUpperRoi"
+                ],
                 "handPathPassed": interaction_evidence["handPathPassed"],
                 "handPathBlocked": interaction_evidence["handPathBlocked"],
+                "handInteractionPassed": interaction_evidence[
+                    "handInteractionPassed"
+                ],
+                "handNearFrameCount": interaction_evidence["handNearFrameCount"],
+                "handNearVoteRatio": interaction_evidence["handNearVoteRatio"],
+                "minHandDistancePx": interaction_evidence["minHandDistancePx"],
                 "interactionPenalty": interaction_evidence["interactionPenalty"],
                 "instance_count_hint": max(
                     1,
@@ -935,16 +944,43 @@ class ProductDecisionEngine:
             stage_entry,
             "handPathValid",
             "hand_path_valid",
+            "handPathValidUpperRoi",
+            "hand_path_valid_upper_roi",
+        )
+        hand_path_valid_upper_roi = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathValidUpperRoi",
+            "hand_path_valid_upper_roi",
+        )
+        hand_interaction_passed = cls._freezer_stage_bool(
+            stage_entry,
+            "handInteractionPassed",
+            "hand_interaction_passed",
         )
         hand_path_passed = cls._freezer_stage_bool(
             stage_entry,
             "handPathPassed",
             "hand_path_passed",
-        )
+        ) or hand_interaction_passed
         hand_path_blocked = cls._freezer_stage_bool(
             stage_entry,
             "handPathBlocked",
             "hand_path_blocked",
+        )
+        hand_near_frame_count = cls._freezer_stage_int(
+            stage_entry,
+            "handNearFrameCount",
+            "hand_near_frame_count",
+        )
+        hand_near_vote_ratio = cls._freezer_stage_float(
+            stage_entry,
+            "handNearVoteRatio",
+            "hand_near_vote_ratio",
+        )
+        min_hand_distance = cls._freezer_stage_float(
+            stage_entry,
+            "minHandDistancePx",
+            "min_hand_distance_px",
         )
         single_camera = (
             not bool(dual_camera_exit_path)
@@ -989,8 +1025,17 @@ class ProductDecisionEngine:
             "trajectoryExitPathPassed": bool(trajectory_passed),
             "staticShelfLikely": bool(static_likely),
             "handPathValid": bool(hand_path_valid),
+            "handPathValidUpperRoi": bool(hand_path_valid_upper_roi),
             "handPathPassed": bool(hand_path_passed),
             "handPathBlocked": bool(hand_path_blocked),
+            "handInteractionPassed": bool(hand_interaction_passed),
+            "handNearFrameCount": int(hand_near_frame_count),
+            "handNearVoteRatio": round(float(hand_near_vote_ratio), 4),
+            "minHandDistancePx": (
+                round(float(min_hand_distance), 1)
+                if min_hand_distance > 0.0
+                else None
+            ),
             "interactionPenalty": interaction_penalty,
             "handPathHardReject": hand_path_hard_reject,
         }
@@ -1011,7 +1056,7 @@ class ProductDecisionEngine:
                 camera_entry,
                 "freezerExitPathVotes",
                 "freezer_exit_path_votes",
-                "freezer_roi_filtered",
+                "freezer_roi_passed",
             )
             if count > 0:
                 counts[str(camera)] = count
@@ -1089,7 +1134,7 @@ class ProductDecisionEngine:
                 entry,
                 "freezerExitPathVotes",
                 "freezer_exit_path_votes",
-                "freezer_roi_filtered",
+                "freezer_roi_passed",
             )
             threshold_votes = self._freezer_stage_int(
                 entry,
@@ -1099,6 +1144,7 @@ class ProductDecisionEngine:
             )
             confidence = self._freezer_stage_float(
                 entry,
+                "freezer_roi_passed_max_confidence",
                 "freezer_roi_filtered_max_confidence",
                 "threshold_passed_max_confidence",
                 "raw_max_confidence",
@@ -1120,14 +1166,14 @@ class ProductDecisionEngine:
             top_votes = self._freezer_stage_int(
                 top_entry,
                 "freezerExitPathVotes",
-                "freezer_roi_filtered",
+                "freezer_roi_passed",
                 "threshold_passed",
                 "raw",
             )
             side_votes = self._freezer_stage_int(
                 side_entry,
                 "freezerExitPathVotes",
-                "freezer_roi_filtered",
+                "freezer_roi_passed",
                 "threshold_passed",
                 "raw",
             )
@@ -1139,12 +1185,14 @@ class ProductDecisionEngine:
                     ),
                     top_confidence=self._freezer_stage_float(
                         top_entry,
+                        "freezer_roi_passed_max_confidence",
                         "freezer_roi_filtered_max_confidence",
                         "threshold_passed_max_confidence",
                         "raw_max_confidence",
                     ),
                     side_confidence=self._freezer_stage_float(
                         side_entry,
+                        "freezer_roi_passed_max_confidence",
                         "freezer_roi_filtered_max_confidence",
                         "threshold_passed_max_confidence",
                         "raw_max_confidence",
@@ -1191,7 +1239,7 @@ class ProductDecisionEngine:
                 pass
 
         entry = self._freezer_stage_entry(trace_context, int(candidate.class_id))
-        for key in ("freezerExitPathVotes", "freezer_exit_path_votes", "freezer_roi_filtered"):
+        for key in ("freezerExitPathVotes", "freezer_exit_path_votes", "freezer_roi_passed"):
             try:
                 values.append(int(entry.get(key, 0) or 0))
             except (TypeError, ValueError):

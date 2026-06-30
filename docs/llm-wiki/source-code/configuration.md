@@ -76,7 +76,7 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - Code default `MODEL__MACHINE__CABINET_TYPE=refrigerated` preserves the
   refrigerated loadcell/vision/weight policy. The copyable `.env.example` is
   freezer-first and sets `MODEL__MACHINE__CABINET_TYPE=freezer`, keeping
-  zone-sliced loadcell input but using freezer-specific lower-half dual-top
+  zone-sliced loadcell input but using freezer-specific upper-half dual-top
   filtering and a vision-first decision branch where weight is only a
   tie-break/diagnostic signal.
 - `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND=0.08` controls how close
@@ -145,10 +145,14 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   motion floor used only when `MODEL__MACHINE__CABINET_TYPE=freezer`.
 - `MODEL__VISION__FREEZER_MIN_VOTE_RATIO=0.08` and
   `MODEL__VISION__FREEZER_MIN_VOTE_COUNT=3` tighten freezer candidate voting.
-- `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT=240.0` keeps freezer dual-top
-  detections only when their 480x480 bbox center is in the lower half.
+- `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper` and
+  `MODEL__VISION__FREEZER_ROI_Y_SPLIT=240.0` keep freezer dual-top detections
+  only when their 480x480 bbox center is in the upper half
+  (`center_y <= 240`). `lower` remains a rollback value. The legacy
+  `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` key is a deprecated split fallback
+  only and should not be used in new templates.
 - `MODEL__VISION__FREEZER_MIN_EXIT_PATH_VOTES=3` is the minimum
-  `freezer_roi_filtered`/`freezerExitPathVotes` evidence required for
+  `freezer_roi_passed`/`freezerExitPathVotes` evidence required for
   freezer handled-candidate weight-gate and near-weight rescue tiers.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both

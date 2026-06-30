@@ -26,7 +26,7 @@ Important behavior:
   weight calculation.
 - In freezer `dual_top_proxy` deployments, the public payload remains
   `videos.top` and `videos.side`; internally those are treated as top-middle
-  and top-side streams for lower-half dual-top filtering.
+  and top-side streams for upper-half dual-top filtering by default.
 - Typical statuses include `queued`, `complete`, `skipped`, and `duplicate`.
 - Camera does not retry failed `/trigger` calls according to the protocol note.
 

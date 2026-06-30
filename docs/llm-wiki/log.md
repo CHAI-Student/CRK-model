@@ -940,3 +940,18 @@
 - Added the same-product repeated-count rule: active, detected products may use
   `count * MODEL__WEIGHT__TOLERANCE_GRAMS` residual tolerance for `x2` cases
   such as Pepero, while respecting stock and count limits.
+
+## [2026-06-30] freezer | Upper ROI and hand proximity filtering
+
+- Changed freezer `dual_top_proxy` documentation to the upper-half ROI default:
+  `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper` and
+  `MODEL__VISION__FREEZER_ROI_Y_SPLIT=240.0`.
+- Documented the stage semantic split: `freezer_roi_passed` increments
+  `freezerExitPathVotes`, while `freezer_roi_filtered` is rejected ROI evidence
+  with `freezerRoiFilteredVotes` diagnostics only.
+- Recorded the new upper-ROI hand proximity evidence:
+  `handPathValidUpperRoi`, `handInteractionPassed`, `handNearFrameCount`,
+  `handNearVoteRatio`, and `minHandDistancePx`.
+- Updated the freezer handled-filter and direct `freezer_vision_first` notes so
+  top-only/static candidates without hand/trajectory support are demoted or
+  rejected only when a supported alternative remains.

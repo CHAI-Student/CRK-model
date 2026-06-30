@@ -22,7 +22,7 @@ Hand Path Tracker (v4.6).
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,10 @@ class ProductBboxHistory:
         avg_h = sum(s[1] for s in self.bbox_sizes) / len(self.bbox_sizes)
         return (avg_w, avg_h)
 
+    @property
+    def detection_count(self) -> int:
+        return len(self.centers)
+
 
 class HandPathTracker:
     """
@@ -176,6 +180,10 @@ class HandPathTracker:
         hand_class_ids: Optional[Set[int]] = None,
         min_hand_detections: int = 3,
         min_path_length: float = 30.0,
+        roi_y_split: Optional[float] = None,
+        roi_vertical_region: Optional[str] = None,
+        max_distance_px: float = 150.0,
+        frame_window: int = 2,
     ):
         """
         Initialize HandPathTracker.
@@ -189,6 +197,16 @@ class HandPathTracker:
             self.HAND_CLASS_IDS = hand_class_ids
         self.min_hand_detections = min_hand_detections
         self.min_path_length = min_path_length
+        self.roi_y_split = roi_y_split
+        self.roi_vertical_region = (
+            roi_vertical_region.strip().lower()
+            if isinstance(roi_vertical_region, str)
+            else None
+        )
+        if self.roi_vertical_region not in {None, "upper", "lower"}:
+            self.roi_vertical_region = None
+        self.max_distance_px = max(0.0, float(max_distance_px))
+        self.frame_window = max(0, int(frame_window))
 
         # 손 경로들 (여러 손이 있을 수 있음)
         self._hand_trajectories: List[HandTrajectory] = []
@@ -200,6 +218,19 @@ class HandPathTracker:
 
         # 프레임 카운트
         self._frame_count = 0
+
+    def _center_in_roi(self, center: Tuple[float, float]) -> bool:
+        if self.roi_y_split is None or self.roi_vertical_region is None:
+            return True
+        center_y = float(center[1])
+        split = float(self.roi_y_split)
+        if self.roi_vertical_region == "lower":
+            return center_y >= split
+        return center_y <= split
+
+    @property
+    def hand_path_valid_upper_roi(self) -> bool:
+        return self.has_valid_hand_path()
 
     def update_frame(
         self,
@@ -219,22 +250,142 @@ class HandPathTracker:
             # 손 탐지 처리
             if det.is_hand or det.cls in self.HAND_CLASS_IDS:
                 center = det.center
+                if not self._center_in_roi(center):
+                    continue
                 bbox_size = (det.x2 - det.x1, det.y2 - det.y1)
                 self._current_trajectory.add_point(center, frame_idx, bbox_size)
             else:
                 # 상품 탐지 처리
                 class_id = det.cls
+                center = det.center
+                if not self._center_in_roi(center):
+                    continue
                 if class_id not in self._product_histories:
                     self._product_histories[class_id] = ProductBboxHistory(
                         class_id=class_id,
                         class_name=det.name,
                     )
 
-                center = det.center
                 bbox_size = (det.x2 - det.x1, det.y2 - det.y1)
                 self._product_histories[class_id].add_detection(
                     center, frame_idx, bbox_size
                 )
+
+    @staticmethod
+    def _center_distance(
+        first: Tuple[float, float],
+        second: Tuple[float, float],
+    ) -> float:
+        return math.sqrt((first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2)
+
+    @staticmethod
+    def _bbox_diagonal(size: Tuple[float, float]) -> float:
+        return math.sqrt(float(size[0]) ** 2 + float(size[1]) ** 2)
+
+    def _hand_points_near_frame(
+        self,
+        frame_idx: int,
+    ) -> list[tuple[Tuple[float, float], Tuple[float, float]]]:
+        trajectory = self._current_trajectory
+        paired = list(
+            zip(
+                trajectory.centers,
+                trajectory.frame_indices,
+                trajectory.bbox_history,
+            )
+        )
+        near = [
+            (center, bbox_size)
+            for center, hand_frame_idx, bbox_size in paired
+            if abs(int(hand_frame_idx) - int(frame_idx)) <= self.frame_window
+        ]
+        if near:
+            return near
+        return [(center, bbox_size) for center, _, bbox_size in paired]
+
+    def _product_interaction_metrics(
+        self,
+        history: Optional[ProductBboxHistory],
+    ) -> dict[str, Any]:
+        if history is None or not history.centers:
+            return {
+                "handInteractionPassed": False,
+                "handNearFrameCount": 0,
+                "handNearVoteRatio": 0.0,
+                "minHandDistancePx": None,
+            }
+
+        near_count = 0
+        min_distance: Optional[float] = None
+        for center, frame_idx, product_size in zip(
+            history.centers,
+            history.frame_indices,
+            history.bbox_sizes,
+        ):
+            product_near = False
+            for hand_center, hand_size in self._hand_points_near_frame(frame_idx):
+                distance = self._center_distance(center, hand_center)
+                min_distance = (
+                    distance
+                    if min_distance is None
+                    else min(float(min_distance), distance)
+                )
+                hand_radius = self._bbox_diagonal(hand_size) / 2.0
+                product_radius = self._bbox_diagonal(product_size) / 2.0
+                distance_tolerance = min(
+                    self.max_distance_px,
+                    hand_radius + product_radius * 0.5,
+                )
+                expanded_bbox_intersects = (
+                    abs(hand_center[0] - center[0])
+                    <= (float(product_size[0]) / 2.0 + hand_radius)
+                    and abs(hand_center[1] - center[1])
+                    <= (float(product_size[1]) / 2.0 + hand_radius)
+                )
+                if distance <= distance_tolerance or expanded_bbox_intersects:
+                    product_near = True
+                    break
+            if product_near:
+                near_count += 1
+
+        detection_count = max(1, history.detection_count)
+        return {
+            "handInteractionPassed": near_count > 0,
+            "handNearFrameCount": int(near_count),
+            "handNearVoteRatio": round(float(near_count) / float(detection_count), 4),
+            "minHandDistancePx": (
+                round(float(min_distance), 1) if min_distance is not None else None
+            ),
+        }
+
+    def hand_interaction_metrics(
+        self,
+        candidate_class_ids: Optional[List[int]] = None,
+    ) -> Dict[int, dict[str, Any]]:
+        if candidate_class_ids is not None:
+            candidates = [int(class_id) for class_id in candidate_class_ids]
+        else:
+            candidates = list(self._product_histories.keys())
+
+        path_valid = self.has_valid_hand_path()
+        metrics: Dict[int, dict[str, Any]] = {}
+        for class_id in candidates:
+            payload = {
+                "handPathValid": bool(path_valid),
+                "handPathValidUpperRoi": bool(path_valid),
+                "handInteractionPassed": False,
+                "handNearFrameCount": 0,
+                "handNearVoteRatio": 0.0,
+                "minHandDistancePx": None,
+            }
+            if path_valid:
+                payload.update(
+                    self._product_interaction_metrics(
+                        self._product_histories.get(class_id)
+                    )
+                )
+            metrics[class_id] = payload
+        return metrics
 
     def has_valid_hand_path(self) -> bool:
         """
@@ -297,6 +448,30 @@ class HandPathTracker:
         valid_ids: List[int] = []
         filtered_ids: List[int] = []
 
+        metrics_by_class = self.hand_interaction_metrics(candidates)
+        for class_id in candidates:
+            metrics = metrics_by_class.get(class_id, {})
+            if bool(metrics.get("handInteractionPassed")):
+                valid_ids.append(class_id)
+                logger.debug(
+                    f"[HAND_PATH] class {class_id}: PASSED "
+                    f"(near_frames={metrics.get('handNearFrameCount')}, "
+                    f"min_distance={metrics.get('minHandDistancePx')})"
+                )
+            else:
+                filtered_ids.append(class_id)
+                logger.info(
+                    f"[HAND_PATH] class {class_id}: FILTERED "
+                    f"(near_frames={metrics.get('handNearFrameCount')}, "
+                    f"min_distance={metrics.get('minHandDistancePx')})"
+                )
+
+        logger.info(
+            f"[HAND_PATH] filter result: passed={len(valid_ids)} "
+            f"filtered={len(filtered_ids)}"
+        )
+        return valid_ids
+
         for class_id in candidates:
             history = self._product_histories.get(class_id)
 
@@ -340,6 +515,9 @@ class HandPathTracker:
             "hand_detections": len(trajectory.centers),
             "hand_path_length": trajectory.get_path_length(),
             "hand_path_valid": self.has_valid_hand_path(),
+            "hand_path_valid_upper_roi": self.hand_path_valid_upper_roi,
+            "roi_y_split": self.roi_y_split,
+            "roi_vertical_region": self.roi_vertical_region,
             "product_classes": len(self._product_histories),
             "product_class_ids": list(self._product_histories.keys()),
         }

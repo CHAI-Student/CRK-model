@@ -826,7 +826,7 @@ def test_video_processor_top_roi_skips_zero_delta(monkeypatch: pytest.MonkeyPatc
     assert result.roi_rescue_candidates == []
 
 
-def test_video_processor_freezer_dual_top_side_uses_lower_y_roi(
+def test_video_processor_freezer_dual_top_side_uses_upper_y_roi(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -854,13 +854,13 @@ def test_video_processor_freezer_dual_top_side_uses_lower_y_roi(
             offset = float(frame) * 12.0
             return [
                 YOLODetection(
-                    xyxy=(10.0, 100.0, 40.0, 140.0),
+                    xyxy=(10.0 + offset, 100.0, 40.0 + offset, 140.0),
                     cls=52,
                     conf=0.91,
                     name="PRODUCT_UPPER_HALF",
                 ),
                 YOLODetection(
-                    xyxy=(10.0 + offset, 220.0, 40.0 + offset, 260.0),
+                    xyxy=(10.0 + offset, 300.0, 40.0 + offset, 340.0),
                     cls=53,
                     conf=0.92,
                     name="PRODUCT_LOWER_HALF",
@@ -872,6 +872,8 @@ def test_video_processor_freezer_dual_top_side_uses_lower_y_roi(
     monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 0.0)
     monkeypatch.setattr(config.vision, "freezer_min_vote_count", 1)
     monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_roi_vertical_region", "upper")
+    monkeypatch.setattr(config.vision, "freezer_roi_y_split", 240.0)
     monkeypatch.setattr(
         video_processor_module,
         "create_frame_extractor",
@@ -902,18 +904,98 @@ def test_video_processor_freezer_dual_top_side_uses_lower_y_roi(
     )
     trace_context.finalize(status="complete")
 
-    assert [candidate.class_id for candidate in result.vote_results] == [53]
+    assert [candidate.class_id for candidate in result.vote_results] == [52]
     assert result.stats.roi_filtered_detections == 2
     assert result.stats.side_roi_soft_filtered_detections == 0
     assert result.roi_rescue_candidates == []
 
     detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
     detail = json.loads(detail_file.read_text(encoding="utf-8"))
-    assert detail["stage_counts_by_class"]["52"]["freezer_roi_filtered"] == 2
+    assert detail["stage_counts_by_class"]["52"]["freezer_roi_passed"] == 2
+    assert detail["stage_counts_by_class"]["52"]["freezerExitPathVotes"] == 2
     assert detail["stage_counts_by_class"]["52"]["roi_y_limit"] == 240.0
-    assert detail["stage_counts_by_class"]["52"]["roi_direction"] == (
-        "freezer_lower_half"
+    assert detail["stage_counts_by_class"]["52"]["roi_direction"] == "freezer_upper_half"
+    assert detail["stage_counts_by_class"]["53"]["freezer_roi_filtered"] == 2
+    assert detail["stage_counts_by_class"]["53"]["freezerRoiFilteredVotes"] == 2
+    assert "freezerExitPathVotes" not in detail["stage_counts_by_class"]["53"]
+    assert detail["stage_counts_by_class"]["53"]["roi_y_limit"] == 240.0
+    assert detail["stage_counts_by_class"]["53"]["roi_direction"] == "freezer_upper_half"
+
+
+def test_hand_path_tracker_upper_roi_ignores_lower_hand_detection() -> None:
+    from model_service.vision.hand_path_tracker import HandPathTracker
+
+    tracker = HandPathTracker(
+        min_hand_detections=2,
+        min_path_length=5.0,
+        roi_y_split=240.0,
+        roi_vertical_region="upper",
     )
+    for frame_idx, offset in enumerate((0.0, 20.0, 40.0)):
+        tracker.update_frame(
+            [
+                YOLODetection(
+                    xyxy=(100.0 + offset, 300.0, 140.0 + offset, 340.0),
+                    cls=0,
+                    conf=0.9,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(100.0, 90.0, 150.0, 140.0),
+                    cls=52,
+                    conf=0.9,
+                    name="PRODUCT_UPPER_HALF",
+                ),
+            ],
+            frame_idx,
+        )
+
+    metrics = tracker.hand_interaction_metrics([52])[52]
+    assert tracker.has_valid_hand_path() is False
+    assert metrics["handPathValidUpperRoi"] is False
+    assert metrics["handInteractionPassed"] is False
+
+
+def test_hand_path_tracker_upper_roi_keeps_hand_near_product() -> None:
+    from model_service.vision.hand_path_tracker import HandPathTracker
+
+    tracker = HandPathTracker(
+        min_hand_detections=2,
+        min_path_length=5.0,
+        roi_y_split=240.0,
+        roi_vertical_region="upper",
+    )
+    for frame_idx, offset in enumerate((0.0, 20.0, 40.0)):
+        tracker.update_frame(
+            [
+                YOLODetection(
+                    xyxy=(100.0 + offset, 90.0, 140.0 + offset, 130.0),
+                    cls=0,
+                    conf=0.9,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(108.0 + offset, 96.0, 158.0 + offset, 146.0),
+                    cls=52,
+                    conf=0.9,
+                    name="PRODUCT_HAND_NEAR",
+                ),
+                YOLODetection(
+                    xyxy=(320.0, 90.0, 370.0, 140.0),
+                    cls=53,
+                    conf=0.9,
+                    name="PRODUCT_HAND_FAR",
+                ),
+            ],
+            frame_idx,
+        )
+
+    metrics = tracker.hand_interaction_metrics([52, 53])
+    assert tracker.has_valid_hand_path() is True
+    assert metrics[52]["handInteractionPassed"] is True
+    assert metrics[52]["handNearFrameCount"] >= 1
+    assert metrics[53]["handInteractionPassed"] is False
+    assert tracker.filter_products_by_path([52, 53]) == [52]
 
 
 def test_video_processor_records_same_frame_instance_count_hint(
@@ -933,13 +1015,13 @@ def test_video_processor_records_same_frame_instance_count_hint(
         ) -> list[YOLODetection]:
             return [
                 YOLODetection(
-                    xyxy=(10.0, 250.0, 40.0, 290.0),
+                    xyxy=(10.0, 100.0, 40.0, 140.0),
                     cls=53,
                     conf=0.92,
                     name="PRODUCT_LOWER_HALF",
                 ),
                 YOLODetection(
-                    xyxy=(60.0, 250.0, 90.0, 290.0),
+                    xyxy=(60.0, 100.0, 90.0, 140.0),
                     cls=53,
                     conf=0.91,
                     name="PRODUCT_LOWER_HALF",
@@ -1379,11 +1461,11 @@ def test_video_processor_freezer_exit_path_prefers_melona_over_static_lala(
         sample_export_enabled=False,
     )
     trace_context.stage_counts_by_class = {
-        "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_filtered": 1},
+        "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_passed": 1},
         "44": {
             "class_id": 44,
             "name": "STICK_BINGGRAE_MELONA_75ML",
-            "freezer_roi_filtered": 19,
+            "freezer_roi_passed": 19,
         },
     }
 
@@ -1470,16 +1552,16 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
                 "side": {"raw": 6, "raw_max_confidence": 0.1214},
             },
         },
-        "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_filtered": 0},
+        "46": {"class_id": 46, "name": "STICK_LALA", "freezer_roi_passed": 0},
         "44": {
             "class_id": 44,
             "name": "STICK_BINGGRAE_MELONA_75ML",
-            "freezer_roi_filtered": 4,
+            "freezer_roi_passed": 4,
         },
         "42": {
             "class_id": 42,
             "name": "CUP_MAEIL_SANGHAFARM_MILK_ICE_CREAMG_100G",
-            "freezer_roi_filtered": 13,
+            "freezer_roi_passed": 13,
         },
     }
 

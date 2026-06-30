@@ -36,7 +36,8 @@ vision-supported product identity.
 - Camera layout is configurable without changing the `/trigger` payload shape.
   `legacy_top_side` means physical Top plus per-zone Side; `dual_top_proxy`
   means `videos.top` is top-middle and `videos.side` is top-side. In freezer
-  mode both streams use the Top profile for lower-half dual-top filtering.
+  mode both streams use the Top profile for upper-half dual-top filtering by
+  default.
 - The current Jetson field profile sets Top FFmpeg gamma/contrast to `1.2/1.2`
   and Side to `1.0/1.0`. Trigger traces record the active values and frame
   stride for latency/recall comparison.
@@ -47,7 +48,9 @@ vision-supported product identity.
   top ROI.
 - Freezer filtering applies only when
   `MODEL__MACHINE__CABINET_TYPE=freezer`. With `dual_top_proxy`, both public
-  streams must keep bbox centers in the lower 240 pixels of the 480x480 crop,
+  streams must keep bbox centers in the configured freezer ROI. The field
+  template uses the upper 240 pixels of the 480x480 crop
+  (`FREEZER_ROI_VERTICAL_REGION=upper`, `center_y <= FREEZER_ROI_Y_SPLIT`),
   pass the freezer motion floor, and pass freezer vote thresholds. Threshold
   rescue and ROI rescue are disabled so weak/static evidence does not enter
   freezer candidates.
@@ -112,10 +115,10 @@ vision-supported product identity.
   preferred.
 - Freezer interaction evidence now sits between raw vision and weight
   selection. The trace records actual path displacement, max movement, center
-  span, trajectory support, static-shelf likelihood, and hand-path pass/block
-  state. Static top-only shelf-like candidates are demoted, while valid
-  hand-path blocks become hard rejects only when at least one alternative
-  candidate remains.
+  span, trajectory support, static-shelf likelihood, upper-ROI hand validity,
+  hand proximity counts/ratios, and hand-path pass/block state. Static top-only
+  shelf-like candidates are demoted, while valid hand-path blocks become hard
+  rejects only when at least one hand-near alternative candidate remains.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count

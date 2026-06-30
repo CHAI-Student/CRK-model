@@ -48,6 +48,8 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.vision.freezer_min_vote_ratio == 0.08
     assert settings.vision.freezer_min_vote_count == 3
     assert settings.vision.freezer_motion_min_displacement_px == 12.0
+    assert settings.vision.freezer_roi_vertical_region == "upper"
+    assert settings.vision.freezer_roi_y_split == 240.0
     assert settings.weight.freezer_weight_tolerance_grams == 15.0
     assert settings.weight.freezer_vision_multi_without_weight_enabled is False
     assert settings.trace.sample_export_enabled is False

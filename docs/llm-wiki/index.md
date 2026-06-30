@@ -112,10 +112,13 @@ shape without rereading every long historical document.
   non-zero deltas keep `center_y >= 240`, while zero or missing delta skips
   the top ROI.
 - Freezer `dual_top_proxy` treats both public streams as top cameras and keeps
-  only detections whose 480x480 bbox center is in the lower half
-  (`center_y >= MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT`, default `240`).
-  It applies stronger motion/vote floors and disables threshold/ROI rescue for
-  freezer candidates.
+  only detections inside the configured freezer vertical ROI. The field
+  template uses the upper half
+  (`MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper`,
+  `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT`, default `240`). It applies
+  stronger motion/vote floors and disables threshold/ROI rescue for freezer
+  candidates. `freezer_roi_passed` increments exit-path votes; rejected
+  `freezer_roi_filtered` evidence remains diagnostic only.
 - Freezer handled candidates are narrower than raw vision top-K. Raw top-K
   candidates stay in trace diagnostics, while OPS candidates, engine input, and
   DoorSession close snapshots use handled candidates. For a single freezer
@@ -127,10 +130,11 @@ shape without rereading every long historical document.
   residual inside the freezer/count-scaled tolerance.
 - Freezer handled selection also uses interaction evidence, not only exit-path
   counts. Trace diagnostics record path displacement, max movement, center
-  span, trajectory pass, static shelf likelihood, and hand-path pass/block
-  state. Top-only static shelf candidates are softly demoted, and valid
-  hand-path blocks can hard-reject a candidate only when at least one
-  alternative remains; all-blocked hand-path cases still fail open.
+  span, trajectory pass, static shelf likelihood, upper-ROI hand validity,
+  hand proximity counts/ratios, and hand-path pass/block state. Top-only
+  static shelf candidates are softly demoted, and valid hand-path blocks can
+  hard-reject a candidate only when at least one hand-near alternative remains;
+  no-near/all-blocked hand-path cases still fail open.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their

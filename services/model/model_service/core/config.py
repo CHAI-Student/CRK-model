@@ -140,13 +140,21 @@ class VisionModel(BaseModel):
         default=12.0,
         description="Freezer-only minimum bbox-center movement",
     )
+    freezer_roi_vertical_region: str = Field(
+        default="upper",
+        description="Freezer dual-top vertical ROI: upper or lower",
+    )
+    freezer_roi_y_split: float | None = Field(
+        default=None,
+        description="Freezer dual-top bbox center y split. Falls back to legacy lower split when unset.",
+    )
     freezer_lower_roi_y_split: float = Field(
         default=240.0,
-        description="Freezer dual-top lower-half bbox center y threshold",
+        description="Deprecated fallback for freezer dual-top ROI split",
     )
     freezer_min_exit_path_votes: int = Field(
         default=3,
-        description="Minimum freezer ROI-filtered votes treated as handled exit-path evidence",
+        description="Minimum freezer ROI-passed votes treated as handled exit-path evidence",
     )
     side_roi_x_max: float = Field(
         default=400.0,
@@ -284,6 +292,14 @@ class VisionModel(BaseModel):
         valid = {"legacy_top_side", "dual_top_proxy"}
         if normalized not in valid:
             raise ValueError(f"Invalid camera layout: {value}")
+        return normalized
+
+    @field_validator("freezer_roi_vertical_region", mode="after")
+    def validate_freezer_roi_vertical_region(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        valid = {"upper", "lower"}
+        if normalized not in valid:
+            raise ValueError(f"Invalid freezer ROI vertical region: {value}")
         return normalized
 
     @field_validator(
