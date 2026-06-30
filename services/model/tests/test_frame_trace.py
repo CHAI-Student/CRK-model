@@ -465,6 +465,53 @@ def test_video_processor_hand_path_fail_open_keeps_candidates():
     assert removed == 0
 
 
+def test_frame_trace_records_freezer_interaction_evidence(tmp_path):
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    trace_context = TriggerTraceContext(
+        session_id="interaction-evidence",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path=None,
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.record_motion_evidence(
+        class_id=101,
+        class_name="STATIC_TIGHT_SINGLE",
+        camera="top",
+        path_displacement_px=2.0,
+        max_distance_px=14.0,
+        center_span_x=3.0,
+        center_span_y=3.0,
+        motion_threshold_px=12.0,
+        trajectory_exit_path_passed=False,
+        static_shelf_likely=True,
+    )
+    trace_context.record_hand_path_evidence(
+        class_id=101,
+        class_name="STATIC_TIGHT_SINGLE",
+        camera="top",
+        hand_path_valid=True,
+        hand_path_passed=False,
+        hand_path_blocked=True,
+    )
+    trace_context.finalize(status="complete")
+
+    detail = json.loads(read_trigger_detail_files(tmp_path / "logs")[0].read_text())
+    entry = detail["stage_counts_by_class"]["101"]
+    assert entry["pathDisplacementPx"] == 2.0
+    assert entry["maxDistancePx"] == 14.0
+    assert entry["centerSpanX"] == 3.0
+    assert entry["centerSpanY"] == 3.0
+    assert entry["trajectoryExitPathPassed"] is False
+    assert entry["staticShelfLikely"] is True
+    assert entry["handPathValid"] is True
+    assert entry["handPathPassed"] is False
+    assert entry["handPathBlocked"] is True
+
+
 def test_video_processor_process_videos_records_trace_samples(monkeypatch, tmp_path):
     import model_service.video.video_processor as video_processor_module
     from model_service.video import VideoProcessor

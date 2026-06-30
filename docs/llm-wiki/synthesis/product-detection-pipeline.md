@@ -110,6 +110,12 @@ vision-supported product identity.
   residual tolerances. A top-only repeat can beat a top-only single only within
   the configured repeat residual gap; a dual-camera exit-path single remains
   preferred.
+- Freezer interaction evidence now sits between raw vision and weight
+  selection. The trace records actual path displacement, max movement, center
+  span, trajectory support, static-shelf likelihood, and hand-path pass/block
+  state. Static top-only shelf-like candidates are demoted, while valid
+  hand-path blocks become hard rejects only when at least one alternative
+  candidate remains.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count

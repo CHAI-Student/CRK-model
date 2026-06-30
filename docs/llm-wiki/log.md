@@ -1,5 +1,20 @@
 # LLM Wiki Log
 
+## [2026-06-30] maintenance | freezer static and hand interaction evidence
+
+- Added freezer interaction diagnostics for path displacement, max movement,
+  center span, trajectory pass, static shelf likelihood, and hand-path
+  pass/block state in trace `stage_counts_by_class` and freezer selection
+  diagnostics.
+- Documented the new generic static-shelf guard: top-only static candidates are
+  softly demoted unless trajectory or hand-path support exists. Valid hand-path
+  blocks can hard-reject a candidate only when another candidate remains, so
+  hand-path all-blocked cases still fail open.
+- Recorded regression coverage for static top-only tight singles losing to
+  trajectory-supported candidates, hand-path blocked candidates losing to
+  alternatives, hand-path fail-open, and direct `freezer_vision_first`
+  alignment with the video handled-filter path.
+
 ## [2026-06-30] maintenance | freezer count-aware handled candidate filtering
 
 - Documented freezer same-product repeat inference for handled candidates and

@@ -1750,6 +1750,232 @@ def test_video_processor_freezer_repeat_does_not_override_dual_camera_single(
     )
 
 
+def test_video_processor_freezer_static_single_loses_to_trajectory_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 12.0)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-static-single-penalty",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "STATIC_TIGHT_SINGLE",
+            "freezerExitPathVotes": 40,
+            "pathDisplacementPx": 2.0,
+            "maxDistancePx": 14.0,
+            "centerSpanX": 3.0,
+            "centerSpanY": 3.0,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": False,
+            "staticShelfLikely": True,
+            "cameras": {"top": {"freezerExitPathVotes": 40}},
+        },
+        "102": {
+            "class_id": 102,
+            "name": "TRAJECTORY_SUPPORTED_SINGLE",
+            "freezerExitPathVotes": 8,
+            "pathDisplacementPx": 18.0,
+            "maxDistancePx": 18.0,
+            "centerSpanX": 5.0,
+            "centerSpanY": 18.0,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "staticShelfLikely": False,
+            "cameras": {"top": {"freezerExitPathVotes": 8}},
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                101,
+                "STATIC_TIGHT_SINGLE",
+                80,
+                1.0,
+                1.0,
+                weighted_confidence=1.0,
+                top_detected=True,
+                top_vote_count=80,
+            ),
+            VoteResult(
+                102,
+                "TRAJECTORY_SUPPORTED_SINGLE",
+                8,
+                0.82,
+                0.7,
+                weighted_confidence=0.7,
+                top_detected=True,
+                top_vote_count=8,
+            ),
+        ],
+        delta_weight=-100.0,
+        product_weights={101: 100.0, 102: 106.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [102]
+    static_candidate = next(
+        item for item in diagnostics["considered"] if item["class_id"] == 101
+    )
+    assert static_candidate["interactionPenalty"] is True
+    assert static_candidate["staticShelfLikely"] is True
+    assert diagnostics["selected"]["trajectoryExitPathPassed"] is True
+
+
+def test_video_processor_freezer_hand_path_blocks_candidate_when_alternative_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-hand-path-block",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "HAND_BLOCKED_TIGHT_SINGLE",
+            "freezerExitPathVotes": 30,
+            "handPathValid": True,
+            "handPathPassed": False,
+            "handPathBlocked": True,
+            "cameras": {"top": {"freezerExitPathVotes": 30}},
+        },
+        "102": {
+            "class_id": 102,
+            "name": "HAND_SUPPORTED_SINGLE",
+            "freezerExitPathVotes": 6,
+            "handPathValid": True,
+            "handPathPassed": True,
+            "handPathBlocked": False,
+            "cameras": {"top": {"freezerExitPathVotes": 6}},
+        },
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                101,
+                "HAND_BLOCKED_TIGHT_SINGLE",
+                80,
+                1.0,
+                1.0,
+                weighted_confidence=1.0,
+                top_detected=True,
+                top_vote_count=80,
+            ),
+            VoteResult(
+                102,
+                "HAND_SUPPORTED_SINGLE",
+                7,
+                0.82,
+                0.7,
+                weighted_confidence=0.7,
+                top_detected=True,
+                top_vote_count=7,
+            ),
+        ],
+        delta_weight=-100.0,
+        product_weights={101: 100.0, 102: 106.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [102]
+    assert [item["class_id"] for item in diagnostics["rejectedInteractionCandidates"]] == [
+        101
+    ]
+    assert diagnostics["rejectedInteractionCandidates"][0][
+        "interactionRejectedReason"
+    ] == "hand_path_blocked"
+
+
+def test_video_processor_freezer_hand_path_blocked_all_candidates_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-hand-path-fail-open",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "ONLY_HAND_BLOCKED_SINGLE",
+            "freezerExitPathVotes": 30,
+            "handPathValid": True,
+            "handPathPassed": False,
+            "handPathBlocked": True,
+            "cameras": {"top": {"freezerExitPathVotes": 30}},
+        }
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                101,
+                "ONLY_HAND_BLOCKED_SINGLE",
+                80,
+                1.0,
+                1.0,
+                weighted_confidence=1.0,
+                top_detected=True,
+                top_vote_count=80,
+            )
+        ],
+        delta_weight=-100.0,
+        product_weights={101: 100.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [101]
+    assert diagnostics["selected"]["handPathBlocked"] is True
+    assert diagnostics["rejectedInteractionCandidates"] == []
+
+
 def test_video_processor_freezer_stage_only_rescues_yomamte_dual_camera(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

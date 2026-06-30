@@ -328,6 +328,107 @@ class TriggerTraceContext:
         )
         entry["final_rank"] = int(rank)
 
+    def record_motion_evidence(
+        self,
+        *,
+        class_id: int,
+        class_name: str,
+        camera: str,
+        path_displacement_px: float,
+        max_distance_px: float,
+        center_span_x: float,
+        center_span_y: float,
+        motion_threshold_px: float,
+        trajectory_exit_path_passed: bool,
+        static_shelf_likely: bool,
+    ) -> None:
+        key = str(class_id)
+        entry = self.stage_counts_by_class.setdefault(
+            key,
+            {
+                "class_id": int(class_id),
+                "name": class_name,
+                "cameras": {},
+            },
+        )
+        if class_name and not entry.get("name"):
+            entry["name"] = class_name
+        camera_counts = entry["cameras"].setdefault(camera, {})
+
+        motion_payload = {
+            "pathDisplacementPx": round(float(path_displacement_px), 1),
+            "maxDistancePx": round(float(max_distance_px), 1),
+            "centerSpanX": round(float(center_span_x), 1),
+            "centerSpanY": round(float(center_span_y), 1),
+            "motionThresholdPx": round(float(motion_threshold_px), 1),
+            "trajectoryExitPathPassed": bool(trajectory_exit_path_passed),
+            "staticShelfLikely": bool(static_shelf_likely),
+        }
+        camera_counts.update(motion_payload)
+
+        for key_name in (
+            "pathDisplacementPx",
+            "maxDistancePx",
+            "centerSpanX",
+            "centerSpanY",
+            "motionThresholdPx",
+        ):
+            entry[key_name] = max(
+                float(entry.get(key_name, 0.0) or 0.0),
+                float(motion_payload[key_name]),
+            )
+
+        entry["trajectoryExitPathPassed"] = bool(
+            entry.get("trajectoryExitPathPassed")
+        ) or bool(trajectory_exit_path_passed)
+        if entry["trajectoryExitPathPassed"]:
+            entry["staticShelfLikely"] = False
+        else:
+            entry["staticShelfLikely"] = bool(entry.get("staticShelfLikely")) or bool(
+                static_shelf_likely
+            )
+
+    def record_hand_path_evidence(
+        self,
+        *,
+        class_id: int,
+        class_name: str,
+        camera: str,
+        hand_path_valid: bool,
+        hand_path_passed: bool,
+        hand_path_blocked: bool,
+    ) -> None:
+        key = str(class_id)
+        entry = self.stage_counts_by_class.setdefault(
+            key,
+            {
+                "class_id": int(class_id),
+                "name": class_name,
+                "cameras": {},
+            },
+        )
+        if class_name and not entry.get("name"):
+            entry["name"] = class_name
+        camera_counts = entry["cameras"].setdefault(camera, {})
+        payload = {
+            "handPathValid": bool(hand_path_valid),
+            "handPathPassed": bool(hand_path_passed),
+            "handPathBlocked": bool(hand_path_blocked),
+        }
+        camera_counts.update(payload)
+        entry["handPathValid"] = bool(entry.get("handPathValid")) or bool(
+            hand_path_valid
+        )
+        entry["handPathPassed"] = bool(entry.get("handPathPassed")) or bool(
+            hand_path_passed
+        )
+        if entry["handPathPassed"]:
+            entry["handPathBlocked"] = False
+        else:
+            entry["handPathBlocked"] = bool(entry.get("handPathBlocked")) or bool(
+                hand_path_blocked
+            )
+
     def record_extractor_diagnostics(self, camera: str, diagnostics: Any) -> None:
         if diagnostics is None:
             return
@@ -837,6 +938,27 @@ class TriggerTraceContext:
             "freezerExitPathVotes": raw.get(
                 "freezer_exit_path_votes",
                 raw.get("freezerExitPathVotes"),
+            ),
+            "pathDisplacementPx": raw.get(
+                "pathDisplacementPx",
+                raw.get("path_displacement_px"),
+            ),
+            "maxDistancePx": raw.get("maxDistancePx", raw.get("max_distance_px")),
+            "centerSpanX": raw.get("centerSpanX", raw.get("center_span_x")),
+            "centerSpanY": raw.get("centerSpanY", raw.get("center_span_y")),
+            "trajectoryExitPathPassed": raw.get(
+                "trajectoryExitPathPassed",
+                raw.get("trajectory_exit_path_passed"),
+            ),
+            "staticShelfLikely": raw.get(
+                "staticShelfLikely",
+                raw.get("static_shelf_likely"),
+            ),
+            "handPathValid": raw.get("handPathValid", raw.get("hand_path_valid")),
+            "handPathPassed": raw.get("handPathPassed", raw.get("hand_path_passed")),
+            "handPathBlocked": raw.get(
+                "handPathBlocked",
+                raw.get("hand_path_blocked"),
             ),
             "instance_count_hint": raw.get(
                 "instance_count_hint",

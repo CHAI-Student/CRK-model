@@ -596,6 +596,12 @@ class ProductDecisionEngine:
             camera_exit_counts = self._freezer_stage_camera_exit_counts(stage_entry)
             roi_x_avg, roi_y_avg = self._freezer_stage_center(stage_entry)
             source = str(getattr(candidate, "source", "vision") or "vision")
+            dual_camera_exit_path = len(camera_exit_counts) >= 2
+            interaction_evidence = self._freezer_candidate_interaction_evidence(
+                candidate,
+                stage_entry=stage_entry,
+                dual_camera_exit_path=dual_camera_exit_path,
+            )
             product = active_map.get(class_id)
             diag: dict[str, Any] = {
                 "rank": rank,
@@ -609,10 +615,22 @@ class ProductDecisionEngine:
                     trace_context,
                 ),
                 "cameraExitCounts": dict(camera_exit_counts),
-                "dualCameraExitPath": len(camera_exit_counts) >= 2,
+                "dualCameraExitPath": dual_camera_exit_path,
                 "stageOnly": source == "freezer_stage_exit_path",
                 "roiXAvg": round(float(roi_x_avg), 1) if roi_x_avg is not None else None,
                 "roiYAvg": round(float(roi_y_avg), 1) if roi_y_avg is not None else None,
+                "pathDisplacementPx": interaction_evidence["pathDisplacementPx"],
+                "maxDistancePx": interaction_evidence["maxDistancePx"],
+                "centerSpanX": interaction_evidence["centerSpanX"],
+                "centerSpanY": interaction_evidence["centerSpanY"],
+                "trajectoryExitPathPassed": interaction_evidence[
+                    "trajectoryExitPathPassed"
+                ],
+                "staticShelfLikely": interaction_evidence["staticShelfLikely"],
+                "handPathValid": interaction_evidence["handPathValid"],
+                "handPathPassed": interaction_evidence["handPathPassed"],
+                "handPathBlocked": interaction_evidence["handPathBlocked"],
+                "interactionPenalty": interaction_evidence["interactionPenalty"],
                 "instance_count_hint": max(
                     1,
                     int(getattr(candidate, "instance_count_hint", 1) or 1),
@@ -737,6 +755,12 @@ class ProductDecisionEngine:
                 "source": source,
                 "source_priority": 1 if source == "freezer_stage_exit_path" else 0,
                 "diagnostics": diag,
+                "interaction_penalty": bool(
+                    interaction_evidence["interactionPenalty"]
+                ),
+                "hand_path_hard_reject": bool(
+                    interaction_evidence["handPathHardReject"]
+                ),
                 "same_product_repeat": repeat_diagnostic
                 if repeat_diagnostic is not None
                 and repeat_diagnostic.get("accepted")
@@ -760,6 +784,10 @@ class ProductDecisionEngine:
             )
             return self._create_no_detection_result(delta_weight, timestamp)
 
+        options, interaction_rejected_options = (
+            self._filter_freezer_interaction_rejections(options)
+        )
+
         multi_kind_selection = self._select_freezer_multi_kind_options(
             options,
             target_weight=target_weight,
@@ -774,6 +802,7 @@ class ProductDecisionEngine:
                 timestamp=timestamp,
                 trace_context=trace_context,
                 considered=considered,
+                interaction_rejected_options=interaction_rejected_options,
                 reason=reason,
             )
 
@@ -785,6 +814,7 @@ class ProductDecisionEngine:
             timestamp=timestamp,
             trace_context=trace_context,
             considered=considered,
+            interaction_rejected_options=interaction_rejected_options,
             reason=reason,
         )
 
@@ -818,6 +848,152 @@ class ProductDecisionEngine:
             except (TypeError, ValueError):
                 pass
         return max(values or [0.0])
+
+    @staticmethod
+    def _freezer_stage_bool(entry: dict[str, Any], *keys: str) -> bool:
+        for key in keys:
+            value = entry.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return True
+                continue
+            if isinstance(value, (int, float)) and value:
+                return True
+            if isinstance(value, str) and value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                return True
+        return False
+
+    @classmethod
+    def _freezer_candidate_interaction_evidence(
+        cls,
+        candidate: EnsembleResult,
+        *,
+        stage_entry: dict[str, Any],
+        dual_camera_exit_path: bool,
+    ) -> dict[str, Any]:
+        path_displacement = max(
+            cls._freezer_stage_float(
+                stage_entry,
+                "pathDisplacementPx",
+                "path_displacement_px",
+            ),
+            float(getattr(candidate, "top_total_displacement", 0.0) or 0.0),
+            float(getattr(candidate, "side_total_displacement", 0.0) or 0.0),
+        )
+        max_distance = max(
+            cls._freezer_stage_float(
+                stage_entry,
+                "maxDistancePx",
+                "max_distance_px",
+            ),
+            float(getattr(candidate, "top_max_distance", 0.0) or 0.0),
+            float(getattr(candidate, "side_max_distance", 0.0) or 0.0),
+        )
+        center_span_x = cls._freezer_stage_float(
+            stage_entry,
+            "centerSpanX",
+            "center_span_x",
+        )
+        center_span_y = cls._freezer_stage_float(
+            stage_entry,
+            "centerSpanY",
+            "center_span_y",
+        )
+        motion_threshold = cls._freezer_stage_float(
+            stage_entry,
+            "motionThresholdPx",
+            "motion_threshold_px",
+        )
+        if motion_threshold <= 0.0:
+            motion_threshold = float(config.vision.freezer_motion_min_displacement_px)
+        has_motion_evidence = any(
+            key in stage_entry
+            for key in (
+                "pathDisplacementPx",
+                "path_displacement_px",
+                "maxDistancePx",
+                "max_distance_px",
+                "centerSpanX",
+                "center_span_x",
+                "centerSpanY",
+                "center_span_y",
+            )
+        ) or path_displacement > 0.0 or max_distance > 0.0
+        trajectory_passed = cls._freezer_stage_bool(
+            stage_entry,
+            "trajectoryExitPathPassed",
+            "trajectory_exit_path_passed",
+        )
+        if not trajectory_passed and motion_threshold > 0.0:
+            trajectory_passed = path_displacement >= motion_threshold
+        hand_path_valid = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathValid",
+            "hand_path_valid",
+        )
+        hand_path_passed = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathPassed",
+            "hand_path_passed",
+        )
+        hand_path_blocked = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathBlocked",
+            "hand_path_blocked",
+        )
+        single_camera = (
+            not bool(dual_camera_exit_path)
+            and (
+                bool(getattr(candidate, "top_motion_passed", False))
+                or bool(getattr(candidate, "side_motion_passed", False))
+                or bool(getattr(candidate, "motion_gate_passed", True))
+            )
+        )
+        static_likely = cls._freezer_stage_bool(
+            stage_entry,
+            "staticShelfLikely",
+            "static_shelf_likely",
+        )
+        if (
+            not static_likely
+            and single_camera
+            and has_motion_evidence
+            and motion_threshold > 0.0
+            and not trajectory_passed
+            and path_displacement < motion_threshold
+        ):
+            static_likely = True
+        interaction_penalty = bool(
+            single_camera
+            and static_likely
+            and not trajectory_passed
+            and not hand_path_passed
+        )
+        hand_path_hard_reject = bool(
+            single_camera
+            and hand_path_valid
+            and hand_path_blocked
+            and not hand_path_passed
+        )
+        return {
+            "pathDisplacementPx": round(float(path_displacement), 1),
+            "maxDistancePx": round(float(max_distance), 1),
+            "centerSpanX": round(float(center_span_x), 1),
+            "centerSpanY": round(float(center_span_y), 1),
+            "motionThresholdPx": round(float(motion_threshold), 1),
+            "trajectoryExitPathPassed": bool(trajectory_passed),
+            "staticShelfLikely": bool(static_likely),
+            "handPathValid": bool(hand_path_valid),
+            "handPathPassed": bool(hand_path_passed),
+            "handPathBlocked": bool(hand_path_blocked),
+            "interactionPenalty": interaction_penalty,
+            "handPathHardReject": hand_path_hard_reject,
+        }
 
     @classmethod
     def _freezer_stage_camera_exit_counts(
@@ -1087,7 +1263,8 @@ class ProductDecisionEngine:
             tier, reason, selected = min(
                 handled,
                 key=lambda item: (
-                    item[0],
+                    item[0] + int(item[2].get("interaction_penalty", False)),
+                    int(item[2].get("interaction_penalty", False)),
                     int(item[2].get("source_priority", 0) or 0),
                     -int(item[2].get("freezer_exit_path_votes", 0) or 0),
                     float(item[2]["residual"]),
@@ -1114,6 +1291,7 @@ class ProductDecisionEngine:
         selected = min(
             tie_pool,
             key=lambda option: (
+                int(option.get("interaction_penalty", False)),
                 float(option["residual"]),
                 int(option["rank"]),
                 -float(option["confidence"]),
@@ -1127,6 +1305,22 @@ class ProductDecisionEngine:
             self._apply_freezer_repeat_option(repeat_selected)
             return repeat_selected, "same_product_repeat_weight_gate"
         return selected, "freezer_single_confidence_weight_tiebreak"
+
+    @staticmethod
+    def _filter_freezer_interaction_rejections(
+        options: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        blocked_options = [
+            option for option in options if bool(option.get("hand_path_hard_reject"))
+        ]
+        if not blocked_options or len(blocked_options) >= len(options):
+            return options, []
+
+        for option in blocked_options:
+            option["diagnostics"]["interactionRejectedReason"] = "hand_path_blocked"
+        return [
+            option for option in options if not bool(option.get("hand_path_hard_reject"))
+        ], blocked_options
 
     def _select_freezer_repeat_over_single(
         self,
@@ -1155,6 +1349,13 @@ class ProductDecisionEngine:
         if bool(selected.get("dual_camera_exit_path")):
             repeat["diagnostics"]["repeatSelectionRejectedReason"] = (
                 "dual_camera_single_preferred"
+            )
+            return None
+        if bool(repeat.get("interaction_penalty")) and not bool(
+            selected.get("interaction_penalty")
+        ):
+            repeat["diagnostics"]["repeatSelectionRejectedReason"] = (
+                "interaction_supported_single_preferred"
             )
             return None
         if repeat_residual > selected_residual + residual_grace:
@@ -1448,6 +1649,7 @@ class ProductDecisionEngine:
         trace_context: Optional[object],
         considered: list[dict[str, Any]],
         reason: str,
+        interaction_rejected_options: Optional[list[dict[str, Any]]] = None,
     ) -> JudgmentResult:
         products: list[ProductJudgment] = []
         total_price = 0
@@ -1509,6 +1711,10 @@ class ProductDecisionEngine:
             diagnostics["rejectedSameProductRepeatCandidates"] = (
                 rejected_same_product_repeat_candidates
             )
+        if interaction_rejected_options:
+            diagnostics["rejectedInteractionCandidates"] = [
+                option["diagnostics"] for option in interaction_rejected_options
+            ]
         ambiguous_candidates = [
             item
             for item in considered

@@ -119,6 +119,12 @@ shape without rereading every long historical document.
   for final vision candidates with freezer exit-path votes, enough vote
   evidence, confidence above the freezer multi floor, stock/count caps, and a
   residual inside the freezer/count-scaled tolerance.
+- Freezer handled selection also uses interaction evidence, not only exit-path
+  counts. Trace diagnostics record path displacement, max movement, center
+  span, trajectory pass, static shelf likelihood, and hand-path pass/block
+  state. Top-only static shelf candidates are softly demoted, and valid
+  hand-path blocks can hard-reject a candidate only when at least one
+  alternative remains; all-blocked hand-path cases still fail open.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their

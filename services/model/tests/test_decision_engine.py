@@ -980,6 +980,79 @@ def test_freezer_vision_first_prefers_count_supported_bagel_repeat(monkeypatch):
     ]
 
 
+def test_freezer_vision_first_static_single_loses_to_trajectory_candidate(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "STATIC_TIGHT_SINGLE",
+            "freezerExitPathVotes": 40,
+            "pathDisplacementPx": 2.0,
+            "maxDistancePx": 14.0,
+            "centerSpanX": 3.0,
+            "centerSpanY": 3.0,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": False,
+            "staticShelfLikely": True,
+            "cameras": {"top": {"freezerExitPathVotes": 40}},
+        },
+        "102": {
+            "class_id": 102,
+            "name": "TRAJECTORY_SUPPORTED_SINGLE",
+            "freezerExitPathVotes": 8,
+            "pathDisplacementPx": 18.0,
+            "maxDistancePx": 18.0,
+            "centerSpanX": 5.0,
+            "centerSpanY": 18.0,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "staticShelfLikely": False,
+            "cameras": {"top": {"freezerExitPathVotes": 8}},
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=101,
+                name="STATIC_TIGHT_SINGLE",
+                confidence=1.0,
+                raw_vote_count=80,
+            ),
+            make_candidate(
+                class_id=102,
+                name="TRAJECTORY_SUPPORTED_SINGLE",
+                confidence=0.7,
+                raw_vote_count=8,
+            ),
+        ],
+        delta_weight=-100.0,
+        active_products=[
+            make_active_product(101, "STATIC_TIGHT_SINGLE", weight=100.0, stock=10),
+            make_active_product(
+                102,
+                "TRAJECTORY_SUPPORTED_SINGLE",
+                weight=106.0,
+                stock=10,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (102, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    static_candidate = next(
+        item for item in diagnostics["considered"] if item["class_id"] == 101
+    )
+    assert static_candidate["interactionPenalty"] is True
+    assert diagnostics["selected"][0]["trajectoryExitPathPassed"] is True
+
+
 def test_loadcell_only_returns_nearest_single_within_5g():
     engine = ProductDecisionEngine(strict_mode=True)
 

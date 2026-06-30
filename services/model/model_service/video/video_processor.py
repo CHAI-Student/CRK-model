@@ -110,6 +110,10 @@ class BboxTracker:
     max_distance: float = 0.0
     detection_count: int = 0
     frame_indices: List[int] = field(default_factory=list)
+    min_x: Optional[float] = None
+    max_x: Optional[float] = None
+    min_y: Optional[float] = None
+    max_y: Optional[float] = None
     dynamic_threshold: float = 0.0  # bbox 크기 기반 동적 임계값
 
     def update(self, center: Tuple[float, float], frame_idx: int) -> None:
@@ -128,6 +132,12 @@ class BboxTracker:
         self.last_center = center
         self.detection_count += 1
         self.frame_indices.append(frame_idx)
+        center_x = float(center[0])
+        center_y = float(center[1])
+        self.min_x = center_x if self.min_x is None else min(self.min_x, center_x)
+        self.max_x = center_x if self.max_x is None else max(self.max_x, center_x)
+        self.min_y = center_y if self.min_y is None else min(self.min_y, center_y)
+        self.max_y = center_y if self.max_y is None else max(self.max_y, center_y)
 
     @property
     def total_displacement(self) -> float:
@@ -138,6 +148,18 @@ class BboxTracker:
             (self.last_center[0] - self.first_center[0]) ** 2 +
             (self.last_center[1] - self.first_center[1]) ** 2
         )
+
+    @property
+    def center_span_x(self) -> float:
+        if self.min_x is None or self.max_x is None:
+            return 0.0
+        return max(0.0, self.max_x - self.min_x)
+
+    @property
+    def center_span_y(self) -> float:
+        if self.min_y is None or self.max_y is None:
+            return 0.0
+        return max(0.0, self.max_y - self.min_y)
 
     def has_motion(self, min_displacement: float = 30.0) -> bool:
         """
@@ -969,6 +991,150 @@ class VideoProcessor:
                 pass
         return max(values or [0.0])
 
+    @staticmethod
+    def _freezer_stage_bool(entry: dict[str, Any], *keys: str) -> bool:
+        for key in keys:
+            value = entry.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return True
+                continue
+            if isinstance(value, (int, float)) and value:
+                return True
+            if isinstance(value, str) and value.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                return True
+        return False
+
+    @classmethod
+    def _freezer_candidate_interaction_evidence(
+        cls,
+        vote: VoteResult,
+        *,
+        stage_entry: dict[str, Any],
+        dual_camera_exit_path: bool,
+    ) -> dict[str, Any]:
+        path_displacement = max(
+            cls._freezer_stage_float(
+                stage_entry,
+                "pathDisplacementPx",
+                "path_displacement_px",
+            ),
+            float(getattr(vote, "top_total_displacement", 0.0) or 0.0),
+            float(getattr(vote, "side_total_displacement", 0.0) or 0.0),
+        )
+        max_distance = max(
+            cls._freezer_stage_float(
+                stage_entry,
+                "maxDistancePx",
+                "max_distance_px",
+            ),
+            float(getattr(vote, "top_max_distance", 0.0) or 0.0),
+            float(getattr(vote, "side_max_distance", 0.0) or 0.0),
+        )
+        center_span_x = cls._freezer_stage_float(
+            stage_entry,
+            "centerSpanX",
+            "center_span_x",
+        )
+        center_span_y = cls._freezer_stage_float(
+            stage_entry,
+            "centerSpanY",
+            "center_span_y",
+        )
+        motion_threshold = cls._freezer_stage_float(
+            stage_entry,
+            "motionThresholdPx",
+            "motion_threshold_px",
+        )
+        if motion_threshold <= 0.0:
+            motion_threshold = float(config.vision.freezer_motion_min_displacement_px)
+
+        has_motion_evidence = any(
+            key in stage_entry
+            for key in (
+                "pathDisplacementPx",
+                "path_displacement_px",
+                "maxDistancePx",
+                "max_distance_px",
+                "centerSpanX",
+                "center_span_x",
+                "centerSpanY",
+                "center_span_y",
+            )
+        ) or path_displacement > 0.0 or max_distance > 0.0
+        trajectory_passed = cls._freezer_stage_bool(
+            stage_entry,
+            "trajectoryExitPathPassed",
+            "trajectory_exit_path_passed",
+        )
+        if not trajectory_passed and motion_threshold > 0.0:
+            trajectory_passed = path_displacement >= motion_threshold
+
+        hand_path_valid = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathValid",
+            "hand_path_valid",
+        )
+        hand_path_passed = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathPassed",
+            "hand_path_passed",
+        )
+        hand_path_blocked = cls._freezer_stage_bool(
+            stage_entry,
+            "handPathBlocked",
+            "hand_path_blocked",
+        )
+        top_only = (
+            not bool(dual_camera_exit_path)
+            and (
+                bool(getattr(vote, "top_detected", False))
+                or bool(getattr(vote, "side_detected", False))
+            )
+        )
+        static_likely = cls._freezer_stage_bool(
+            stage_entry,
+            "staticShelfLikely",
+            "static_shelf_likely",
+        )
+        if (
+            not static_likely
+            and top_only
+            and has_motion_evidence
+            and motion_threshold > 0.0
+            and not trajectory_passed
+            and path_displacement < motion_threshold
+        ):
+            static_likely = True
+        interaction_penalty = bool(
+            top_only
+            and static_likely
+            and not trajectory_passed
+            and not hand_path_passed
+        )
+        hand_path_hard_reject = bool(
+            top_only and hand_path_valid and hand_path_blocked and not hand_path_passed
+        )
+        return {
+            "pathDisplacementPx": round(float(path_displacement), 1),
+            "maxDistancePx": round(float(max_distance), 1),
+            "centerSpanX": round(float(center_span_x), 1),
+            "centerSpanY": round(float(center_span_y), 1),
+            "motionThresholdPx": round(float(motion_threshold), 1),
+            "trajectoryExitPathPassed": bool(trajectory_passed),
+            "staticShelfLikely": bool(static_likely),
+            "handPathValid": bool(hand_path_valid),
+            "handPathPassed": bool(hand_path_passed),
+            "handPathBlocked": bool(hand_path_blocked),
+            "interactionPenalty": interaction_penalty,
+            "handPathHardReject": hand_path_hard_reject,
+        }
+
     @classmethod
     def _freezer_stage_camera_exit_counts(
         cls,
@@ -1267,10 +1433,6 @@ class VideoProcessor:
 
         candidate_limit = max(1, int(config.vision.top_k))
         ranked_votes = votes[:candidate_limit]
-        best_confidence = max(
-            float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
-            for vote in ranked_votes
-        )
         confidence_band = max(0.0, float(config.weight.freezer_confidence_tie_band))
         min_exit_path_votes = max(
             0,
@@ -1312,6 +1474,11 @@ class VideoProcessor:
             identity_supported = source != "vision" or confidence >= 0.3
             dual_camera_exit_path = len(camera_exit_counts) >= 2
             roi_x_avg, roi_y_avg = cls._freezer_stage_center(stage_entry)
+            interaction_evidence = cls._freezer_candidate_interaction_evidence(
+                vote,
+                stage_entry=stage_entry,
+                dual_camera_exit_path=dual_camera_exit_path,
+            )
             repeat_diagnostic = cls._freezer_same_product_repeat_diagnostic(
                 vote,
                 target_weight=target_weight,
@@ -1361,6 +1528,13 @@ class VideoProcessor:
                     "dual_camera_exit_path": dual_camera_exit_path,
                     "roi_x_avg": roi_x_avg,
                     "roi_y_avg": roi_y_avg,
+                    "interaction": interaction_evidence,
+                    "interaction_penalty": bool(
+                        interaction_evidence["interactionPenalty"]
+                    ),
+                    "hand_path_hard_reject": bool(
+                        interaction_evidence["handPathHardReject"]
+                    ),
                     "source": source,
                     "stage_only": stage_only,
                     "identity_supported": identity_supported,
@@ -1405,6 +1579,29 @@ class VideoProcessor:
                 ),
                 "selectionTier": str(item["reason"]),
             }
+            interaction = item.get("interaction") or {}
+            entry.update(
+                {
+                    "pathDisplacementPx": interaction.get("pathDisplacementPx"),
+                    "maxDistancePx": interaction.get("maxDistancePx"),
+                    "centerSpanX": interaction.get("centerSpanX"),
+                    "centerSpanY": interaction.get("centerSpanY"),
+                    "trajectoryExitPathPassed": bool(
+                        interaction.get("trajectoryExitPathPassed")
+                    ),
+                    "staticShelfLikely": bool(
+                        interaction.get("staticShelfLikely")
+                    ),
+                    "handPathValid": bool(interaction.get("handPathValid")),
+                    "handPathPassed": bool(interaction.get("handPathPassed")),
+                    "handPathBlocked": bool(interaction.get("handPathBlocked")),
+                    "interactionPenalty": bool(item.get("interaction_penalty")),
+                }
+            )
+            if item.get("interaction_rejected_reason"):
+                entry["interactionRejectedReason"] = str(
+                    item["interaction_rejected_reason"]
+                )
             repeat = item.get("same_product_repeat")
             if repeat:
                 entry.update(
@@ -1428,12 +1625,25 @@ class VideoProcessor:
                 entry["nearestRepeatCount"] = int(rejection.get("count", 0) or 0)
             return entry
 
+        selectable_scored = list(scored)
+        interaction_rejected_items: list[dict[str, Any]] = []
+        hand_blocked_items = [
+            item for item in scored if bool(item.get("hand_path_hard_reject"))
+        ]
+        if hand_blocked_items and len(hand_blocked_items) < len(scored):
+            for item in hand_blocked_items:
+                item["interaction_rejected_reason"] = "hand_path_blocked"
+            interaction_rejected_items = hand_blocked_items
+            selectable_scored = [
+                item for item in scored if not bool(item.get("hand_path_hard_reject"))
+            ]
+
         rejected_multi_diagnostics: Optional[dict[str, Any]] = None
         if bool(config.weight.freezer_vision_multi_without_weight_enabled):
             multi_min_confidence = float(config.weight.freezer_multi_min_confidence)
             strong_multi_items = [
                 item
-                for item in scored
+                for item in selectable_scored
                 if float(item["confidence"]) >= multi_min_confidence
                 and int(item["freezer_exit_path_votes"]) >= min_exit_path_votes
                 and bool(item["dual_camera_exit_path"])
@@ -1546,6 +1756,10 @@ class VideoProcessor:
                             for item in selected_items
                         ],
                         "considered": [considered_entry(item) for item in scored],
+                        "rejectedInteractionCandidates": [
+                            considered_entry(item)
+                            for item in interaction_rejected_items
+                        ],
                     }
                     cls._record_freezer_candidate_filter_diagnostics(
                         trace_context,
@@ -1561,12 +1775,13 @@ class VideoProcessor:
                     )
                     return selected_votes
 
-        handled_pool = [item for item in scored if int(item["tier"]) < 2]
+        handled_pool = [item for item in selectable_scored if int(item["tier"]) < 2]
         if handled_pool:
             selected_item = min(
                 handled_pool,
                 key=lambda item: (
-                    int(item["tier"]),
+                    int(item["tier"]) + int(item.get("interaction_penalty", False)),
+                    int(item.get("interaction_penalty", False)),
                     int(not item["identity_supported"]),
                     int(item["source_priority"]),
                     -int(item["freezer_exit_path_votes"]),
@@ -1577,14 +1792,19 @@ class VideoProcessor:
             )
             reason = str(selected_item["reason"])
         else:
+            selectable_best_confidence = max(
+                float(item["confidence"]) for item in selectable_scored
+            )
             tie_pool = [
                 item
-                for item in scored
-                if float(item["confidence"]) >= best_confidence - confidence_band
+                for item in selectable_scored
+                if float(item["confidence"])
+                >= selectable_best_confidence - confidence_band
             ]
             selected_item = min(
                 tie_pool,
                 key=lambda item: (
+                    int(item.get("interaction_penalty", False)),
                     item["unit_weight"] is None,
                     float(item["residual"]),
                     int(item["index"]),
@@ -1594,7 +1814,9 @@ class VideoProcessor:
             reason = "single_removal_weight_tiebreak"
 
         repeat_candidates = [
-            item for item in scored if item.get("same_product_repeat") is not None
+            item
+            for item in selectable_scored
+            if item.get("same_product_repeat") is not None
         ]
         rejected_repeat_selection: list[dict[str, Any]] = []
         if repeat_candidates:
@@ -1617,6 +1839,15 @@ class VideoProcessor:
                     {
                         **considered_entry(repeat_item),
                         "reason": "dual_camera_single_preferred",
+                    }
+                )
+            elif bool(repeat_item.get("interaction_penalty")) and not bool(
+                selected_item.get("interaction_penalty")
+            ):
+                rejected_repeat_selection.append(
+                    {
+                        **considered_entry(repeat_item),
+                        "reason": "interaction_supported_single_preferred",
                     }
                 )
             elif repeat_residual > selected_single_residual + residual_grace:
@@ -1699,9 +1930,42 @@ class VideoProcessor:
                 "freezerExitPathVotes": int(selected.freezer_exit_path_votes),
                 "cameraExitCounts": dict(selected_item["camera_exit_counts"]),
                 "dualCameraExitPath": bool(selected_item["dual_camera_exit_path"]),
+                "pathDisplacementPx": (
+                    selected_item.get("interaction") or {}
+                ).get("pathDisplacementPx"),
+                "maxDistancePx": (
+                    selected_item.get("interaction") or {}
+                ).get("maxDistancePx"),
+                "centerSpanX": (
+                    selected_item.get("interaction") or {}
+                ).get("centerSpanX"),
+                "centerSpanY": (
+                    selected_item.get("interaction") or {}
+                ).get("centerSpanY"),
+                "trajectoryExitPathPassed": bool(
+                    (selected_item.get("interaction") or {}).get(
+                        "trajectoryExitPathPassed"
+                    )
+                ),
+                "staticShelfLikely": bool(
+                    (selected_item.get("interaction") or {}).get("staticShelfLikely")
+                ),
+                "handPathValid": bool(
+                    (selected_item.get("interaction") or {}).get("handPathValid")
+                ),
+                "handPathPassed": bool(
+                    (selected_item.get("interaction") or {}).get("handPathPassed")
+                ),
+                "handPathBlocked": bool(
+                    (selected_item.get("interaction") or {}).get("handPathBlocked")
+                ),
+                "interactionPenalty": bool(selected_item.get("interaction_penalty")),
                 "selectionTier": reason,
             },
             "considered": [considered_entry(item) for item in scored],
+            "rejectedInteractionCandidates": [
+                considered_entry(item) for item in interaction_rejected_items
+            ],
             "sameProductRepeatCandidates": [
                 considered_entry(item)
                 for item in scored
@@ -1934,6 +2198,63 @@ class VideoProcessor:
                 roi_y_limit=roi_y_limit,
                 roi_direction=roi_direction,
             )
+
+    def _record_motion_evidence(
+        self,
+        trace_context: Optional[TriggerTraceContext],
+        *,
+        class_id: int,
+        class_name: str,
+        camera: str,
+        tracker: Optional[BboxTracker],
+        motion_passed: bool,
+    ) -> None:
+        if trace_context is None or tracker is None:
+            return
+        threshold = (
+            tracker.dynamic_threshold
+            if tracker.dynamic_threshold > 0
+            else self._freezer_motion_floor()
+        )
+        trajectory_passed = bool(motion_passed and tracker.total_displacement >= threshold)
+        static_likely = bool(
+            motion_passed
+            and threshold > 0.0
+            and tracker.detection_count >= self._effective_min_vote_count()
+            and tracker.total_displacement < threshold
+        )
+        trace_context.record_motion_evidence(
+            class_id=class_id,
+            class_name=class_name,
+            camera=camera,
+            path_displacement_px=tracker.total_displacement,
+            max_distance_px=tracker.max_distance,
+            center_span_x=tracker.center_span_x,
+            center_span_y=tracker.center_span_y,
+            motion_threshold_px=threshold,
+            trajectory_exit_path_passed=trajectory_passed,
+            static_shelf_likely=static_likely,
+        )
+
+    @staticmethod
+    def _record_hand_path_evidence(
+        trace_context: Optional[TriggerTraceContext],
+        *,
+        result: VoteResult,
+        hand_path_valid: bool,
+        hand_path_passed: bool,
+        hand_path_blocked: bool,
+    ) -> None:
+        if trace_context is None:
+            return
+        trace_context.record_hand_path_evidence(
+            class_id=result.class_id,
+            class_name=result.class_name,
+            camera="top",
+            hand_path_valid=hand_path_valid,
+            hand_path_passed=hand_path_passed,
+            hand_path_blocked=hand_path_blocked,
+        )
 
     @staticmethod
     def _record_low_confidence_detection(
@@ -2632,6 +2953,7 @@ class VideoProcessor:
         # v4.6: 손 경로 필터링 적용 (Top 카메라 기준)
         if top_hand_tracker is not None and self.hand_path_filter_enabled:
             candidate_class_ids = [r.class_id for r in combined_results]
+            hand_path_valid = top_hand_tracker.has_valid_hand_path()
             valid_class_ids = top_hand_tracker.filter_products_by_path(candidate_class_ids)
             valid_class_ids_set = set(valid_class_ids)
 
@@ -2639,6 +2961,20 @@ class VideoProcessor:
             filtered_by_hand_path = [
                 r for r in combined_results if r.class_id in valid_class_ids_set
             ]
+            for result in combined_results:
+                hand_path_passed = bool(
+                    hand_path_valid and result.class_id in valid_class_ids_set
+                )
+                hand_path_blocked = bool(
+                    hand_path_valid and result.class_id not in valid_class_ids_set
+                )
+                self._record_hand_path_evidence(
+                    trace_context,
+                    result=result,
+                    hand_path_valid=hand_path_valid,
+                    hand_path_passed=hand_path_passed,
+                    hand_path_blocked=hand_path_blocked,
+                )
             if before_count > 0 and not filtered_by_hand_path:
                 logger.warning(
                     "[VIDEO] fallback=kept_candidates reason=hand_path_removed_all"
@@ -2652,22 +2988,23 @@ class VideoProcessor:
                 ]
                 combined_results = filtered_by_hand_path
                 stats.hand_path_filtered_classes = before_count - len(combined_results)
-                for result in filtered_by_hand_path:
-                    self._record_stage(
-                        trace_context,
-                        class_id=result.class_id,
-                        class_name=result.class_name,
-                        stage="hand_path_passed",
-                        camera="top",
-                    )
-                for result in removed_results:
-                    self._record_stage(
-                        trace_context,
-                        class_id=result.class_id,
-                        class_name=result.class_name,
-                        stage="hand_path_filtered",
-                        camera="top",
-                    )
+                if hand_path_valid:
+                    for result in filtered_by_hand_path:
+                        self._record_stage(
+                            trace_context,
+                            class_id=result.class_id,
+                            class_name=result.class_name,
+                            stage="hand_path_passed",
+                            camera="top",
+                        )
+                    for result in removed_results:
+                        self._record_stage(
+                            trace_context,
+                            class_id=result.class_id,
+                            class_name=result.class_name,
+                            stage="hand_path_filtered",
+                            camera="top",
+                        )
 
             if stats.hand_path_filtered_classes > 0:
                 logger.info(
@@ -3045,6 +3382,7 @@ class VideoProcessor:
                             class_name=det.name,
                             stage="roi_passed",
                             camera="top",
+                            center=det.center,
                         )
 
                         class_id = det.cls
@@ -3197,6 +3535,7 @@ class VideoProcessor:
                             class_name=det.name,
                             stage="roi_passed",
                             camera="side",
+                            center=det.center,
                         )
 
                         class_id = det.cls
@@ -3369,6 +3708,7 @@ class VideoProcessor:
         # 손 경로 필터링
         if top_hand_tracker is not None and self.hand_path_filter_enabled:
             candidate_class_ids = [r.class_id for r in combined_results]
+            hand_path_valid = top_hand_tracker.has_valid_hand_path()
             valid_class_ids = top_hand_tracker.filter_products_by_path(candidate_class_ids)
             valid_class_ids_set = set(valid_class_ids)
 
@@ -3376,6 +3716,20 @@ class VideoProcessor:
             filtered_by_hand_path = [
                 r for r in combined_results if r.class_id in valid_class_ids_set
             ]
+            for result in combined_results:
+                hand_path_passed = bool(
+                    hand_path_valid and result.class_id in valid_class_ids_set
+                )
+                hand_path_blocked = bool(
+                    hand_path_valid and result.class_id not in valid_class_ids_set
+                )
+                self._record_hand_path_evidence(
+                    trace_context,
+                    result=result,
+                    hand_path_valid=hand_path_valid,
+                    hand_path_passed=hand_path_passed,
+                    hand_path_blocked=hand_path_blocked,
+                )
             if before_count > 0 and not filtered_by_hand_path:
                 logger.warning(
                     "[VIDEO-ASYNC] fallback=kept_candidates reason=hand_path_removed_all"
@@ -3389,22 +3743,23 @@ class VideoProcessor:
                 ]
                 combined_results = filtered_by_hand_path
                 stats.hand_path_filtered_classes = before_count - len(combined_results)
-                for result in filtered_by_hand_path:
-                    self._record_stage(
-                        trace_context,
-                        class_id=result.class_id,
-                        class_name=result.class_name,
-                        stage="hand_path_passed",
-                        camera="top",
-                    )
-                for result in removed_results:
-                    self._record_stage(
-                        trace_context,
-                        class_id=result.class_id,
-                        class_name=result.class_name,
-                        stage="hand_path_filtered",
-                        camera="top",
-                    )
+                if hand_path_valid:
+                    for result in filtered_by_hand_path:
+                        self._record_stage(
+                            trace_context,
+                            class_id=result.class_id,
+                            class_name=result.class_name,
+                            stage="hand_path_passed",
+                            camera="top",
+                        )
+                    for result in removed_results:
+                        self._record_stage(
+                            trace_context,
+                            class_id=result.class_id,
+                            class_name=result.class_name,
+                            stage="hand_path_filtered",
+                            camera="top",
+                        )
 
             if stats.hand_path_filtered_classes > 0:
                 logger.info(
@@ -3541,6 +3896,14 @@ class VideoProcessor:
                     camera=camera_type,
                     amount=len(normalized_votes),
                 )
+                self._record_motion_evidence(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=normalized_votes[0][1] if normalized_votes else "",
+                    camera=camera_type,
+                    tracker=tracker,
+                    motion_passed=True,
+                )
                 motion_passed_count += 1
 
                 if tracker:
@@ -3559,6 +3922,14 @@ class VideoProcessor:
                     stage="motion_filtered",
                     camera=camera_type,
                     amount=len(normalized_votes),
+                )
+                self._record_motion_evidence(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=normalized_votes[0][1] if normalized_votes else "",
+                    camera=camera_type,
+                    tracker=tracker,
+                    motion_passed=False,
                 )
                 if tracker:
                     threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement
@@ -3810,6 +4181,7 @@ class VideoProcessor:
                     class_name=det.name,
                     stage="roi_passed",
                     camera=camera_type,
+                    center=det.center,
                 )
 
                 class_id = det.cls
@@ -3889,6 +4261,14 @@ class VideoProcessor:
                     camera=camera_type,
                     amount=len(votes),
                 )
+                self._record_motion_evidence(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=votes[0][1] if votes else "",
+                    camera=camera_type,
+                    tracker=tracker,
+                    motion_passed=True,
+                )
                 motion_passed_count += 1
 
                 if tracker:
@@ -3909,6 +4289,14 @@ class VideoProcessor:
                     stage="motion_filtered",
                     camera=camera_type,
                     amount=len(votes),
+                )
+                self._record_motion_evidence(
+                    trace_context,
+                    class_id=class_id,
+                    class_name=votes[0][1] if votes else "",
+                    camera=camera_type,
+                    tracker=tracker,
+                    motion_passed=False,
                 )
                 if tracker:
                     threshold_used = tracker.dynamic_threshold if tracker.dynamic_threshold > 0 else self.min_motion_displacement

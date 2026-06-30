@@ -77,7 +77,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   warnings, `15g` weight-fit multi selection, top-three mismatch narrowing,
   same-product repeat recovery for the zone5 bagel `x2` collision, repeat
   rejection when freezer exit-path evidence is too weak, dual-camera single
-  preference over top-only repeats, and freezer filter OPS visibility.
+  preference over top-only repeats, static top-only ranking demotion,
+  hand-path hard reject with alternative candidates, hand-path all-blocked
+  fail-open behavior, and freezer filter OPS visibility.
   Async failure tests cover model-service exception re-raise, unknown task
   wrapping, missing async extractor support, frame queue timeout, and zero-frame
   failure after retry.
@@ -129,7 +131,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   confidence band, candidate-only identity, freezer `15g` weight-gated
   multi-kind evidence, rejection of mismatched top-three freezer candidates,
   same-class counts gated by `instance_count_hint`, and count-aware
-  same-product repeat inference for the zone5 bagel `x2` case.
+  same-product repeat inference for the zone5 bagel `x2` case. They also cover
+  direct freezer static/trajectory interaction ranking so the engine and video
+  handled-filter path stay aligned.
 - [test_session_store_lifecycle.py](../../../services/model/tests/test_session_store_lifecycle.py):
   normal `processing -> complete/waiting/error` session saves do not emit
   `Session overwritten`, while replacing an already completed session still

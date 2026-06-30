@@ -126,6 +126,12 @@ Important inputs:
   diagnostics expose `sameProductRepeatCandidates`,
   `rejectedSameProductRepeatCandidates`, `count`, `expectedWeight`, and
   `countWeightResidual`.
+- Direct `freezer_vision_first` selection reads the same interaction evidence
+  as the video handled-filter path. `staticShelfLikely` top-only candidates are
+  softly demoted unless trajectory or hand-path support exists, and
+  `handPathBlocked` candidates are hard-rejected only when another supported
+  option remains. This keeps direct engine calls and video-trigger filtering
+  aligned without adding product-name-specific rules.
 
 ## StrictWeightMatcher
 

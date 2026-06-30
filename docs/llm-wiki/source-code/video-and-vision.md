@@ -112,6 +112,14 @@ selected frames, accumulates per-camera evidence, and returns ranked
   override a tighter top-only single candidate only inside the
   `same_product_count_tolerance` residual gap; dual-camera exit-path singles
   remain preferred.
+- Freezer handled filtering now records and uses interaction evidence:
+  `pathDisplacementPx`, `maxDistancePx`, `centerSpanX/Y`,
+  `trajectoryExitPathPassed`, `staticShelfLikely`, `handPathValid`,
+  `handPathPassed`, and `handPathBlocked`. Top-only static candidates are
+  demoted in ranking when they have no trajectory/hand support. A valid
+  hand-path block removes a top-only candidate only if another candidate
+  remains, preserving fail-open behavior when hand evidence would remove
+  everything.
 - Freezer trigger traces now expose `camera_layout`, raw candidate count,
   handled candidate count, freezer filter reason, and the key freezer vote,
   motion, ROI, exit-path, and multi-candidate thresholds. OPS also writes a
