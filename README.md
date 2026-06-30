@@ -33,7 +33,6 @@ chmod +x scripts/install_jetson_torch.sh
 chmod +x scripts/jetson_env.sh
 ./scripts/setup_jetson.sh
 
-source .venv/bin/activate
 model-service
 ```
 
@@ -42,15 +41,16 @@ completes, opening a new terminal only needs:
 
 ```bash
 cd Edge_Environment
-source .venv/bin/activate
 model-service
 ```
 
 The setup script installs a small activation hook into `.venv/bin/activate`.
 That hook restores the Jetson CUDA/TensorRT runtime paths automatically for
-future shells, and `model-service` itself now performs the same bootstrap
-before importing the service stack. In practice, a fresh terminal should no
-longer require rerunning `./scripts/setup_jetson.sh`.
+manual activation. It also installs a user-level `~/.local/bin/model-service`
+launcher that activates this repo's `.venv` before executing
+`.venv/bin/model-service`, so day-to-day service startup no longer needs an
+activated parent shell. `model-service` itself still performs the CUDA/TensorRT
+bootstrap before importing the service stack.
 
 Health checks:
 
@@ -124,7 +124,7 @@ If your engine file has a different name, point the variable at the actual file.
 
 ## Recommended Commands
 
-After activation, prefer the installed entry points:
+After the one-time setup, prefer the installed entry points:
 
 ```bash
 model-service
@@ -132,7 +132,8 @@ pytest services/model/tests -q
 ```
 
 `model-service` now bootstraps the common Jetson CUDA/TensorRT library paths on
-startup, so it does not depend on rerunning `setup_jetson.sh` in each shell.
+startup, and the setup-installed user launcher activates `.venv` automatically
+when the parent shell is not already activated.
 
 If you want to keep using `uv run`, prefer `--no-sync` once the environment is already prepared:
 

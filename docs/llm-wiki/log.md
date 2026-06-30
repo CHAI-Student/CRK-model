@@ -1,5 +1,19 @@
 # LLM Wiki Log
 
+## [2026-06-30] maintenance | freezer env template and auto launcher
+
+- Documented the user-level `model-service` launcher installed by
+  `scripts/setup_jetson.sh`. The launcher lives at `~/.local/bin/model-service`,
+  activates this repo's `.venv`, and execs `.venv/bin/model-service` so fresh
+  shells can start the service without manual activation once PATH is loaded.
+- Recorded that `.env.example` is now a sanitized freezer-first dual-top
+  template using `MODEL__MACHINE__CABINET_TYPE=freezer`,
+  `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`,
+  `MODEL__VISION__YOLO_MODEL_PATH=models/set7_v8best.engine`, and placeholder
+  secrets.
+- Added regression coverage for `.env.example` parsing plus Bash-gated shell
+  syntax and launcher dry-run behavior.
+
 ## [2026-06-30] maintenance | freezer static and hand interaction evidence
 
 - Added freezer interaction diagnostics for path displacement, max movement,

@@ -51,7 +51,9 @@ vending stack. The README now frames it as the legacy/reference TensorRT
 
 ## Environment Defaults
 
-`.env.example` documents the model service defaults and operational toggles.
+`.env.example` is the sanitized freezer-first field template. It sets freezer
+mode, dual-top camera layout, and `models/set7_v8best.engine` while keeping
+credentials as placeholders. Important groups:
 Important groups:
 
 - API: `MODEL__API__HOST`, `MODEL__API__PORT`, `MODEL__API__LOG_LEVEL`.

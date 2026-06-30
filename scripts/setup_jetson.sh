@@ -55,6 +55,10 @@ install_activation_hook() {
     print_ok "Installed Jetson activation hook into .venv/bin/activate"
 }
 
+install_user_launcher() {
+    bash "${PROJECT_ROOT}/scripts/install_model_service_launcher.sh"
+}
+
 install_project_packages() {
     uv pip install --no-deps -e .
 
@@ -244,16 +248,22 @@ else
     exit 1
 fi
 
-print_step "9/10" "Installing activation hook"
+print_step "9/11" "Installing activation hook"
 
 install_activation_hook
 
-print_step "10/10" "Done"
+print_step "10/11" "Installing user launcher"
+
+install_user_launcher
+
+print_step "11/11" "Done"
 
 echo -e "${BLUE}Recommended runtime commands${NC}"
-echo "  source .venv/bin/activate"
 echo "  model-service"
 echo "  pytest services/model/tests/test_fastapi_imports.py -q"
+echo ""
+echo -e "${BLUE}Manual venv activation remains available${NC}"
+echo "  source .venv/bin/activate"
 echo ""
 echo -e "${BLUE}Optional uv commands without re-sync${NC}"
 echo "  uv run --no-sync model-service"

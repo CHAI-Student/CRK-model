@@ -15,7 +15,13 @@ developer PC can validate TensorRT runtime behavior.
   validates Jetson prerequisites, prepares `.venv` with
   `--system-site-packages`, loads Jetson runtime paths, installs project
   packages without replacing Jetson torch, prepares `.env`, validates imports,
-  and installs the activation hook.
+  installs the activation hook, and installs the user-level `model-service`
+  auto-venv launcher.
+- [install_model_service_launcher.sh](../../../scripts/install_model_service_launcher.sh):
+  installs `~/.local/bin/model-service`, which enters this repo, sources
+  `.venv/bin/activate`, and execs `.venv/bin/model-service` with the original
+  arguments. It refuses to overwrite non-owned launchers unless
+  `MODEL_SERVICE_LAUNCHER_FORCE=1` is set.
 - [install_jetson_torch.sh](../../../scripts/install_jetson_torch.sh):
   installs a Jetson-compatible torch/torchvision pair when the active torch
   build cannot see CUDA.
@@ -43,9 +49,11 @@ chmod +x scripts/setup_jetson.sh
 chmod +x scripts/install_jetson_torch.sh
 chmod +x scripts/jetson_env.sh
 ./scripts/setup_jetson.sh
-source .venv/bin/activate
 model-service
 ```
+
+After setup, the user-level launcher lets a fresh shell run `model-service`
+without first activating `.venv`, once `~/.local/bin` is loaded in PATH.
 
 ## Live Preview Flow
 

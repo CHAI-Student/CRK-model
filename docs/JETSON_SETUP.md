@@ -43,7 +43,6 @@ chmod +x scripts/install_jetson_torch.sh
 chmod +x scripts/jetson_env.sh
 ./scripts/setup_jetson.sh
 
-source .venv/bin/activate
 model-service
 ```
 
@@ -58,6 +57,8 @@ The setup script now does all of the following:
 - checks that the `model-service` entry point exists
 - installs a `.venv/bin/activate` hook that restores Jetson CUDA/TensorRT paths
   in every future shell
+- installs a user-level `~/.local/bin/model-service` launcher that activates
+  this repo's `.venv` before executing `.venv/bin/model-service`
 
 ## Manual Setup
 
@@ -92,13 +93,15 @@ If your engine file uses a different name, point the variable at the real file i
 - Startup errors now include the root cause from the YOLO loader. If CUDA is unavailable, the message says so instead of looking like a pure path problem.
 - `model-service` now bootstraps the common Jetson CUDA/TensorRT runtime paths
   before importing the app. After the one-time setup, a fresh terminal should
-  only need `source .venv/bin/activate` followed by `model-service`.
+  only need `model-service`.
+- If `~/.local/bin` was added to the profile during setup, open a new terminal
+  or run `export PATH="$HOME/.local/bin:$PATH"` once in the current shell.
 - `scripts/jetson_env.sh` remains available as a manual recovery command when
   you want to inspect CUDA visibility inside the shell itself.
 
 ## Recommended Runtime Commands
 
-After activating the venv:
+After the one-time setup:
 
 ```bash
 model-service
@@ -239,8 +242,9 @@ WantedBy=multi-user.target
 |---------|-------|--------|
 | `Name or service not known` while downloading torch | DNS failure on Jetson | verify network and `getent hosts pypi.jetson-ai-lab.io`, then rerun the helper |
 | `torch.cuda.is_available()` is `False` and `torch.version.cuda` is `None` | CPU-only PyPI torch is installed in `.venv` | run `./scripts/install_jetson_torch.sh`; rerun `./scripts/setup_jetson.sh` only if the venv entry points or activation hook also need to be rebuilt |
-| `torch.cuda.is_available()` is `False` but `torch.version.cuda` is set | CUDA libraries are not visible to torch | first retry in a fresh shell with `source .venv/bin/activate && model-service`; if shell tools still cannot see CUDA, run `source scripts/jetson_env.sh` and recheck |
-| `model-service` works only after manually rerunning `./scripts/setup_jetson.sh` | Jetson runtime paths were not restored in the new shell | rerun `./scripts/setup_jetson.sh` once to reinstall the activation hook, then use only `source .venv/bin/activate` in later shells |
+| `torch.cuda.is_available()` is `False` but `torch.version.cuda` is set | CUDA libraries are not visible to torch | first retry in a fresh shell with `model-service`; if shell tools still cannot see CUDA, run `source .venv/bin/activate && source scripts/jetson_env.sh` and recheck |
+| `model-service: command not found` after setup | `~/.local/bin` is not loaded into the current shell PATH yet | open a new terminal or run `export PATH="$HOME/.local/bin:$PATH"` |
+| `model-service` works only after manually rerunning `./scripts/setup_jetson.sh` | Jetson runtime paths or launcher were not restored in the new shell | rerun `./scripts/setup_jetson.sh` once to reinstall the activation hook and user launcher, then use `model-service` in later shells |
 | `import torch` fails with `libcudss.so` | cuDSS runtime missing for the Jetson wheel | run `pip install nvidia-cudss-cu12` inside `.venv`, then retry |
 | `No module named tensorrt` | TensorRT Python bindings unavailable | verify JetPack install and Python path |
 | `numpy.core.multiarray failed to import` | NumPy 2.x or mixed packages | reinstall NumPy 1.x in `.venv` |

@@ -32,6 +32,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   engine/dataset/mapping validation.
 - [test_runtime_env.py](../../../services/model/tests/test_runtime_env.py):
   Jetson runtime path bootstrap and re-exec behavior.
+- [test_setup_templates.py](../../../services/model/tests/test_setup_templates.py):
+  `.env.example` freezer-template parsing, shell script syntax checks when
+  Bash is available, and dry-style user launcher installation behavior.
 - [test_terminal_restore.py](../../../services/model/tests/test_terminal_restore.py):
   terminal capture/restore around interruption.
 - [test_trigger_helpers.py](../../../services/model/tests/test_trigger_helpers.py):

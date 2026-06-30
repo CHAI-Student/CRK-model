@@ -145,6 +145,7 @@ fixture. Compound same-zone loadcell coverage lives in
 - [.env.example](../../../.env.example)
 - [dataset.yaml](../../../dataset.yaml)
 - [scripts/setup_jetson.sh](../../../scripts/setup_jetson.sh)
+- [scripts/install_model_service_launcher.sh](../../../scripts/install_model_service_launcher.sh)
 - [scripts/install_jetson_torch.sh](../../../scripts/install_jetson_torch.sh)
 - [scripts/jetson_env.sh](../../../scripts/jetson_env.sh)
 - [scripts/live_engine_preview.py](../../../scripts/live_engine_preview.py)

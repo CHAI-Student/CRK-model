@@ -16,14 +16,15 @@ chmod +x scripts/jetson_env.sh
 
 `setup_jetson.sh` creates `.venv` with `--system-site-packages`, repairs a
 CPU-only torch install when needed, installs project dependencies, and appends a
-Jetson runtime hook to `.venv/bin/activate`.
+Jetson runtime hook to `.venv/bin/activate`. It also installs
+`~/.local/bin/model-service`, a user-level launcher that activates this repo's
+`.venv` before executing `.venv/bin/model-service`.
 
 ## Normal Runtime
 
 After the one-time setup, each fresh shell should only need:
 
 ```bash
-source .venv/bin/activate
 model-service
 ```
 
@@ -50,6 +51,9 @@ sync step can unexpectedly modify `.venv`.
   library paths in the current shell.
 - `setup_jetson.sh` installs that script as an activation hook, so
   `source .venv/bin/activate` restores the paths automatically.
+- `setup_jetson.sh` also installs a `~/.local/bin/model-service` launcher so
+  the service can start from an unactivated shell after the user's PATH loads
+  `~/.local/bin`.
 - `model-service` also bootstraps the same runtime paths before importing the
   FastAPI stack. This keeps service startup working even if the shell did not
   source the helper.

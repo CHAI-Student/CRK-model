@@ -32,7 +32,8 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 ## High-Impact Defaults
 
 - `MODEL__API__PORT=8002`
-- `MODEL__VISION__YOLO_MODEL_PATH=models/0204_morning.engine`
+- Code default `MODEL__VISION__YOLO_MODEL_PATH=models/0204_morning.engine`;
+  the copyable freezer `.env.example` sets `models/set7_v8best.engine`.
 - `MODEL__VISION__YOLO_INTERNAL_CONF_THRESHOLD=0.01` keeps raw YOLO
   collection broad; service-side regular candidate thresholds do the main
   filtering.
@@ -72,11 +73,12 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__WEIGHT__STRICT_MODE_FALLBACK=true`
 - `MODEL__WEIGHT__TOLERANCE_GRAMS=5.0` in code defaults, used by strict
   combination matching and relaxed count validation.
-- `MODEL__MACHINE__CABINET_TYPE=refrigerated` preserves the current
-  refrigerated loadcell/vision/weight policy. `freezer` keeps zone-sliced
-  loadcell input but uses freezer-specific lower-half dual-top filtering and a
-  vision-first decision branch where weight is only a tie-break/diagnostic
-  signal.
+- Code default `MODEL__MACHINE__CABINET_TYPE=refrigerated` preserves the
+  refrigerated loadcell/vision/weight policy. The copyable `.env.example` is
+  freezer-first and sets `MODEL__MACHINE__CABINET_TYPE=freezer`, keeping
+  zone-sliced loadcell input but using freezer-specific lower-half dual-top
+  filtering and a vision-first decision branch where weight is only a
+  tie-break/diagnostic signal.
 - `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND=0.08` controls how close
   freezer single-item fallback candidates must be in confidence before weight
   residual can break the tie.
@@ -85,10 +87,11 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` is the freezer-only
   loadcell tolerance for single-candidate reliability and combined multi-kind
   weight fits.
-- `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED=true` is retained
-  for config compatibility, but ordinary nonzero freezer deltas still require
+- `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED` is retained for
+  config compatibility, but ordinary nonzero freezer deltas still require
   segment/combined-weight support inside the freezer tolerance before returning
-  multiple product identities.
+  multiple product identities. `.env.example` sets this rollback flag to
+  `false`.
 - `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` is the per-item confidence
   floor for multi-kind combinations.
 - `MODEL__WEIGHT__SAME_PRODUCT_COUNT_TOLERANCE_GRAMS=5.0` applies only to the
@@ -130,11 +133,11 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   `MODEL__VISION__SIDE_CROP_POLICY=left`, and
   `MODEL__VISION__CROP_WIDTH=480` keep inference on the left 480x480 crop from
   640x480 camera frames.
-- `MODEL__VISION__CAMERA_LAYOUT=legacy_top_side` preserves the current one Top
-  plus per-zone Side camera mapping. `dual_top_proxy` keeps the `/trigger`
-  `videos.top/side` contract but records `videos.top` as physical
-  `top_middle` and `videos.side` as `top_side` using the Top processing
-  profile.
+- Code default `MODEL__VISION__CAMERA_LAYOUT=legacy_top_side` preserves the
+  current one Top plus per-zone Side camera mapping. The freezer `.env.example`
+  sets `dual_top_proxy`, which keeps the `/trigger` `videos.top/side` contract
+  but records `videos.top` as physical `top_middle` and `videos.side` as
+  `top_side` using the Top processing profile.
 - `MODEL__VISION__TOP_ROI_ENABLED=true`
 - `MODEL__VISION__MOTION_MIN_DISPLACEMENT_PX=10.0`; tracker dynamic thresholds
   also use this as the minimum floor before applying the bbox-size rule.

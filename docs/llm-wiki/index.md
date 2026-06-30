@@ -40,6 +40,11 @@ shape without rereading every long historical document.
 - Frame trace image export is opt-in. `.env.example` keeps
   `MODEL__TRACE__SAMPLE_EXPORT_ENABLED=false` so replacing a live `.env` does
   not add sample-frame disk writes on Jetson.
+- `.env.example` is now a sanitized freezer-first dual-top template. It sets
+  `MODEL__MACHINE__CABINET_TYPE=freezer`,
+  `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`, and
+  `MODEL__VISION__YOLO_MODEL_PATH=models/set7_v8best.engine` while leaving
+  credentials and secrets as placeholders.
 - Fatal async video processing failures are not valid no-detection outcomes.
   `process_videos_async()` must propagate extractor, queue, and YOLO task
   errors as model-service exceptions so `TriggerService` records
@@ -101,7 +106,8 @@ shape without rereading every long historical document.
   `top_side` using the logical Top processing profile.
 - Python service inference defaults to `models/0204_morning.engine`, with
   regular Top/Side candidate thresholds at `0.25` to match the Jetson live
-  preview baseline.
+  preview baseline. The copyable `.env.example` overrides the engine path to
+  the freezer field profile `models/set7_v8best.engine`.
 - Top-camera ROI now uses the lower region for both removals and returns:
   non-zero deltas keep `center_y >= 240`, while zero or missing delta skips
   the top ROI.

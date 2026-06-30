@@ -13,8 +13,9 @@ Use this as the concise Jetson setup and recovery guide.
 - The helper creates `.venv` with `--system-site-packages`, repairs CPU-only
   torch if needed, installs dependencies, and adds a runtime hook to
   `.venv/bin/activate`.
-- Normal runtime after setup should be:
-  `source .venv/bin/activate` then `model-service`.
+- The helper also installs `~/.local/bin/model-service`, which activates this
+  repo's `.venv` before executing `.venv/bin/model-service`.
+- Normal runtime after setup should be `model-service`.
 - Preferred day-to-day commands are `model-service` and
   `pytest services/model/tests -q`.
 - Plain `uv run ...` can unexpectedly sync and mutate `.venv`; use
@@ -33,6 +34,7 @@ Use this as the concise Jetson setup and recovery guide.
 ## Related Code
 
 - `scripts/setup_jetson.sh`
+- `scripts/install_model_service_launcher.sh`
 - `scripts/install_jetson_torch.sh`
 - `scripts/jetson_env.sh`
 - `scripts/convert_engine.sh`

@@ -21,7 +21,7 @@ path while fresh clone-based operation should prefer `CRK-model-go`.
 
 ## Preferred Commands
 
-After activating `.venv`:
+After the one-time Jetson setup:
 
 ```bash
 model-service
@@ -42,6 +42,8 @@ step and unexpectedly mutate `.venv`.
 
 - Use `scripts/setup_jetson.sh` for one-time setup.
 - Create `.venv` with `--system-site-packages`.
+- Setup installs `~/.local/bin/model-service`, a user-level launcher that
+  activates this repo's `.venv` and then execs `.venv/bin/model-service`.
 - Use `scripts/jetson_env.sh` or the activation hook to restore CUDA/TensorRT
   paths.
 - If `torch.version.cuda` is `None`, reinstall the Jetson torch wheel with
