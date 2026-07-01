@@ -147,6 +147,9 @@ def _analyze_weight_delta(
         prefer_mixed_sign_removal_delta=(
             loadcell_stats.prefer_mixed_sign_removal_delta_for_cabinet(cabinet_type)
         ),
+        stable_net_delta_only=(
+            loadcell_stats.stable_net_delta_only_for_cabinet(cabinet_type)
+        ),
     )
     mixed_sign_guard = dict(analysis.mixed_sign_net_masking_guard or {})
     if mixed_sign_guard.get("accepted"):
@@ -1339,6 +1342,11 @@ async def trigger_judgment(
                 timing_metadata=request.timing.model_dump(exclude_none=True) if request.timing else None,
                 return_weight_hints=return_weight_hints,
                 vision_candidates=close_candidate_snapshot,
+                loadcell_diagnostics=(
+                    loadcell_stats.close_trigger_loadcell_diagnostics(
+                        delta_analysis
+                    )
+                ),
             )
             door_session = door_session_store.add_trigger_with_global(
                 zone=request.zone,

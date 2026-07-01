@@ -1,4 +1,4 @@
-"""Freezer close-time aggregate basket resolver."""
+"""Freezer close-time signed net basket resolver."""
 
 from __future__ import annotations
 
@@ -15,6 +15,14 @@ class _Participant:
     zone: int
     session: DoorSession
     trigger: TriggerResult
+
+    @property
+    def delta_weight(self) -> float:
+        return float(self.trigger.delta_weight)
+
+    @property
+    def has_mixed_sign_diagnostics(self) -> bool:
+        return _trigger_has_mixed_sign_diagnostics(self.trigger)
 
 
 @dataclass
@@ -54,7 +62,7 @@ class _Combination:
 
 
 class FreezerCloseAggregateResolver:
-    """Re-solve unstable freezer close baskets and attribute them to last zone."""
+    """Re-solve unstable freezer close baskets from signed trigger net delta."""
 
     def __init__(
         self,
@@ -71,32 +79,67 @@ class FreezerCloseAggregateResolver:
         if str(config.machine.cabinet_type).strip().lower() != "freezer":
             return None
 
-        participants = self._negative_participants(sessions.values())
+        participants = self._participants(sessions.values())
         if not self._is_eligible(participants):
             return None
 
-        raw_negative_total = sum(abs(float(item.trigger.delta_weight)) for item in participants)
-        positive_hints = self._positive_hints(participants)
-        output_zone = max(
-            enumerate(participants),
-            key=lambda indexed: (
-                float(indexed[1].trigger.timestamp),
-                float(indexed[1].session.last_trigger_at),
-                int(indexed[0]),
-            ),
-        )[1].zone
+        global_net_delta = sum(item.delta_weight for item in participants)
+        output_zone = self._output_zone(participants)
         diagnostics = self._base_diagnostics(
             participants=participants,
-            raw_negative_total=raw_negative_total,
-            positive_hints=positive_hints,
+            global_net_delta=global_net_delta,
             output_zone=output_zone,
         )
 
+        if abs(global_net_delta) <= self._tolerance:
+            diagnostics.update(
+                {
+                    "accepted": True,
+                    "reason": "freezer_close_aggregate_net_zero",
+                    "noChargeReason": "signed_net_delta_within_tolerance",
+                    "finalTargetWeight": 0.0,
+                    "selectedWeight": 0.0,
+                    "residual": 0.0,
+                    "allowedResidual": round(float(self._tolerance), 1),
+                    "selectedProducts": [],
+                }
+            )
+            self._apply_no_charge_output(
+                participants,
+                output_zone=output_zone,
+                weight_delta_override=0.0,
+                diagnostics=diagnostics,
+            )
+            return diagnostics
+
+        if global_net_delta > self._tolerance:
+            diagnostics.update(
+                {
+                    "accepted": True,
+                    "reason": "freezer_close_aggregate_net_return",
+                    "noChargeReason": "signed_net_delta_is_positive",
+                    "finalTargetWeight": 0.0,
+                    "selectedWeight": 0.0,
+                    "residual": 0.0,
+                    "allowedResidual": round(float(self._tolerance), 1),
+                    "selectedProducts": [],
+                }
+            )
+            self._apply_no_charge_output(
+                participants,
+                output_zone=output_zone,
+                weight_delta_override=0.0,
+                diagnostics=diagnostics,
+            )
+            return diagnostics
+
+        target_weight = abs(float(global_net_delta))
         candidate_groups = self._candidate_groups(participants)
         diagnostics["candidateCount"] = len(candidate_groups)
+        diagnostics["finalTargetWeight"] = round(float(target_weight), 1)
         combination = self._find_best_combination(
             candidate_groups,
-            raw_negative_total,
+            target_weight,
             max_total_count=self._max_total_count(participants),
         )
         if combination is None:
@@ -104,48 +147,49 @@ class FreezerCloseAggregateResolver:
                 {
                     "accepted": False,
                     "reason": "no_weight_fit_for_freezer_close_aggregate",
+                    "noChargeReason": "no_candidate_combination_for_signed_net_delta",
+                    "selectedWeight": 0.0,
+                    "residual": round(float(target_weight), 1),
+                    "allowedResidual": round(float(self._tolerance), 1),
                     "selectedProducts": [],
                 }
             )
-            self._record_diagnostics(participants, diagnostics)
+            self._apply_no_charge_output(
+                participants,
+                output_zone=output_zone,
+                weight_delta_override=round(float(global_net_delta), 1),
+                diagnostics=diagnostics,
+            )
             return diagnostics
 
         selected_counts = dict(combination.counts)
         selected_weight = float(combination.total_weight)
-        matched_hints, unmatched_hints, matched_return_total = self._apply_return_hints(
-            selected_counts,
-            candidate_groups,
-            raw_negative_total,
-            selected_weight,
-            positive_hints,
-        )
-        final_target = max(0.0, raw_negative_total - matched_return_total)
-        final_weight = self._counts_weight(selected_counts, candidate_groups)
-        final_residual = abs(final_target - final_weight)
-
+        residual = abs(target_weight - selected_weight)
         diagnostics.update(
             {
-                "accepted": final_residual <= self._tolerance,
+                "accepted": residual <= self._tolerance,
                 "reason": (
                     "freezer_close_aggregate_applied"
-                    if final_residual <= self._tolerance
+                    if residual <= self._tolerance
                     else "freezer_close_aggregate_residual_exceeds_tolerance"
                 ),
-                "matchedReturnTotal": round(float(matched_return_total), 1),
-                "finalTargetWeight": round(float(final_target), 1),
-                "selectedWeight": round(float(final_weight), 1),
-                "residual": round(float(final_residual), 1),
+                "selectedWeight": round(float(selected_weight), 1),
+                "residual": round(float(residual), 1),
                 "allowedResidual": round(float(self._tolerance), 1),
                 "selectedProducts": self._selected_product_diagnostics(
                     selected_counts,
                     candidate_groups,
                 ),
-                "matchedPositiveHints": matched_hints,
-                "unmatchedPositiveHints": unmatched_hints,
             }
         )
-        if not diagnostics["accepted"]:
-            self._record_diagnostics(participants, diagnostics)
+        if residual > self._tolerance:
+            diagnostics["noChargeReason"] = "candidate_combination_residual_exceeds_tolerance"
+            self._apply_no_charge_output(
+                participants,
+                output_zone=output_zone,
+                weight_delta_override=round(float(global_net_delta), 1),
+                diagnostics=diagnostics,
+            )
             return diagnostics
 
         self._apply_output(
@@ -153,35 +197,29 @@ class FreezerCloseAggregateResolver:
             output_zone=output_zone,
             selected_counts=selected_counts,
             candidate_groups=candidate_groups,
-            final_target=final_target,
+            output_delta=global_net_delta,
             diagnostics=diagnostics,
         )
         return diagnostics
 
-    @staticmethod
-    def _negative_participants(
+    def _participants(
+        self,
         sessions: Iterable[DoorSession],
     ) -> List[_Participant]:
         participants: List[_Participant] = []
-        noise_floor = max(
-            0.0,
-            float(config.weight.freezer_weight_tolerance_grams),
-        )
+        noise_floor = self._tolerance
         for session in sessions:
             for trigger in session.triggers:
-                if trigger.is_return or float(trigger.delta_weight) >= 0:
-                    continue
+                delta = float(trigger.delta_weight)
                 has_products = any(
                     int(getattr(product, "count", 0) or 0) > 0
                     for product in trigger.products
                 )
-                has_return_hint = bool(
-                    getattr(trigger, "return_weight_hints", None)
-                )
+                has_mixed_sign = _trigger_has_mixed_sign_diagnostics(trigger)
                 if (
-                    abs(float(trigger.delta_weight)) <= noise_floor
+                    abs(delta) <= noise_floor
                     and not has_products
-                    and not has_return_hint
+                    and not has_mixed_sign
                 ):
                     continue
                 participants.append(
@@ -193,36 +231,32 @@ class FreezerCloseAggregateResolver:
                 )
         return participants
 
-    @staticmethod
-    def _is_eligible(participants: List[_Participant]) -> bool:
+    def _is_eligible(self, participants: List[_Participant]) -> bool:
         if not participants:
             return False
-        has_return_hint = any(
-            bool(getattr(item.trigger, "return_weight_hints", None))
-            for item in participants
-        )
+        if any(item.has_mixed_sign_diagnostics for item in participants):
+            return True
         zones = {item.zone for item in participants}
-        return has_return_hint or len(participants) >= 2 or len(zones) >= 2
+        if len(zones) >= 2:
+            return True
+        meaningful_count = sum(
+            1
+            for item in participants
+            if abs(item.delta_weight) > self._tolerance
+            or _trigger_has_products_or_candidates(item.trigger)
+        )
+        return meaningful_count >= 2
 
     @staticmethod
-    def _positive_hints(participants: List[_Participant]) -> List[dict[str, object]]:
-        hints: List[dict[str, object]] = []
-        for item in participants:
-            for hint in getattr(item.trigger, "return_weight_hints", []) or []:
-                if not isinstance(hint, dict):
-                    continue
-                weight = _positive_hint_weight(hint)
-                if weight <= 0:
-                    continue
-                hints.append(
-                    {
-                        "zone": item.zone,
-                        "triggerId": item.trigger.trigger_id,
-                        "weight": round(float(weight), 1),
-                        "source": str(hint.get("source") or hint.get("reason") or "return_hint"),
-                    }
-                )
-        return hints
+    def _output_zone(participants: List[_Participant]) -> int:
+        return max(
+            enumerate(participants),
+            key=lambda indexed: (
+                float(indexed[1].trigger.timestamp),
+                float(indexed[1].session.last_trigger_at),
+                int(indexed[0]),
+            ),
+        )[1].zone
 
     def _candidate_groups(
         self,
@@ -293,7 +327,7 @@ class FreezerCloseAggregateResolver:
             name=str(getattr(product, "name", product_id)),
             unit_weight=unit_weight,
             unit_price=int(getattr(product, "price", 0) or 0),
-            stock_qty=max(int(getattr(product, "count", 1) or 1), 1),
+            stock_qty=0,
             best_confidence=float(getattr(product, "confidence", 0.0) or 0.0),
         )
 
@@ -406,88 +440,6 @@ class FreezerCloseAggregateResolver:
             ),
         )[0]
 
-    def _apply_return_hints(
-        self,
-        selected_counts: Dict[int, int],
-        candidate_groups: Dict[int, _CandidateGroup],
-        raw_negative_total: float,
-        selected_weight: float,
-        positive_hints: List[dict[str, object]],
-    ) -> tuple[List[dict[str, object]], List[dict[str, object]], float]:
-        matched: List[dict[str, object]] = []
-        unmatched: List[dict[str, object]] = []
-        matched_return_total = 0.0
-        current_weight = selected_weight
-        for hint in positive_hints:
-            hint_weight = float(hint["weight"])
-            match = self._find_return_match(
-                selected_counts,
-                candidate_groups,
-                hint_weight,
-            )
-            if match is None:
-                unmatched.append({**hint, "reason": "no_selected_product_weight_match"})
-                continue
-            adjusted_target = max(0.0, raw_negative_total - matched_return_total - hint_weight)
-            keep_residual = abs(adjusted_target - current_weight)
-            new_weight = current_weight - match.total_weight
-            new_residual = abs(adjusted_target - new_weight)
-            if new_residual >= keep_residual or new_residual > self._tolerance:
-                unmatched.append({**hint, "reason": "no_residual_improvement"})
-                continue
-            for product_id, count in match.counts.items():
-                selected_counts[product_id] = selected_counts.get(product_id, 0) - count
-                if selected_counts[product_id] <= 0:
-                    selected_counts.pop(product_id, None)
-            current_weight = new_weight
-            matched_return_total += hint_weight
-            matched.append(
-                {
-                    **hint,
-                    "matchedWeight": round(float(match.total_weight), 1),
-                    "products": self._selected_product_diagnostics(
-                        match.counts,
-                        candidate_groups,
-                    ),
-                    "residualAfter": round(float(new_residual), 1),
-                }
-            )
-        return matched, unmatched, matched_return_total
-
-    def _find_return_match(
-        self,
-        selected_counts: Dict[int, int],
-        candidate_groups: Dict[int, _CandidateGroup],
-        target_weight: float,
-    ) -> Optional[_Combination]:
-        subset = {
-            product_id: candidate_groups[product_id]
-            for product_id, count in selected_counts.items()
-            if count > 0 and product_id in candidate_groups
-        }
-        if not subset:
-            return None
-        capped = {
-            product_id: _copy_group_with_stock(group, selected_counts[product_id])
-            for product_id, group in subset.items()
-        }
-        return self._find_best_combination(
-            capped,
-            target_weight,
-            max_total_count=sum(selected_counts.values()),
-        )
-
-    @staticmethod
-    def _counts_weight(
-        counts: Dict[int, int],
-        candidate_groups: Dict[int, _CandidateGroup],
-    ) -> float:
-        return sum(
-            candidate_groups[product_id].unit_weight * count
-            for product_id, count in counts.items()
-            if product_id in candidate_groups
-        )
-
     @staticmethod
     def _selected_product_diagnostics(
         counts: Dict[int, int],
@@ -521,7 +473,7 @@ class FreezerCloseAggregateResolver:
         output_zone: int,
         selected_counts: Dict[int, int],
         candidate_groups: Dict[int, _CandidateGroup],
-        final_target: float,
+        output_delta: float,
         diagnostics: dict[str, object],
     ) -> None:
         participant_sessions = {item.zone: item.session for item in participants}
@@ -530,7 +482,7 @@ class FreezerCloseAggregateResolver:
             zone_diagnostics = dict(diagnostics)
             zone_diagnostics["role"] = "output" if zone == output_zone else "rerouted"
             zone_diagnostics["weightDeltaOverride"] = (
-                round(-float(final_target), 1) if zone == output_zone else 0.0
+                round(float(output_delta), 1) if zone == output_zone else 0.0
             )
             if zone != output_zone:
                 zone_diagnostics["reroutedToZone"] = output_zone
@@ -539,6 +491,34 @@ class FreezerCloseAggregateResolver:
             session.aggregated_products = (
                 dict(output_products) if zone == output_zone else {}
             )
+
+    def _apply_no_charge_output(
+        self,
+        participants: List[_Participant],
+        *,
+        output_zone: int,
+        weight_delta_override: float,
+        diagnostics: dict[str, object],
+    ) -> None:
+        for item in participants:
+            zone_diagnostics = dict(diagnostics)
+            zone_diagnostics["role"] = (
+                "output" if item.zone == output_zone else "rerouted"
+            )
+            zone_diagnostics["weightDeltaOverride"] = (
+                round(float(weight_delta_override), 1)
+                if item.zone == output_zone
+                else 0.0
+            )
+            if item.zone != output_zone:
+                zone_diagnostics["reroutedToZone"] = output_zone
+            item.session.final_weight_validation = dict(
+                item.session.final_weight_validation or {}
+            )
+            item.session.final_weight_validation[
+                "freezerCloseAggregate"
+            ] = zone_diagnostics
+            item.session.aggregated_products = {}
 
     @staticmethod
     def _aggregated_products(
@@ -566,12 +546,12 @@ class FreezerCloseAggregateResolver:
     def _base_diagnostics(
         *,
         participants: List[_Participant],
-        raw_negative_total: float,
-        positive_hints: List[dict[str, object]],
+        global_net_delta: float,
         output_zone: int,
     ) -> dict[str, object]:
         zones = sorted({item.zone for item in participants})
         return {
+            "policy": "signed_net_delta",
             "accepted": False,
             "reason": "not_evaluated",
             "eligibilityReason": _eligibility_reason(participants),
@@ -582,71 +562,73 @@ class FreezerCloseAggregateResolver:
                     "triggerId": item.trigger.trigger_id,
                     "sessionId": item.trigger.session_id,
                     "deltaWeight": round(float(item.trigger.delta_weight), 1),
-                    "returnHintWeight": round(
-                        sum(
-                            _positive_hint_weight(hint)
-                            for hint in getattr(item.trigger, "return_weight_hints", []) or []
-                            if isinstance(hint, dict)
-                        ),
-                        1,
+                    "isReturn": bool(item.trigger.is_return),
+                    "productCount": sum(
+                        int(getattr(product, "count", 0) or 0)
+                        for product in item.trigger.products
+                    ),
+                    "candidateCount": len(
+                        getattr(item.trigger, "vision_candidates", []) or []
+                    ),
+                    "mixedSignInternalSegments": item.has_mixed_sign_diagnostics,
+                    "netDeltaWeight": _diagnostic_float(
+                        item.trigger,
+                        "net_delta_weight",
+                    ),
+                    "decisionDeltaWeight": _diagnostic_float(
+                        item.trigger,
+                        "decision_delta_weight",
                     ),
                 }
                 for item in participants
             ],
-            "rawNegativeTotal": round(float(raw_negative_total), 1),
-            "positiveHintTotal": round(
-                sum(float(hint["weight"]) for hint in positive_hints),
-                1,
-            ),
+            "globalNetDelta": round(float(global_net_delta), 1),
             "outputZone": int(output_zone),
         }
 
-    @staticmethod
-    def _record_diagnostics(
-        participants: List[_Participant],
-        diagnostics: dict[str, object],
-    ) -> None:
-        for item in participants:
-            item.session.final_weight_validation = dict(
-                item.session.final_weight_validation or {}
-            )
-            item.session.final_weight_validation["freezerCloseAggregate"] = dict(
-                diagnostics
-            )
+
+def _trigger_has_products_or_candidates(trigger: TriggerResult) -> bool:
+    if any(int(getattr(product, "count", 0) or 0) > 0 for product in trigger.products):
+        return True
+    return any(
+        isinstance(candidate, dict)
+        for candidate in getattr(trigger, "vision_candidates", []) or []
+    )
 
 
-def _positive_hint_weight(hint: dict[str, object]) -> float:
+def _trigger_has_mixed_sign_diagnostics(trigger: TriggerResult) -> bool:
+    diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+    if not isinstance(diagnostics, dict):
+        return False
+    if bool(diagnostics.get("mixed_sign_internal_segments")):
+        return True
     try:
-        return abs(float(hint.get("delta", hint.get("weight", 0.0)) or 0.0))
+        positive_count = int(diagnostics.get("compound_positive_segment_count", 0) or 0)
+        negative_count = int(diagnostics.get("compound_negative_segment_count", 0) or 0)
     except (TypeError, ValueError):
-        return 0.0
+        return False
+    return positive_count > 0 and negative_count > 0
+
+
+def _diagnostic_float(
+    trigger: TriggerResult,
+    key: str,
+) -> Optional[float]:
+    diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+    if not isinstance(diagnostics, dict) or key not in diagnostics:
+        return None
+    try:
+        return round(float(diagnostics[key]), 1)
+    except (TypeError, ValueError):
+        return None
 
 
 def _eligibility_reason(participants: List[_Participant]) -> str:
-    if any(getattr(item.trigger, "return_weight_hints", None) for item in participants):
-        return "return_weight_hints_present"
+    if any(item.has_mixed_sign_diagnostics for item in participants):
+        return "mixed_sign_internal_segments"
     zones = {item.zone for item in participants}
     if len(zones) >= 2:
         return "multiple_freezer_zones"
     if len(participants) >= 2:
-        return "multiple_freezer_negative_triggers"
+        return "multiple_freezer_triggers"
     return "not_eligible"
-
-
-def _copy_group_with_stock(
-    group: _CandidateGroup,
-    stock_qty: int,
-) -> _CandidateGroup:
-    return _CandidateGroup(
-        product_id=group.product_id,
-        product_idx=group.product_idx,
-        name=group.name,
-        unit_weight=group.unit_weight,
-        unit_price=group.unit_price,
-        stock_qty=stock_qty,
-        best_rank=group.best_rank,
-        best_confidence=group.best_confidence,
-        evidence_count=group.evidence_count,
-        zones=set(group.zones),
-        trigger_ids=set(group.trigger_ids),
-    )

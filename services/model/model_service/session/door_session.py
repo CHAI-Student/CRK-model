@@ -71,6 +71,7 @@ class TriggerResult:
     failure_reason: Optional[str] = None
     return_weight_hints: List[Dict[str, object]] = field(default_factory=list)
     vision_candidates: List[Dict[str, object]] = field(default_factory=list)
+    loadcell_diagnostics: Dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """딕셔너리 변환."""
@@ -100,6 +101,7 @@ class TriggerResult:
             "vision_candidates": [
                 dict(candidate) for candidate in self.vision_candidates
             ],
+            "loadcell_diagnostics": dict(self.loadcell_diagnostics),
         }
 
     @classmethod
@@ -138,6 +140,11 @@ class TriggerResult:
                 for candidate in data.get("vision_candidates", [])
                 if isinstance(candidate, dict)
             ],
+            loadcell_diagnostics=(
+                dict(data.get("loadcell_diagnostics", {}))
+                if isinstance(data.get("loadcell_diagnostics", {}), dict)
+                else {}
+            ),
         )
 
 

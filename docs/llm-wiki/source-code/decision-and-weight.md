@@ -595,21 +595,24 @@ Important inputs:
   the detected `products`/`totalPrice` for Edge output and record
   `finalWeightValidation.outputPolicy=products_as_detected` plus
   `unresolvedProducts` diagnostics.
-- Freezer sessions add a close-only aggregate solver after deferred return
-  reconciliation and final-weight validation. This is a basket-level policy,
-  not a new trigger-time identity source. It applies only to freezer sessions
-  with mixed-sign return hints, multiple meaningful negative freezer triggers,
-  or negative freezer triggers across zones. It builds its candidate pool from
-  participating trigger vision snapshots and trigger products with valid
-  positive weights, solves the sum of participating negative deltas, and then
-  optionally removes matched positive-return hints from the selected basket
-  only when doing so improves residual inside freezer tolerance.
+- Freezer sessions add a close-only signed-net aggregate solver after deferred
+  return reconciliation and final-weight validation. This is a basket-level
+  policy, not a new trigger-time identity source. It applies only to freezer
+  sessions with mixed-sign internal segment diagnostics, multiple meaningful
+  freezer triggers, or freezer triggers across zones. It builds its candidate
+  pool from participating trigger vision snapshots and trigger products with
+  valid positive weights, sums the participating signed `delta_weight` values
+  as `globalNetDelta`, and solves `abs(globalNetDelta)` only when the net is
+  negative. Internal positive freezer segments are diagnostics-only and are not
+  subtracted as `return_weight_hints`.
 - Accepted freezer aggregate results are attributed to the latest participating
   freezer trigger zone. Other participating freezer zones are cleared and get a
   close-time `weightDelta` override of `0.0`; the output zone receives the
-  final selected basket and a negative `weightDelta` equal to the final target.
-  This preserves public response schemas while changing CLOSE placement for
-  unstable freezer sessions.
+  final selected basket and a `weightDelta` equal to the signed global net. If
+  the signed net is near zero or no candidate combination fits a negative net,
+  participant products are cleared and the result is no-charge. This preserves
+  public response schemas while changing CLOSE placement for unstable freezer
+  sessions.
 
 ## Related Wiki Pages
 

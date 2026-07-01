@@ -312,7 +312,7 @@ class TestDoorSessionNetDeltaRecovery:
         assert diagnostics["sameZoneApplied"][0]["matchedUnits"] == 1
         store.clear_all()
 
-    def test_freezer_mixed_sign_cross_zone_return_keeps_removal_delta(
+    def test_freezer_mixed_sign_cross_zone_uses_signed_net_close_aggregate(
         self,
         monkeypatch,
         tmp_path,
@@ -351,19 +351,17 @@ class TestDoorSessionNetDeltaRecovery:
                         confidence=0.9,
                     )
                 ],
-                delta_weight=-150.0,
+                delta_weight=-80.0,
                 confidence=0.9,
                 video_paths={},
                 is_return=False,
-                return_weight_hints=[
-                    {
-                        "weight": 70.0,
-                        "delta": 70.0,
-                        "segment_index": 0,
-                        "replay_position": "before_removal",
-                        "reason": "unpaired_return_segment",
-                    }
-                ],
+                loadcell_diagnostics={
+                    "mixed_sign_internal_segments": True,
+                    "compound_positive_segment_count": 1,
+                    "compound_negative_segment_count": 1,
+                    "net_delta_weight": -80.0,
+                    "decision_delta_weight": -80.0,
+                },
             ),
         )
 
@@ -376,15 +374,17 @@ class TestDoorSessionNetDeltaRecovery:
         assert len(finalized_products) == 1
         assert finalized_products[0].product_id == 150
         assert finalized_products[0].count == 1
-        reconciliation = zone_2.final_weight_validation[
-            "deferredReturnReconciliation"
+        aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
+        assert aggregate["accepted"] is True
+        assert aggregate["policy"] == "signed_net_delta"
+        assert aggregate["globalNetDelta"] == -150.0
+        assert aggregate["selectedProducts"] == [
+            {"productId": 150, "name": "FREEZER_150G_ITEM", "count": 1}
         ]
-        assert reconciliation["accepted"] is True
-        assert reconciliation["crossZoneApplied"][0]["matchedWeight"] == 70.0
-        assert zone_2.cross_zone_returns[0].target_zone == 3
+        assert zone_2.cross_zone_returns == []
         store.clear_all()
 
-    def test_freezer_mixed_sign_unmatched_return_still_charges_removal(
+    def test_freezer_mixed_sign_no_signed_net_fit_clears_provisional_charge(
         self,
         monkeypatch,
         tmp_path,
@@ -414,19 +414,17 @@ class TestDoorSessionNetDeltaRecovery:
                         confidence=0.9,
                     )
                 ],
-                delta_weight=-150.0,
+                delta_weight=-80.0,
                 confidence=0.9,
                 video_paths={},
                 is_return=False,
-                return_weight_hints=[
-                    {
-                        "weight": 70.0,
-                        "delta": 70.0,
-                        "segment_index": 0,
-                        "replay_position": "before_removal",
-                        "reason": "unpaired_return_segment",
-                    }
-                ],
+                loadcell_diagnostics={
+                    "mixed_sign_internal_segments": True,
+                    "compound_positive_segment_count": 1,
+                    "compound_negative_segment_count": 1,
+                    "net_delta_weight": -80.0,
+                    "decision_delta_weight": -80.0,
+                },
             ),
         )
 
@@ -434,16 +432,15 @@ class TestDoorSessionNetDeltaRecovery:
 
         zone_2 = global_session.zone_sessions[2]
         finalized_products = zone_2.get_active_products()
-        assert len(finalized_products) == 1
-        assert finalized_products[0].product_id == 150
-        assert finalized_products[0].count == 1
-        assert len(zone_2.unmatched_returns) == 1
-        assert zone_2.unmatched_returns[0].delta_weight == 70.0
-        reconciliation = zone_2.final_weight_validation[
-            "deferredReturnReconciliation"
-        ]
-        assert reconciliation["reason"] == "deferred_return_unmatched"
-        assert reconciliation["unmatched"][0]["deltaWeight"] == 70.0
+        assert finalized_products == []
+        assert zone_2.unmatched_returns == []
+        aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
+        assert aggregate["accepted"] is False
+        assert aggregate["globalNetDelta"] == -80.0
+        assert aggregate["selectedProducts"] == []
+        assert aggregate["noChargeReason"] == (
+            "no_candidate_combination_for_signed_net_delta"
+        )
         store.clear_all()
 
 

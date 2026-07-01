@@ -2918,6 +2918,11 @@ class TriggerService:
                 failure_reason=failure_reason,
                 return_weight_hints=list(item.return_weight_hints),
                 vision_candidates=close_candidate_snapshot,
+                loadcell_diagnostics=(
+                    loadcell_stats.close_trigger_loadcell_diagnostics(
+                        item.delta_analysis
+                    )
+                ),
             )
             door_session = self._door_session_store.add_trigger_with_global(
                 zone=input_data.zone,
@@ -3484,6 +3489,11 @@ class TriggerService:
                 failure_reason=failure_reason,
                 return_weight_hints=return_weight_hints,
                 vision_candidates=close_candidate_snapshot,
+                loadcell_diagnostics=(
+                    loadcell_stats.close_trigger_loadcell_diagnostics(
+                        delta_analysis
+                    )
+                ),
             )
             door_session = self._door_session_store.add_trigger_with_global(
                 zone=input_data.zone,
@@ -3565,6 +3575,9 @@ class TriggerService:
                 loadcell_stats.prefer_mixed_sign_removal_delta_for_cabinet(
                     cabinet_type
                 )
+            ),
+            stable_net_delta_only=(
+                loadcell_stats.stable_net_delta_only_for_cabinet(cabinet_type)
             ),
         )
         mixed_sign_guard = dict(analysis.mixed_sign_net_masking_guard or {})

@@ -50,34 +50,35 @@ so queue wait is a real latency dimension.
   channel offsets or insufficient negative channels, and accepted channel
   targets.
 - Paired-out-free positive stable segments are exposed as
-  `return_segment_targets`. When a negative chargeable trigger also contains
-  such a positive segment, both `TriggerService` and the compatibility
-  `/trigger` route convert it into an internal `return_weight_hints` entry so
-  DoorSession aggregation can replay the return while the decision engine still
-  judges the negative `decision_delta`.
+  `return_segment_targets` for the default/non-freezer path. When a negative
+  chargeable non-freezer trigger also contains such a positive segment, both
+  `TriggerService` and the compatibility `/trigger` route convert it into an
+  internal `return_weight_hints` entry so DoorSession aggregation can replay
+  the return while the decision engine still judges the negative
+  `decision_delta`. Freezer mixed-sign negative triggers suppress these segment
+  targets and keep the positive movement as diagnostics only.
 - Positive-then-negative pairs that look like press/release movement are not
   promoted into normal purchase targets. The negative side is recorded under
   `vision_required_segment_targets`, which the decision engine may use only
   when product evidence exists in vision, stage counts, or diagnostics.
 - `decision_delta` is the movement used for removal judgment. It stays with the
-  stable start/end net delta when that is valid, but can switch to an unpaired
-  negative segment when return/removal history is merged in one trigger, or to
-  the freezer endpoint delta when the freezer-only fallback is accepted.
-- In freezer mode, mixed-sign stable histories prefer the total unpaired
-  negative removal movement before the start/end net delta. This prevents a
-  same-payload return from masking a larger freezer removal, for example
-  `+70g` followed by `-150g` becoming `decision_delta=-150g` instead of
-  `-80g`. The positive segment is still attached as `return_weight_hints` for
-  CLOSE reconciliation. At CLOSE, freezer aggregate solving treats this
-  positive segment as a matched-return hint only if it matches a product inside
-  the selected final basket and improves residual; otherwise it remains
-  unmatched pressure/artifact diagnostics and does not reduce the removal
-  target.
+  stable start/end net delta when that is valid. The default/non-freezer path
+  can still switch to an unpaired negative segment when return/removal history
+  is merged in one trigger; freezer mode now opts into
+  `stable_net_delta_only`, so mixed-sign internal positive segments do not
+  override the stable net delta. A freezer `+70g` then `-150g` payload remains
+  `decision_delta=-80g`, and the `+47.6g` then `-295.3g` field shape remains
+  about `decision_delta=-247.7g`. The freezer endpoint fallback remains the
+  narrow exception when stable plateau evidence is unavailable but endpoint
+  checks are accepted.
 - Stable-tail diagnostics include `stable_delta_source`,
   `baseline_stable_avg`, `final_stable_avg`,
   `trailing_unstable_sample_count`, `raw_simple_delta`, and
-  `raw_extreme_delta`. Mixed-sign freezer diagnostics add
-  `mixed_sign_net_masking_guard`; endpoint fallback diagnostics add
+  `raw_extreme_delta`. Freezer mixed-sign internal segments are retained as
+  compound segment diagnostics and as `TriggerResult.loadcell_diagnostics` for
+  CLOSE aggregate eligibility, but the retired freezer
+  `mixed_sign_net_masking_guard` is not accepted in the default path. Endpoint
+  fallback diagnostics add
   `decision_delta_reliable`, `endpoint_delta_weight`,
   `endpoint_fallback_applied`, and `endpoint_fallback_reason`.
   `raw_extreme_delta` is useful for identifying transient max/min swings, but
@@ -98,10 +99,11 @@ so queue wait is a real latency dimension.
 - `calculate_weight_delta()` is the shared route/service helper.
 - `api/routes/trigger.py` and `TriggerService` delegate cabinet-specific
   loadcell options to `core/loadcell_stats.py`
-  (`endpoint_fallback_enabled_for_cabinet()` and
-  `prefer_mixed_sign_removal_delta_for_cabinet()`), so compatibility `/trigger`
-  and the queued service path share one source of truth for freezer endpoint
-  fallback and mixed-sign removal-delta preference.
+  (`endpoint_fallback_enabled_for_cabinet()`,
+  `stable_net_delta_only_for_cabinet()`, and the retired
+  `prefer_mixed_sign_removal_delta_for_cabinet()`), so compatibility
+  `/trigger` and the queued service path share one source of truth for freezer
+  endpoint fallback and mixed-sign stable-net behavior.
 
 ## Trigger Inputs And Outputs
 
@@ -167,9 +169,11 @@ queued work can be skipped if a later return balances it before video starts.
   chargeable work, while trace metadata still preserves the raw net delta as
   `net_delta_weight`. Trace metadata also carries segment targets so the engine
   can run segment-first matching without changing the public trigger schema.
-- When freezer mixed-sign masking is corrected, OPS logs
-  `[OPS][LOADCELL] mixed_sign_net_masking_guard` with net delta, return total,
-  removal total, and selected decision delta.
+- The earlier freezer `[OPS][LOADCELL] mixed_sign_net_masking_guard` path is
+  retired in the default configuration. Freezer mixed-sign payloads still show
+  compound positive/negative segment diagnostics in traces and carry compact
+  `loadcell_diagnostics` into DoorSession for signed-net CLOSE aggregate
+  eligibility.
 - Chargeable negative trigger results are added to DoorSession/payment only
   after the decision engine result explains the full stable removal delta
   inside the existing branch tolerance. Partial sub-segment fallbacks return a
@@ -187,14 +191,16 @@ queued work can be skipped if a later return balances it before video starts.
 - Mixed return/removal triggers keep the public response shape unchanged. A
   trigger like `+216.7g` then `-16.5g` is judged as the `-16.5g` removal, while
   the hidden return is attached to the internal DoorSession `TriggerResult` as
-  `return_weight_hints` for CLOSE deferred reconciliation and delta accounting.
-- For freezer sessions, trigger-time `return_weight_hints` do not by
-  themselves make a final basket. If the door-open session has mixed-sign hints
-  or multiple meaningful freezer negative triggers, chargeable output can be
-  re-solved at CLOSE by the freezer aggregate resolver and assigned to the
-  latest participating freezer trigger zone. This keeps the trigger schema
-  unchanged while avoiding shared dual-top camera overlap from locking in a
-  per-zone basket too early.
+  `return_weight_hints` for CLOSE deferred reconciliation and delta accounting
+  on the default/non-freezer path.
+- For freezer sessions, internal mixed-sign positive segments no longer create
+  trigger-time `return_weight_hints`. If the door-open session has mixed-sign
+  internal segment diagnostics, two or more meaningful freezer triggers, or
+  freezer triggers across zones, chargeable output can be re-solved at CLOSE by
+  the freezer aggregate resolver from the signed sum of participating
+  `delta_weight` values and assigned to the latest participating freezer
+  trigger zone. This keeps the trigger schema unchanged while avoiding shared
+  dual-top camera overlap from locking in a per-zone basket too early.
 - Freezer CLOSE final-weight validation can now repair a no-product or
   final-weight-mismatch partial result by borrowing a later unused candidate
   snapshot from the same global door session. The repair is single-removal
@@ -204,10 +210,10 @@ queued work can be skipped if a later return balances it before video starts.
   with source zone/session/rank. It does not delay the `/trigger` response and
   does not override already complete weight-matched results.
 - Compatibility `/trigger` metadata now stays aligned with `TriggerService`:
-  traces include `return_segment_targets`, mixed return diagnostics, and
-  `mixed_sign_net_masking_guard`/`effective_count_guard` diagnostics when
-  return hints affect the removal decision or reduce a raw repeated-count
-  result.
+  traces include `return_segment_targets`, mixed return diagnostics,
+  stable-net freezer mixed-sign metadata, and `effective_count_guard`
+  diagnostics when default/non-freezer return hints affect the removal decision
+  or reduce a raw repeated-count result.
 - Async enqueue registers an in-flight trigger by session id in
   `DoorSessionStore` before returning. Pending entries distinguish chargeable
   vision work from non-chargeable/cancelled diagnostics. Worker start changes the state to

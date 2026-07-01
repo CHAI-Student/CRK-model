@@ -119,6 +119,7 @@ def _trigger_result(
     price=1200,
     return_weight_hints=None,
     trigger_id=None,
+    loadcell_diagnostics=None,
 ):
     from model_service.session.door_session import TriggerResult
 
@@ -132,6 +133,7 @@ def _trigger_result(
         video_paths={},
         is_return=False,
         return_weight_hints=list(return_weight_hints or []),
+        loadcell_diagnostics=dict(loadcell_diagnostics or {}),
         vision_candidates=[
             _candidate_snapshot(
                 product_id,
@@ -221,18 +223,16 @@ def test_freezer_close_aggregate_reroutes_mixed_sign_to_last_zone(
             result=_trigger_result(
                 product_id=150,
                 name="FREEZER_150G_ITEM",
-                delta=-150.0,
+                delta=-80.0,
                 weight=150.0,
                 timestamp=110.0,
-                return_weight_hints=[
-                    {
-                        "weight": 70.0,
-                        "delta": 70.0,
-                        "segment_index": 0,
-                        "replay_position": "before_removal",
-                        "reason": "unpaired_return_segment",
-                    }
-                ],
+                loadcell_diagnostics={
+                    "mixed_sign_internal_segments": True,
+                    "compound_positive_segment_count": 1,
+                    "compound_negative_segment_count": 1,
+                    "net_delta_weight": -80.0,
+                    "decision_delta_weight": -80.0,
+                },
             ),
         )
 
@@ -245,9 +245,9 @@ def test_freezer_close_aggregate_reroutes_mixed_sign_to_last_zone(
         ]
         aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
         assert aggregate["accepted"] is True
+        assert aggregate["policy"] == "signed_net_delta"
         assert aggregate["outputZone"] == 2
-        assert aggregate["rawNegativeTotal"] == 220.0
-        assert aggregate["matchedReturnTotal"] == 70.0
+        assert aggregate["globalNetDelta"] == -150.0
         assert aggregate["finalTargetWeight"] == 150.0
         assert aggregate["selectedProducts"] == [
             {"productId": 150, "name": "FREEZER_150G_ITEM", "count": 1}
@@ -265,10 +265,11 @@ def test_freezer_close_aggregate_reroutes_mixed_sign_to_last_zone(
         store.clear_all()
 
 
-def test_freezer_close_aggregate_keeps_removal_when_positive_hint_unmatched(
+def test_freezer_close_aggregate_clears_mixed_sign_when_net_target_has_no_fit(
     monkeypatch,
     tmp_path,
 ):
+    from model_service.api.routes.multi_zone import _handle_door_close
     from model_service.core.config import config
     from model_service.session import DoorSessionStore
 
@@ -284,31 +285,37 @@ def test_freezer_close_aggregate_keeps_removal_when_positive_hint_unmatched(
             result=_trigger_result(
                 product_id=150,
                 name="FREEZER_150G_ITEM",
-                delta=-150.0,
+                delta=-80.0,
                 weight=150.0,
                 timestamp=110.0,
-                return_weight_hints=[
-                    {
-                        "weight": 70.0,
-                        "delta": 70.0,
-                        "segment_index": 0,
-                        "replay_position": "before_removal",
-                        "reason": "unpaired_return_segment",
-                    }
-                ],
+                loadcell_diagnostics={
+                    "mixed_sign_internal_segments": True,
+                    "compound_positive_segment_count": 1,
+                    "compound_negative_segment_count": 1,
+                    "net_delta_weight": -80.0,
+                    "decision_delta_weight": -80.0,
+                },
             ),
         )
 
         global_session = store.finalize_global_session()
         zone_2 = global_session.zone_sessions[2]
-        assert [(p.product_id, p.count) for p in zone_2.get_active_products()] == [
-            (150, 1)
-        ]
+        assert zone_2.get_active_products() == []
         aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
-        assert aggregate["accepted"] is True
-        assert aggregate["matchedReturnTotal"] == 0.0
-        assert aggregate["finalTargetWeight"] == 150.0
-        assert aggregate["unmatchedPositiveHints"][0]["weight"] == 70.0
+        assert aggregate["accepted"] is False
+        assert aggregate["policy"] == "signed_net_delta"
+        assert aggregate["globalNetDelta"] == -80.0
+        assert aggregate["finalTargetWeight"] == 80.0
+        assert aggregate["selectedProducts"] == []
+        assert aggregate["noChargeReason"] == (
+            "no_candidate_combination_for_signed_net_delta"
+        )
+
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_2_response = next(zone for zone in response["zones"] if zone["zone"] == 2)
+        assert zone_2_response["products"] == []
+        assert zone_2_response["weightDelta"] == -80.0
+        assert response["decisionSummary"]["totalPrice"] == 0
     finally:
         store.clear_all()
 
@@ -364,6 +371,66 @@ def test_freezer_close_aggregate_combines_multiple_zones_to_last_trigger_zone(
         ]
         assert zone_4["weightDelta"] == -300.0
         assert response["decisionSummary"]["totalWeightDelta"] == -300.0
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_net_zero_clears_participating_products(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {100: 100.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=1,
+            result=_trigger_result(
+                product_id=100,
+                name="FREEZER_100G_ITEM",
+                delta=-100.0,
+                weight=100.0,
+                timestamp=100.0,
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="return-trigger",
+                session_id="return-session",
+                timestamp=120.0,
+                products=[],
+                delta_weight=100.0,
+                confidence=0.0,
+                video_paths={},
+                is_return=True,
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_1 = next(zone for zone in response["zones"] if zone["zone"] == 1)
+        zone_2 = next(zone for zone in response["zones"] if zone["zone"] == 2)
+        assert zone_1["products"] == []
+        assert zone_1["weightDelta"] == 0.0
+        assert zone_2["products"] == []
+        assert zone_2["weightDelta"] == 0.0
+        assert response["decisionSummary"]["totalWeightDelta"] == 0.0
+        assert response["decisionSummary"]["totalPrice"] == 0
+        aggregate = global_session.zone_sessions[2].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["accepted"] is True
+        assert aggregate["reason"] == "freezer_close_aggregate_net_zero"
+        assert aggregate["globalNetDelta"] == 0.0
     finally:
         store.clear_all()
 
@@ -960,7 +1027,8 @@ def test_freezer_close_aggregate_supersedes_deferred_candidate_repair(
     assert zone4_aggregate["accepted"] is True
     assert zone4_aggregate["role"] == "output"
     assert zone4_aggregate["outputZone"] == 4
-    assert zone4_aggregate["rawNegativeTotal"] == 300.0
+    assert zone4_aggregate["policy"] == "signed_net_delta"
+    assert zone4_aggregate["globalNetDelta"] == -300.0
     assert zone4_aggregate["finalTargetWeight"] == 300.0
     assert zone4_aggregate["selectedWeight"] == 303.0
     assert zone4_aggregate["residual"] == 3.0
@@ -1052,7 +1120,9 @@ def test_freezer_close_aggregate_solves_full_target_from_later_candidates(
     assert zone4_aggregate["accepted"] is True
     assert zone4_aggregate["role"] == "output"
     assert zone4_aggregate["outputZone"] == 4
-    assert zone4_aggregate["rawNegativeTotal"] == 448.2
+    assert zone4_aggregate["policy"] == "signed_net_delta"
+    assert zone4_aggregate["globalNetDelta"] == -448.2
+    assert zone4_aggregate["finalTargetWeight"] == 448.2
     assert zone4_aggregate["selectedWeight"] == 448.0
     assert zone4_aggregate["residual"] == 0.2
     assert zone4_aggregate["selectedProducts"] == [

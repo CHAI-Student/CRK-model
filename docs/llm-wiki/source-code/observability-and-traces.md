@@ -43,8 +43,8 @@ Important patterns include:
 - `[OPS][RESULT]`: final engine status, products, `product_count`, and total
   price.
 - `[OPS][FREEZER-CLOSE-AGGREGATE]`: freezer-only CLOSE aggregate resolver
-  outcome. It records whether aggregate solving was accepted, the eligibility
-  reason, output zone, raw negative total, matched return total, final target,
+  outcome. It records whether aggregate solving was accepted, the reason,
+  `policy=signed_net_delta`, output zone, `global_net_delta`, final target,
   selected weight, residual, and selected product counts.
 - `[OPS][CLOSE]`: close summary across zones.
 - `[OPS][CLOSE_DIAGNOSTIC]`: no-charge skipped-trigger diagnostics by zone,
@@ -114,12 +114,15 @@ start writing sample images during inference.
   valid fallback age, and fail-closed reason
 - weight diagnostics, including `trigger_relevance` for `return_loadcell_only`,
   `balanced_out`, and `cancelled_by_return` paths, plus
-  `mixed_return_segments` when a negative trigger carries internal return
-  hints for DoorSession replay, including
-  `mixed_sign_net_masking_guard` when freezer signed segments override a masked
-  net delta, `effective_count_guard` when return hints can reduce a raw
-  repeated-count result, and `same_weight_candidate_collision` when regular
-  candidate identity beats a same-weight active/rescue collision.
+  `mixed_return_segments` when a non-freezer/default negative trigger carries
+  internal return hints for DoorSession replay. In current freezer mode,
+  mixed-sign positive segments are diagnostics-only: traces still expose
+  compound positive/negative segment weights and `TriggerResult` stores compact
+  `loadcell_diagnostics`, but `mixed_sign_net_masking_guard` is no longer
+  accepted in the default freezer path. `effective_count_guard` explains when
+  return hints can reduce a raw repeated-count result, and
+  `same_weight_candidate_collision` explains when regular candidate identity
+  beats a same-weight active/rescue collision.
   Freezer decisions add `decision_branch=freezer_vision_first` with
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
   `weight_residual`, `freezer_multi_kind_weight_fit`,
@@ -161,25 +164,26 @@ rotation policy.
 - If `processing_stage=skipped_balanced` or `skip_reason=cancelled_by_return`,
   a later return balanced the queued removal before video started; this is a
   latency optimization, not a no-detection miss.
-- If a negative trigger has `compound_positive_weights_g` and
-  `return_segment_targets`, inspect `weight_diagnostics.mixed_return_segments`.
+- If a non-freezer/default negative trigger has `compound_positive_weights_g`
+  and `return_segment_targets`, inspect `weight_diagnostics.mixed_return_segments`.
   `accepted=true` means the positive segment was attached as
-  `return_weight_hints` and will be deferred to CLOSE reconciliation, while the
-  visible decision can still be based on the smaller negative
-  `decision_delta_weight`.
-- In freezer mode, `mixed_sign_net_masking_guard.accepted=true` means a
-  positive segment was masking a larger removal. Use `net_delta`,
-  `return_total`, `removal_total`, and `selected_decision_delta` to confirm the
-  service judged the removal total while preserving the return hint for CLOSE.
+  `return_weight_hints` and will be deferred to CLOSE reconciliation.
+- In freezer mode, mixed-sign internal positive segments should not produce
+  `return_weight_hints` or an accepted `mixed_sign_net_masking_guard`. Compare
+  `net_delta_weight`, `decision_delta_weight`, `compound_positive_weights_g`,
+  and `compound_negative_weights_g`; for freezer they should show the stable
+  net decision, such as `+47.6g/-295.3g` becoming about `-247.7g`, while the
+  segment weights remain diagnostic evidence for CLOSE aggregate eligibility.
 - In freezer mode, inspect
   `final_weight_validation.freezerCloseAggregate` and
-  `[OPS][FREEZER-CLOSE-AGGREGATE]` for unstable door sessions. `outputZone`
-  identifies the zone that will receive the whole final basket, `role=rerouted`
-  zones should have `weightDeltaOverride=0.0`, and the output zone should have
-  a negative override matching `finalTargetWeight`. `matchedPositiveHints`
-  means a return hint matched selected products and improved residual;
-  `unmatchedPositiveHints` means the positive movement was treated as
-  pressure/artifact diagnostics and did not reduce the removal target.
+  `[OPS][FREEZER-CLOSE-AGGREGATE]` for unstable door sessions.
+  `policy=signed_net_delta` and `globalNetDelta`/`global_net_delta` identify
+  the signed target. `outputZone` identifies the zone that will receive the
+  whole final basket, `role=rerouted` zones should have
+  `weightDeltaOverride=0.0`, and the output zone should have an override equal
+  to the signed global net. A near-zero global net clears participant products;
+  a negative net with no fitting candidate combination records a no-charge
+  reason instead of preserving a mismatched provisional basket.
 - In freezer mode, a log sequence with `[OPS][CANDIDATES] ... count_hint=1`
   followed by `[OPS][RESULT] ... product_count=2` is expected for accepted
   same-product repeat correction. For the bagel field shape

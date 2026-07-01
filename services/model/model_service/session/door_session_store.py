@@ -875,13 +875,13 @@ class DoorSessionStore:
         ) or "none"
         ops_logger.info(
             "[OPS][FREEZER-CLOSE-AGGREGATE] accepted=%s reason=%s "
-            "output_zone=%s raw_negative_total=%.1f matched_return_total=%.1f "
+            "policy=%s output_zone=%s global_net_delta=%.1f "
             "final_target=%.1f selected_weight=%.1f residual=%.1f products=%s",
             diagnostics.get("accepted", False),
             diagnostics.get("reason", "unknown"),
+            diagnostics.get("policy", "unknown"),
             diagnostics.get("outputZone", "n/a"),
-            float(diagnostics.get("rawNegativeTotal", 0.0) or 0.0),
-            float(diagnostics.get("matchedReturnTotal", 0.0) or 0.0),
+            float(diagnostics.get("globalNetDelta", 0.0) or 0.0),
             float(diagnostics.get("finalTargetWeight", 0.0) or 0.0),
             float(diagnostics.get("selectedWeight", 0.0) or 0.0),
             float(diagnostics.get("residual", 0.0) or 0.0),

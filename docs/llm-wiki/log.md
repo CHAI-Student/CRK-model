@@ -1,7 +1,28 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer signed-net close aggregate simplification
+
+- Superseded the freezer mixed-sign removal-total rule. Freezer trigger
+  analysis now keeps the confirmed stable start/end net delta when one payload
+  contains both positive and negative internal segments, so `+70g` then
+  `-150g` remains `decision_delta=-80g` and `+47.6g` then `-295.3g` remains
+  about `decision_delta=-247.7g`.
+- Retired freezer mixed-sign `return_weight_hints`. Internal positive freezer
+  segments are diagnostics-only; positive-only freezer return triggers still
+  use the existing return path.
+- Reworked `FreezerCloseAggregateResolver` to use signed global net deltas
+  across participating freezer triggers. CLOSE clears participant products when
+  the global net is near zero, solves negative net targets from handled/final
+  trigger candidates and trigger products only, and attributes accepted baskets
+  to the latest participating freezer trigger zone.
+- Updated OPS/diagnostics to report `policy=signed_net_delta`,
+  `globalNetDelta`, `finalTargetWeight`, selected products, residual, and
+  no-charge reasons instead of raw negative totals and matched positive hints.
+
 ## [2026-07-01] maintenance | freezer hybrid close aggregate resolver
 
+- Historical note: this hybrid raw-negative/positive-hint policy is superseded
+  by the later signed-net close aggregate simplification above.
 - Added a freezer-only Hybrid CLOSE aggregate resolver for unstable door-open
   sessions. Mixed-sign `return_weight_hints`, multiple meaningful negative
   freezer triggers, or negative freezer triggers spanning zones now cause CLOSE
@@ -60,6 +81,8 @@
 
 ## [2026-07-01] maintenance | freezer mixed-sign removal delta guard
 
+- Historical note: this freezer removal-total guard is superseded by the later
+  stable-net freezer mixed-sign rule above.
 - Fixed freezer mixed return/removal payloads where a positive return segment
   masked a larger removal in the start/end net delta. In freezer mode,
   unpaired negative segment total now feeds product judgment when both

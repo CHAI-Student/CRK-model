@@ -172,6 +172,57 @@ def mixed_return_hints_from_analysis(
     return hints
 
 
+def close_trigger_loadcell_diagnostics(
+    delta_analysis: LoadcellDeltaAnalysis | None,
+) -> dict[str, object]:
+    """Return compact loadcell details needed by close-time session repair."""
+    if delta_analysis is None:
+        return {}
+
+    positive_segments = [
+        segment for segment in delta_analysis.segments if int(segment.sign) > 0
+    ]
+    negative_segments = [
+        segment for segment in delta_analysis.segments if int(segment.sign) < 0
+    ]
+    chargeable_positive = [
+        segment
+        for segment in positive_segments
+        if abs(float(segment.delta)) >= float(config.trigger.min_weight_change_grams)
+    ]
+    chargeable_negative = [
+        segment
+        for segment in negative_segments
+        if abs(float(segment.delta)) >= float(config.trigger.min_weight_change_grams)
+    ]
+
+    return {
+        "net_delta_weight": round(float(delta_analysis.delta), 1),
+        "decision_delta_weight": round(float(delta_analysis.decision_delta), 1),
+        "analysis_reason": str(delta_analysis.reason),
+        "stable_delta_source": str(delta_analysis.stable_delta_source),
+        "stable_region_valid": bool(delta_analysis.stable_region_valid),
+        "compound_segment_count": len(delta_analysis.segments),
+        "compound_positive_segment_count": len(positive_segments),
+        "compound_negative_segment_count": len(negative_segments),
+        "compound_positive_weights_g": [
+            round(abs(float(segment.delta)), 1) for segment in positive_segments
+        ],
+        "compound_negative_weights_g": [
+            round(abs(float(segment.delta)), 1) for segment in negative_segments
+        ],
+        "mixed_sign_internal_segments": bool(
+            chargeable_positive and chargeable_negative
+        ),
+        "return_segment_targets": list(delta_analysis.return_segment_targets),
+        "removal_segment_targets": list(delta_analysis.removal_segment_targets),
+        "purchase_delta_candidates": list(delta_analysis.purchase_delta_candidates),
+        "mixed_sign_net_masking_guard": dict(
+            delta_analysis.mixed_sign_net_masking_guard
+        ),
+    }
+
+
 def mixed_return_segment_diagnostics(
     delta_analysis: LoadcellDeltaAnalysis | None,
     *,
@@ -856,6 +907,7 @@ def analyze_movement_history(
     stable_plateaus: Sequence[LoadcellStablePlateau],
     segments: Sequence[LoadcellDeltaSegment],
     prefer_mixed_sign_removal_delta: bool = False,
+    stable_net_delta_only: bool = False,
 ) -> dict[str, object]:
     """Summarize purchase-like movements from stable loadcell history."""
 
@@ -1002,13 +1054,22 @@ def analyze_movement_history(
         if chargeable_positive_indices
         else 0.0
     )
+    has_mixed_chargeable_segments = bool(
+        chargeable_negative_indices and chargeable_positive_indices
+    )
     prefer_unpaired_negative_total = bool(
         prefer_mixed_sign_removal_delta
-        and chargeable_negative_indices
-        and chargeable_positive_indices
+        and has_mixed_chargeable_segments
+    )
+    suppress_mixed_segment_targets = bool(
+        stable_net_delta_only and stable_region_valid and has_mixed_chargeable_segments
     )
 
-    if prefer_unpaired_negative_total:
+    if suppress_mixed_segment_targets:
+        removal_segment_targets = []
+        return_segment_targets = []
+        vision_required_segment_targets = []
+    elif prefer_unpaired_negative_total:
         add_candidate(
             _candidate_dict(
                 source="unpaired_negative_total",
@@ -1030,7 +1091,7 @@ def analyze_movement_history(
             )
         )
 
-    if unpaired_negative_indices:
+    if unpaired_negative_indices and not suppress_mixed_segment_targets:
         total_unpaired = total_unpaired_negative
         if not prefer_unpaired_negative_total:
             add_candidate(
@@ -1068,11 +1129,14 @@ def analyze_movement_history(
         and not unpaired_negative_indices
         and abs(net_delta) < min_delta
     )
-    decision_delta = (
-        -float(candidates[0]["weight"])
-        if candidates
-        else float(net_delta)
-    )
+    if suppress_mixed_segment_targets:
+        decision_delta = float(net_delta)
+    else:
+        decision_delta = (
+            -float(candidates[0]["weight"])
+            if candidates
+            else float(net_delta)
+        )
     mixed_sign_guard: dict[str, object] = {}
     if prefer_unpaired_negative_total:
         selected = candidates[0] if candidates else {}
@@ -1104,6 +1168,7 @@ def _apply_movement_history(
     net_delta: float,
     stable_region_valid: bool,
     prefer_mixed_sign_removal_delta: bool = False,
+    stable_net_delta_only: bool = False,
 ) -> None:
     movement_history = analyze_movement_history(
         net_delta=net_delta,
@@ -1111,6 +1176,7 @@ def _apply_movement_history(
         stable_plateaus=analysis.stable_plateaus,
         segments=analysis.segments,
         prefer_mixed_sign_removal_delta=prefer_mixed_sign_removal_delta,
+        stable_net_delta_only=stable_net_delta_only,
     )
     analysis.purchase_delta_candidates = list(
         movement_history["purchase_delta_candidates"]
@@ -1246,6 +1312,10 @@ def endpoint_fallback_enabled_for_cabinet(cabinet_type: str | None = None) -> bo
 def prefer_mixed_sign_removal_delta_for_cabinet(
     cabinet_type: str | None = None,
 ) -> bool:
+    return False
+
+
+def stable_net_delta_only_for_cabinet(cabinet_type: str | None = None) -> bool:
     return resolved_cabinet_type(cabinet_type) == "freezer"
 
 
@@ -1255,6 +1325,7 @@ def analyze_weight_delta(
     stability_threshold: float | None = None,
     endpoint_fallback_enabled: bool = False,
     prefer_mixed_sign_removal_delta: bool = False,
+    stable_net_delta_only: bool = False,
 ) -> LoadcellDeltaAnalysis:
     """Analyze trigger-level loadcell movement with stable-window diagnostics."""
 
@@ -1357,6 +1428,7 @@ def analyze_weight_delta(
         net_delta=analysis.delta,
         stable_region_valid=True,
         prefer_mixed_sign_removal_delta=prefer_mixed_sign_removal_delta,
+        stable_net_delta_only=stable_net_delta_only,
     )
     _apply_endpoint_fallback_if_eligible(
         analysis,

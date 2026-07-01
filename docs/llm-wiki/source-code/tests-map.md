@@ -45,7 +45,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   compatibility `/trigger` return-hint parity, pressure-like vision-required
   targets, pressure-like pair suppression, simultaneous physical-channel
   removal target extraction, rapid same-zone trace context, freezer mixed-sign
-  net masking guard, and freezer endpoint fallback trace metadata.
+  stable-net preservation with diagnostics-only internal positive segments, and
+  freezer endpoint fallback trace metadata.
 - [test_scenario_matrix_contract.py](../../../services/model/tests/test_scenario_matrix_contract.py):
   Excel-derived scenario fixture counts, all 924 expanded model-contract
   basket judgments, stride-2 latency evidence shape, and explicit 0g payload
@@ -164,9 +165,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   aggregation, returns, net-delta recovery, batch returns, chronological
   trigger replay, relaxed same-zone single return tolerance, mixed
   return/removal hint replay, return-hint count reduction, close-time
-  unresolved final-weight mismatch exclusion, freezer mixed-sign
-  return/removal close reconciliation, freezer aggregate matched/unmatched
-  positive-hint behavior, and complex scenarios.
+  unresolved final-weight mismatch exclusion, freezer signed-net mixed-sign
+  close aggregation, freezer no-fit no-charge clearing, and complex scenarios.
 - [test_cross_zone_return.py](../../../services/model/tests/test_cross_zone_return.py):
   cross-zone return repair, combination recovery scenarios, effective
   net-delta order, and edge cases.
@@ -179,9 +179,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   for fast close finalization. Close final-weight validation also covers
   repeated-candidate correction followed by matched-only unresolved mismatch
   exclusion when no bounded correction can explain the net removal. Freezer
-  coverage includes hybrid CLOSE aggregate rerouting to the latest trigger
-  zone, whole-basket solving across zones, matched return-hint reduction,
-  unmatched positive-hint diagnostics, simple single-trigger per-zone
+  coverage includes signed-net freezer CLOSE aggregate rerouting to the latest
+  trigger zone, whole-basket solving across zones, global-net-zero no-charge
+  clearing, no-fit no-charge clearing, simple single-trigger per-zone
   preservation, refrigerated non-application, and the superseded deferred
   candidate-repair cases under aggregate output.
 

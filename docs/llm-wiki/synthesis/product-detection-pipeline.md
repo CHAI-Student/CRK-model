@@ -279,14 +279,17 @@ vision-supported product identity.
   remain. This does not change individual `/trigger` responses. Return-bearing
   sessions are reconciled first through deferred returns; unresolved unmatched
   or cross-zone records can still block repeat correction.
-- Freezer CLOSE can then run the Hybrid CLOSE aggregate resolver for unstable
-  freezer sessions with mixed-sign hints or multiple meaningful negative
-  freezer triggers/zones. It solves the whole participating removal target from
-  vision-supported candidate snapshots, applies positive hints only when they
-  match selected products and improve residual, and sends the final basket on
-  the latest participating trigger zone. This changes only CLOSE placement and
-  `weightDelta` values in the existing zone array; trigger responses and public
-  schemas stay unchanged.
+- Freezer CLOSE can then run the signed-net aggregate resolver for unstable
+  freezer sessions with mixed-sign internal segment diagnostics, multiple
+  meaningful freezer triggers, or freezer triggers across zones. It sums the
+  participating signed `delta_weight` values, clears all participant products
+  when that global net is near zero, and solves a negative net target from
+  vision-supported candidate snapshots and trigger products only. Internal
+  positive freezer segments are not subtracted as return hints. Accepted
+  baskets are sent on the latest participating trigger zone; no-fit negative
+  nets clear provisional products and record no-charge diagnostics. This
+  changes only CLOSE placement and `weightDelta` values in the existing zone
+  array; trigger responses and public schemas stay unchanged.
 - CLOSE final-weight validation is identity-stable for clean vision-supported
   baskets. If every current product id is backed by strong regular vision
   evidence, a different repeated candidate cannot replace the basket only

@@ -135,7 +135,7 @@ def test_history_can_find_removal_even_when_net_delta_is_positive():
     ]
 
 
-def test_freezer_mixed_sign_prefers_removal_segment_over_masked_net_delta():
+def test_freezer_mixed_sign_keeps_stable_net_delta_as_decision_delta():
     service = TriggerService(
         video_processor=None,
         engine=None,
@@ -154,21 +154,47 @@ def test_freezer_mixed_sign_prefers_removal_segment_over_masked_net_delta():
     assert default_analysis.delta == -80.0
     assert default_analysis.decision_delta == -80.0
     assert freezer_analysis.delta == -80.0
-    assert freezer_analysis.decision_delta == -150.0
+    assert freezer_analysis.decision_delta == -80.0
     assert freezer_analysis.purchase_delta_candidates[0]["source"] == (
-        "unpaired_negative_total"
+        "net_stable_delta"
     )
-    assert [target["weight"] for target in freezer_analysis.return_segment_targets] == [
-        70.0
-    ]
-    assert [target["weight"] for target in freezer_analysis.removal_segment_targets] == [
-        150.0
-    ]
-    assert metadata["decision_delta_weight"] == -150.0
-    assert metadata["mixed_sign_net_masking_guard"]["accepted"] is True
-    assert metadata["mixed_sign_net_masking_guard"]["net_delta"] == -80.0
-    assert metadata["mixed_sign_net_masking_guard"]["return_total"] == 70.0
-    assert metadata["mixed_sign_net_masking_guard"]["removal_total"] == 150.0
+    assert freezer_analysis.return_segment_targets == []
+    assert freezer_analysis.removal_segment_targets == []
+    assert metadata["decision_delta_weight"] == -80.0
+    assert metadata["mixed_sign_net_masking_guard"] == {}
+    assert metadata["compound_positive_weights_g"] == [70.0]
+    assert metadata["compound_negative_weights_g"] == [150.0]
+    assert service._mixed_return_hints_from_analysis(
+        freezer_analysis,
+        decision_delta=freezer_analysis.decision_delta,
+    ) == []
+
+
+def test_freezer_mixed_sign_real_log_shape_keeps_stable_net_delta():
+    service = TriggerService(
+        video_processor=None,
+        engine=None,
+        session_store=SessionStore(),
+    )
+    loadcells = (
+        _single_channel_plateau(0, 893.0)
+        + _single_channel_plateau(5, 940.6)
+        + _single_channel_plateau(10, 645.3)
+    )
+
+    freezer_analysis = service._analyze_weight_delta(loadcells, cabinet_type="freezer")
+    metadata = service._loadcell_trace_metadata(loadcells, freezer_analysis, zone=2)
+
+    assert round(freezer_analysis.delta, 1) == -247.7
+    assert round(freezer_analysis.decision_delta, 1) == -247.7
+    assert freezer_analysis.purchase_delta_candidates[0]["source"] == (
+        "net_stable_delta"
+    )
+    assert freezer_analysis.return_segment_targets == []
+    assert freezer_analysis.removal_segment_targets == []
+    assert metadata["compound_positive_weights_g"] == [47.6]
+    assert metadata["compound_negative_weights_g"] == [295.3]
+    assert metadata["mixed_sign_net_masking_guard"] == {}
 
 
 def test_history_exposes_return_segment_before_followup_removal():

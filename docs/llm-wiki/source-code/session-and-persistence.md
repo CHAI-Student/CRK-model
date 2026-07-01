@@ -34,8 +34,10 @@ while the door is open.
 
 - `TriggerResult` represents one `/trigger` result inside a door session and
   can carry `failure_reason` such as `missing_active_products`. It can also
-  carry internal `return_weight_hints` for mixed return/removal loadcell
-  triggers without changing the HTTP response schema.
+  carry internal `return_weight_hints` for default/non-freezer mixed
+  return/removal loadcell triggers and compact `loadcell_diagnostics` for
+  freezer signed-net CLOSE aggregate eligibility, without changing the HTTP
+  response schema.
 - `TriggerResult.vision_candidates` stores a compact close-correction snapshot
   of ranked candidates joined with active product weight, price, stock, and
   top/side evidence. Old YAML without this field still restores with an empty
@@ -82,7 +84,9 @@ while the door is open.
   of partially hiding raw weight.
 - Effective zone delta is `raw trigger delta + mixed return hints - outgoing
   cross-zone return weight + incoming cross-zone return weight`; raw trigger
-  deltas and return hints remain in the session for diagnostics.
+  deltas and return hints remain in the session for diagnostics. Freezer
+  signed-net aggregate output can override this basket-facing value at CLOSE
+  through `final_weight_validation.freezerCloseAggregate.weightDeltaOverride`.
 - Remaining `unmatched_returns` are subtracted from the basket-facing effective
   delta because they did not change the basket. This prevents an unmatched
   positive segment inside a removal trigger from leaving a phantom positive
@@ -117,36 +121,38 @@ while the door is open.
   are rejected with `count_exceeds_close_repeat_cap`, which prevents final
   corrections such as HomeRunBall `64g x33` while preserving supported cases
   such as Sky Barley `x3`.
-- Freezer has a hybrid CLOSE aggregate resolver for unstable sessions. It runs
-  only when `MODEL__MACHINE__CABINET_TYPE=freezer` and only when there are
-  mixed-sign `return_weight_hints`, two or more meaningful negative freezer
-  triggers, or negative freezer triggers spanning multiple zones. A simple
-  single stable negative freezer trigger without mixed/return hints stays on
-  the existing per-zone path.
+- Freezer has a signed-net CLOSE aggregate resolver for unstable sessions. It
+  runs only when `MODEL__MACHINE__CABINET_TYPE=freezer` and only when there are
+  mixed-sign internal segment diagnostics, two or more meaningful freezer
+  triggers, or freezer triggers spanning multiple zones. A simple single stable
+  negative freezer trigger without mixed-sign diagnostics stays on the existing
+  per-zone path.
 - `FreezerCloseAggregateResolver` collects participating trigger candidate
-  snapshots and trigger products, sums participating negative deltas as the raw
-  removal target, and solves one vision-supported basket against that target.
-  It does not create unseen active-product-only identities; products without
-  usable positive weight are excluded from aggregate count correction and remain
-  diagnostic-only. Empty no-product negative triggers at or below freezer
-  tolerance do not force aggregate eligibility.
-- Positive return hints are "return if matched". The resolver first solves the
-  raw removal target, then applies a positive hint only when a subset of the
-  selected basket matches that positive weight and improves residual inside
-  freezer tolerance. Unmatched positive hints stay as
-  `unmatchedPositiveHints`, treating the movement as pressure/artifact
-  diagnostics instead of blindly subtracting it from the target.
+  snapshots and trigger products, sums participating signed `delta_weight`
+  values as `globalNetDelta`, and solves one vision-supported basket against
+  `abs(globalNetDelta)` only when that net is negative. It does not create
+  unseen active-product-only identities; products without usable positive
+  weight are excluded from aggregate count correction and remain
+  diagnostic-only. Low-delta candidate-only freezer triggers at or below
+  freezer tolerance do not force aggregate eligibility.
+- If `abs(globalNetDelta)` is within freezer tolerance, aggregate CLOSE clears
+  all participant products and returns `weightDeltaOverride=0.0` for every
+  participant zone. If `globalNetDelta` is positive, the aggregate output is
+  also no-charge. If `globalNetDelta` is negative but no handled/final
+  candidate combination fits the target, provisional participant products are
+  cleared and diagnostics record a no-charge reason instead of preserving a
+  mismatched basket.
 - Accepted freezer aggregate output is attributed to the latest participating
   trigger zone, with insertion order as the tie-breaker for same-tick
-  timestamps. The output zone receives the full selected basket and a negative
-  close-time `weightDeltaOverride` equal to the final target; other
+  timestamps. The output zone receives the full selected basket and a
+  close-time `weightDeltaOverride` equal to the signed `globalNetDelta`; other
   participating freezer zones are emptied and receive `weightDeltaOverride=0.0`.
   Public response schemas stay unchanged: existing zone `products` and
   `weightDelta` fields are redistributed at CLOSE.
-- `final_weight_validation.freezerCloseAggregate` records eligibility reason,
-  participating zones/triggers, raw negative total, positive hint total,
-  matched return total, final target, output zone, selected products, residual,
-  unmatched positive hints, role, and weight delta override.
+- `final_weight_validation.freezerCloseAggregate` records
+  `policy=signed_net_delta`, eligibility reason, participating zones/triggers,
+  `globalNetDelta`, final target, output zone, selected products, residual,
+  no-charge reason when applicable, role, and weight delta override.
 
 ## ActiveProductStore
 
