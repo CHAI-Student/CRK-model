@@ -110,7 +110,14 @@ shape without rereading every long historical document.
   floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
   `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70`; hand tracking uses the
   separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` with hand class id
-  `0`.
+  `0`, but freezer `dual_top_proxy` only includes hand class `0` for the
+  physical `top_middle` stream. The physical `top_side` stream remains
+  product-only for inference and cannot drive hand-path filtering.
+- Freezer dual-top voting now biases physical `top_middle` over `top_side`:
+  `MODEL__VISION__TOP_WEIGHT=0.60`,
+  `MODEL__VISION__SIDE_WEIGHT=0.40`,
+  `MODEL__VISION__TOP_ONLY_WEIGHT=0.60`, and
+  `MODEL__VISION__SIDE_ONLY_WEIGHT=0.40`.
 - Top-camera ROI now uses the lower region for both removals and returns:
   non-zero deltas keep `center_y >= 240`, while zero or missing delta skips
   the top ROI.
@@ -137,9 +144,9 @@ shape without rereading every long historical document.
   counts. Trace diagnostics record path displacement, max movement, center
   span, trajectory pass, static shelf likelihood, upper-ROI hand validity,
   hand proximity counts/ratios, and hand-path pass/block state. Top-only
-  static shelf candidates are softly demoted, and valid hand-path blocks can
-  hard-reject a candidate only when at least one hand-near alternative remains;
-  no-near/all-blocked hand-path cases still fail open.
+  static shelf candidates are softly demoted, and valid `top_middle` hand-path
+  blocks can hard-reject a candidate only when at least one hand-near
+  alternative remains; no-near/all-blocked hand-path cases still fail open.
 - Freezer same-tier single selection now puts weight residual ahead of raw
   exit-path vote volume. Exit-path votes still gate candidates and break
   residual ties, but a high-vote top-only candidate no longer beats a
@@ -173,6 +180,11 @@ shape without rereading every long historical document.
 - Simultaneous same-zone removals can use physical loadcell channel deltas as
   evidence-required segment targets. A channel-supported split such as
   Tteokbokki + Welchs is judged before a same-weight aggregate rescue product.
+- Freezer mixed-sign stable payloads prefer the unpaired negative removal
+  total over the masked start/end net delta. A same-payload return/removal such
+  as `+70g` then `-150g` is judged as the `150g` removal, while the `70g`
+  positive segment remains a `return_weight_hints` entry for CLOSE same-zone or
+  cross-zone reconciliation.
 - Chargeable negative deltas use matched-only finalization. After regular
   matching fails, forced fallback can still return a low-confidence `PARTIAL`
   from active product weights, but only when the product weight sum explains

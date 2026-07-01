@@ -80,7 +80,9 @@ selected frames, accumulates per-camera evidence, and returns ranked
   product candidate is `motion_passed=false`, those candidates remain filtered
   instead of being reintroduced by a fail-open fallback.
 - Hand-path filtering uses `HandPathTracker` and hand trajectory/product bbox
-  intersection.
+  intersection. In `dual_top_proxy`, only the physical `top_middle` stream
+  receives hand class `0` and updates this tracker; physical `top_side` remains
+  product-only so weak side hand detections cannot filter candidates.
 - Top/Side preprocessing defaults to left 480x480 crop from 640x480 camera
   frames. `letterbox` remains available for explicit experiments, but the
   operating templates now align ROI coordinates to the 480x480 TensorRT input.
@@ -110,7 +112,8 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - Hand tracking has a separate floor:
   `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40`. Hand detections below this
   value are removed before `HandPathTracker` sees them; hand class id remains
-  `MODEL__VISION__HAND_CLASS_ID=0`.
+  `MODEL__VISION__HAND_CLASS_ID=0`. This class is included in the top-middle
+  inference allowlist only.
 - `MODEL__MACHINE__CABINET_TYPE=freezer` alone is not enough to enable freezer
   strict candidate narrowing. Dual-top freezer deployments must also set
   `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`; otherwise the freezer handled
@@ -149,12 +152,13 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `trajectoryExitPathPassed`, `staticShelfLikely`, `handPathValid`,
   `handPathValidUpperRoi`, `handInteractionPassed`, `handNearFrameCount`,
   `handNearVoteRatio`, `minHandDistancePx`, `handPathPassed`, and
-  `handPathBlocked`. In freezer dual-top, hand evidence is only tracked inside
-  the active upper ROI, so lower-shelf detections misclassified as hands do not
-  create hand support. Top-only static candidates are demoted when they have
-  no trajectory/hand support. A valid hand-path block removes a top-only
-  candidate only when at least one hand-near alternative remains, preserving
-  fail-open behavior when hand evidence would remove everything.
+  `handPathBlocked`. In freezer dual-top, hand evidence is only tracked from
+  physical `top_middle` inside the active upper ROI, so lower-shelf detections
+  or weak `top_side` hand detections do not create hand support. Top-only
+  static candidates are demoted when they have no trajectory/hand support. A
+  valid top-middle hand-path block removes a top-only candidate only when at
+  least one hand-near alternative remains, preserving fail-open behavior when
+  hand evidence would remove everything.
 - Freezer trigger traces now expose `camera_layout`, raw candidate count,
   handled candidate count, freezer filter reason, and the key freezer vote,
   motion, ROI, exit-path, and multi-candidate thresholds. OPS also writes a
@@ -180,7 +184,9 @@ selected frames, accumulates per-camera evidence, and returns ranked
   rescue.
 - `VotingEnsemble` combines Top and Side votes using configured weights,
   top-only/side-only weights, common-class bonus, min vote ratio, and min vote
-  count.
+  count. The freezer dual-top template now biases physical `top_middle` over
+  `top_side` with `top=0.60`, `side=0.40`, `top_only=0.60`, and
+  `side_only=0.40`.
 - Trigger conversion preserves frame-level `VoteResult.vote_count` as
   `EnsembleResult.raw_vote_count` for downstream repeat-count gates. The
   converted `EnsembleResult.vote_count` continues to mean Top/Side consensus

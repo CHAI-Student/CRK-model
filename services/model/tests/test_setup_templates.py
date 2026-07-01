@@ -52,6 +52,10 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.vision.hand_confidence_threshold == 0.40
     assert settings.vision.top_confidence_threshold == 0.70
     assert settings.vision.side_confidence_threshold == 0.70
+    assert settings.vision.top_weight == 0.60
+    assert settings.vision.side_weight == 0.40
+    assert settings.vision.top_only_weight == 0.60
+    assert settings.vision.side_only_weight == 0.40
     assert settings.vision.freezer_min_vote_ratio == 0.08
     assert settings.vision.freezer_min_vote_count == 3
     assert settings.vision.freezer_motion_min_displacement_px == 12.0

@@ -1,5 +1,33 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer top-middle hand filtering and vote bias
+
+- Limited freezer `dual_top_proxy` hand-path filtering to the physical
+  `top_middle` stream. `videos.side` still maps to physical `top_side` and
+  uses the Top processing profile for product detections, but its inference
+  allowlist is product-only and its hand detections cannot update
+  `HandPathTracker` or filter candidates.
+- Rebalanced freezer dual-top voting toward `top_middle`:
+  `MODEL__VISION__TOP_WEIGHT=0.60`,
+  `MODEL__VISION__SIDE_WEIGHT=0.40`,
+  `MODEL__VISION__TOP_ONLY_WEIGHT=0.60`, and
+  `MODEL__VISION__SIDE_ONLY_WEIGHT=0.40`.
+- Added regressions for top-side hand detections failing open without filtering
+  candidates, top-middle hand detections still filtering candidates, per-camera
+  inference allowlists, and top-biased default ensemble ranking.
+
+## [2026-07-01] maintenance | freezer mixed-sign removal delta guard
+
+- Fixed freezer mixed return/removal payloads where a positive return segment
+  masked a larger removal in the start/end net delta. In freezer mode,
+  unpaired negative segment total now feeds product judgment when both
+  positive and negative unpaired stable segments exist, so `+70g` then `-150g`
+  is judged as a `150g` removal instead of the masked `80g` net.
+- Kept the positive segment as `return_weight_hints` for CLOSE same-zone or
+  cross-zone reconciliation, preserving the public trigger schema.
+- Added `mixed_sign_net_masking_guard` trace diagnostics and an OPS loadcell
+  line with net, return total, removal total, and selected decision delta.
+
 ## [2026-07-01] maintenance | freezer single-candidate bagel repeat gate
 
 - Fixed the remaining bagel `x2` field miss where `BAG_NULLDAM_BAGEL_140G`

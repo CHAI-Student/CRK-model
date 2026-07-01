@@ -247,7 +247,7 @@ class VisionModel(BaseModel):
         description="Top camera weight in ensemble",
     )
     side_weight: float = Field(
-        default=0.65,
+        default=0.40,
         description="Side camera weight in ensemble",
     )
     common_class_bonus: float = Field(
@@ -255,11 +255,11 @@ class VisionModel(BaseModel):
         description="Bonus for common classes between cameras",
     )
     top_only_weight: float = Field(
-        default=0.55,
+        default=0.60,
         description="Top camera only weight (단방향 감지 시)",
     )
     side_only_weight: float = Field(
-        default=0.60,
+        default=0.40,
         description="Side camera only weight (단방향 감지 시)",
     )
 

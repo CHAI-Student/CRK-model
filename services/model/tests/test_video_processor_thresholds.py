@@ -1123,6 +1123,165 @@ def test_hand_path_tracker_upper_roi_keeps_hand_near_product() -> None:
     assert tracker.filter_products_by_path([52, 53]) == [52]
 
 
+def test_video_processor_freezer_ignores_top_side_hands_for_hand_path_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+
+    calls: list[tuple[str | None, list[int] | None]] = []
+
+    class FakeExtractor:
+        last_diagnostics = None
+
+        def __init__(self, camera_type: str) -> None:
+            self.camera_type = camera_type
+            self.total_frames = 3
+
+        def __iter__(self) -> Iterator[tuple[str, int]]:
+            return iter((self.camera_type, index) for index in range(3))
+
+    class FakeYolo:
+        last_preprocess: dict[str, object] = {}
+
+        def detect(
+            self,
+            frame: tuple[str, int],
+            allowed_class_ids: list[int] | None = None,
+            camera_type: str | None = None,
+        ) -> list[YOLODetection]:
+            calls.append((camera_type, allowed_class_ids))
+            camera, index = frame
+            if camera == "top":
+                return [
+                    YOLODetection(
+                        xyxy=(260.0, 90.0, 300.0, 130.0),
+                        cls=53,
+                        conf=0.92,
+                        name="TOP_MIDDLE_PRODUCT",
+                    )
+                ]
+
+            hand_x = 30.0 + index * 40.0
+            return [
+                YOLODetection(
+                    xyxy=(hand_x, 40.0, hand_x + 30.0, 70.0),
+                    cls=0,
+                    conf=0.80,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(hand_x + 4.0, 44.0, hand_x + 44.0, 84.0),
+                    cls=52,
+                    conf=0.91,
+                    name="TOP_SIDE_PRODUCT",
+                ),
+            ]
+
+    def create_fake_extractor(*_args: object, **kwargs: object) -> FakeExtractor:
+        return FakeExtractor(str(kwargs.get("camera_type", "top")))
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 1)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_roi_vertical_region", "upper")
+    monkeypatch.setattr(config.vision, "freezer_roi_y_split", 240.0)
+    monkeypatch.setattr(config.vision, "hand_class_id", 0)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        create_fake_extractor,
+    )
+
+    processor = VideoProcessor(yolo=FakeYolo(), min_vote_count=1)
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=-50.0,
+    )
+
+    assert any(camera == "top" and allowed == [52, 53, 0] for camera, allowed in calls)
+    assert any(camera == "side" and allowed == [52, 53] for camera, allowed in calls)
+    assert {candidate.class_id for candidate in result.vote_results} == {52, 53}
+    assert result.stats.hand_path_filtered_classes == 0
+
+
+def test_video_processor_freezer_top_middle_hands_still_filter_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor
+
+    class FakeExtractor:
+        total_frames = 3
+        last_diagnostics = None
+
+        def __iter__(self) -> Iterator[int]:
+            return iter(range(3))
+
+    class FakeYolo:
+        last_preprocess: dict[str, object] = {}
+
+        def detect(
+            self,
+            frame: int,
+            allowed_class_ids: list[int] | None = None,
+            camera_type: str | None = None,
+        ) -> list[YOLODetection]:
+            hand_x = 30.0 + int(frame) * 40.0
+            return [
+                YOLODetection(
+                    xyxy=(hand_x, 40.0, hand_x + 30.0, 70.0),
+                    cls=0,
+                    conf=0.80,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(hand_x + 4.0, 44.0, hand_x + 44.0, 84.0),
+                    cls=52,
+                    conf=0.91,
+                    name="HAND_NEAR_PRODUCT",
+                ),
+                YOLODetection(
+                    xyxy=(300.0, 40.0, 340.0, 80.0),
+                    cls=53,
+                    conf=0.93,
+                    name="HAND_FAR_PRODUCT",
+                ),
+            ]
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 1)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.0)
+    monkeypatch.setattr(config.vision, "freezer_roi_vertical_region", "upper")
+    monkeypatch.setattr(config.vision, "freezer_roi_y_split", 240.0)
+    monkeypatch.setattr(config.vision, "hand_class_id", 0)
+    monkeypatch.setattr(
+        video_processor_module,
+        "create_frame_extractor",
+        lambda *args, **kwargs: FakeExtractor(),
+    )
+
+    processor = VideoProcessor(yolo=FakeYolo(), min_vote_count=1)
+
+    result = processor.process_videos(
+        top_path="/tmp/top.avi",
+        allowed_class_ids=[52, 53],
+        delta_weight=-50.0,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [52]
+    assert result.stats.hand_path_filtered_classes == 1
+
+
 def test_video_processor_records_same_frame_instance_count_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

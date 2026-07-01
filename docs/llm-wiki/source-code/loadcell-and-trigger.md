@@ -63,10 +63,17 @@ so queue wait is a real latency dimension.
   stable start/end net delta when that is valid, but can switch to an unpaired
   negative segment when return/removal history is merged in one trigger, or to
   the freezer endpoint delta when the freezer-only fallback is accepted.
+- In freezer mode, mixed-sign stable histories prefer the total unpaired
+  negative removal movement before the start/end net delta. This prevents a
+  same-payload return from masking a larger freezer removal, for example
+  `+70g` followed by `-150g` becoming `decision_delta=-150g` instead of
+  `-80g`. The positive segment is still attached as `return_weight_hints` for
+  CLOSE reconciliation.
 - Stable-tail diagnostics include `stable_delta_source`,
   `baseline_stable_avg`, `final_stable_avg`,
   `trailing_unstable_sample_count`, `raw_simple_delta`, and
-  `raw_extreme_delta`. Endpoint fallback diagnostics add
+  `raw_extreme_delta`. Mixed-sign freezer diagnostics add
+  `mixed_sign_net_masking_guard`; endpoint fallback diagnostics add
   `decision_delta_reliable`, `endpoint_delta_weight`,
   `endpoint_fallback_applied`, and `endpoint_fallback_reason`.
   `raw_extreme_delta` is useful for identifying transient max/min swings, but
@@ -153,6 +160,9 @@ queued work can be skipped if a later return balances it before video starts.
   chargeable work, while trace metadata still preserves the raw net delta as
   `net_delta_weight`. Trace metadata also carries segment targets so the engine
   can run segment-first matching without changing the public trigger schema.
+- When freezer mixed-sign masking is corrected, OPS logs
+  `[OPS][LOADCELL] mixed_sign_net_masking_guard` with net delta, return total,
+  removal total, and selected decision delta.
 - Chargeable negative trigger results are added to DoorSession/payment only
   after the decision engine result explains the full stable removal delta
   inside the existing branch tolerance. Partial sub-segment fallbacks return a
@@ -171,8 +181,9 @@ queued work can be skipped if a later return balances it before video starts.
   does not override already complete weight-matched results.
 - Compatibility `/trigger` metadata now stays aligned with `TriggerService`:
   traces include `return_segment_targets`, mixed return diagnostics, and
-  `effective_count_guard` diagnostics when return hints can reduce a raw
-  repeated-count result.
+  `mixed_sign_net_masking_guard`/`effective_count_guard` diagnostics when
+  return hints affect the removal decision or reduce a raw repeated-count
+  result.
 - Async enqueue registers an in-flight trigger by session id in
   `DoorSessionStore` before returning. Pending entries distinguish chargeable
   vision work from non-chargeable/cancelled diagnostics. Worker start changes the state to

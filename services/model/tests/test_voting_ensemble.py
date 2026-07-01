@@ -1,7 +1,7 @@
 import pytest
 
 
-def test_default_ensemble_weights_bias_side_for_consensus():
+def test_default_ensemble_weights_bias_top_middle_for_consensus():
     from model_service.video.voting_ensemble import VotingEnsemble
 
     top = VotingEnsemble()
@@ -13,12 +13,12 @@ def test_default_ensemble_weights_bias_side_for_consensus():
 
     results = VotingEnsemble.combine(top, side)
 
-    expected = (0.8 * 0.60) + (0.5 * 0.65) + (min(0.8, 0.5) * 0.2)
+    expected = (0.8 * 0.60) + (0.5 * 0.40) + (min(0.8, 0.5) * 0.2)
     assert len(results) == 1
     assert results[0].weighted_confidence == pytest.approx(expected)
 
 
-def test_default_side_only_weight_is_higher_than_top_only_weight():
+def test_default_top_only_weight_is_higher_than_side_only_weight():
     from model_service.video.voting_ensemble import VotingEnsemble
 
     top = VotingEnsemble()
@@ -31,12 +31,12 @@ def test_default_side_only_weight_is_higher_than_top_only_weight():
     results = VotingEnsemble.combine(top, side)
     by_name = {result.class_name: result for result in results}
 
-    assert by_name["top-only"].weighted_confidence == pytest.approx(0.8 * 0.55)
-    assert by_name["side-only"].weighted_confidence == pytest.approx(0.8 * 0.60)
-    assert by_name["side-only"].weighted_confidence > by_name["top-only"].weighted_confidence
+    assert by_name["top-only"].weighted_confidence == pytest.approx(0.8 * 0.60)
+    assert by_name["side-only"].weighted_confidence == pytest.approx(0.8 * 0.40)
+    assert by_name["top-only"].weighted_confidence > by_name["side-only"].weighted_confidence
 
 
-def test_side_only_candidate_sorts_above_same_confidence_top_only_candidate():
+def test_top_only_candidate_sorts_above_same_confidence_side_only_candidate():
     from model_service.video.voting_ensemble import VotingEnsemble
 
     top = VotingEnsemble()
@@ -48,4 +48,4 @@ def test_side_only_candidate_sorts_above_same_confidence_top_only_candidate():
 
     results = VotingEnsemble.combine(top, side)
 
-    assert [result.class_name for result in results] == ["side-only", "top-only"]
+    assert [result.class_name for result in results] == ["top-only", "side-only"]

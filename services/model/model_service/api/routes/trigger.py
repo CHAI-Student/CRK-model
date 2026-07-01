@@ -142,15 +142,36 @@ def _endpoint_fallback_enabled_for_cabinet(cabinet_type: Optional[str]) -> bool:
     )
 
 
+def _prefer_mixed_sign_removal_delta_for_cabinet(cabinet_type: Optional[str]) -> bool:
+    resolved_cabinet_type = (cabinet_type or config.machine.cabinet_type).strip().lower()
+    return resolved_cabinet_type == "freezer"
+
+
 def _analyze_weight_delta(
     loadcells: List[LoadcellData],
     *,
     cabinet_type: Optional[str] = None,
 ) -> loadcell_stats.LoadcellDeltaAnalysis:
-    return loadcell_stats.analyze_weight_delta(
+    analysis = loadcell_stats.analyze_weight_delta(
         loadcells,
         endpoint_fallback_enabled=_endpoint_fallback_enabled_for_cabinet(cabinet_type),
+        prefer_mixed_sign_removal_delta=(
+            _prefer_mixed_sign_removal_delta_for_cabinet(cabinet_type)
+        ),
     )
+    mixed_sign_guard = dict(analysis.mixed_sign_net_masking_guard or {})
+    if mixed_sign_guard.get("accepted"):
+        ops_logger.info(
+            "[OPS][LOADCELL] mixed_sign_net_masking_guard "
+            "cabinet_type=%s net_delta=%.1fg return_total=%.1fg "
+            "removal_total=%.1fg selected_delta=%.1fg",
+            (cabinet_type or config.machine.cabinet_type),
+            float(mixed_sign_guard.get("net_delta", 0.0) or 0.0),
+            float(mixed_sign_guard.get("return_total", 0.0) or 0.0),
+            float(mixed_sign_guard.get("removal_total", 0.0) or 0.0),
+            float(mixed_sign_guard.get("selected_decision_delta", 0.0) or 0.0),
+        )
+    return analysis
 
 
 def _loadcell_channel_count(loadcells: Sequence[Any]) -> int:
@@ -323,6 +344,9 @@ def _loadcell_trace_metadata(
             ),
             "ignored_loadcell_movements": list(
                 delta_analysis.ignored_loadcell_movements
+            ),
+            "mixed_sign_net_masking_guard": dict(
+                delta_analysis.mixed_sign_net_masking_guard
             ),
             "pressure_like_event": bool(delta_analysis.pressure_like_event),
             "compound_segments": [segment.to_dict() for segment in segments],

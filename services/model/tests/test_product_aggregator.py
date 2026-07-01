@@ -312,6 +312,140 @@ class TestDoorSessionNetDeltaRecovery:
         assert diagnostics["sameZoneApplied"][0]["matchedUnits"] == 1
         store.clear_all()
 
+    def test_freezer_mixed_sign_cross_zone_return_keeps_removal_delta(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        import time
+
+        from model_service.core.config import config
+        from model_service.session import ProductResult
+        from model_service.session.door_session import TriggerResult
+
+        monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+        store = self._make_store(tmp_path, {70: 70.0, 150: 150.0})
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=3,
+            result=self._removal_trigger(
+                product_id=70,
+                product_idx="P70",
+                name="FREEZER_70G_ITEM",
+                delta=-70.0,
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="",
+                session_id="zone-2-mixed-sign",
+                timestamp=time.time(),
+                products=[
+                    ProductResult(
+                        product_id=150,
+                        product_idx="P150",
+                        name="FREEZER_150G_ITEM",
+                        count=1,
+                        price=4500,
+                        confidence=0.9,
+                    )
+                ],
+                delta_weight=-150.0,
+                confidence=0.9,
+                video_paths={},
+                is_return=False,
+                return_weight_hints=[
+                    {
+                        "weight": 70.0,
+                        "delta": 70.0,
+                        "segment_index": 0,
+                        "replay_position": "before_removal",
+                        "reason": "unpaired_return_segment",
+                    }
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+
+        zone_3 = global_session.zone_sessions[3]
+        zone_2 = global_session.zone_sessions[2]
+        assert zone_3.get_active_products() == []
+        finalized_products = zone_2.get_active_products()
+        assert len(finalized_products) == 1
+        assert finalized_products[0].product_id == 150
+        assert finalized_products[0].count == 1
+        reconciliation = zone_2.final_weight_validation[
+            "deferredReturnReconciliation"
+        ]
+        assert reconciliation["accepted"] is True
+        assert reconciliation["crossZoneApplied"][0]["matchedWeight"] == 70.0
+        assert zone_2.cross_zone_returns[0].target_zone == 3
+        store.clear_all()
+
+    def test_freezer_mixed_sign_unmatched_return_still_charges_removal(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        import time
+
+        from model_service.core.config import config
+        from model_service.session import ProductResult
+        from model_service.session.door_session import TriggerResult
+
+        monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+        store = self._make_store(tmp_path, {150: 150.0})
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="",
+                session_id="zone-2-unmatched-mixed-sign",
+                timestamp=time.time(),
+                products=[
+                    ProductResult(
+                        product_id=150,
+                        product_idx="P150",
+                        name="FREEZER_150G_ITEM",
+                        count=1,
+                        price=4500,
+                        confidence=0.9,
+                    )
+                ],
+                delta_weight=-150.0,
+                confidence=0.9,
+                video_paths={},
+                is_return=False,
+                return_weight_hints=[
+                    {
+                        "weight": 70.0,
+                        "delta": 70.0,
+                        "segment_index": 0,
+                        "replay_position": "before_removal",
+                        "reason": "unpaired_return_segment",
+                    }
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+
+        zone_2 = global_session.zone_sessions[2]
+        finalized_products = zone_2.get_active_products()
+        assert len(finalized_products) == 1
+        assert finalized_products[0].product_id == 150
+        assert finalized_products[0].count == 1
+        assert len(zone_2.unmatched_returns) == 1
+        assert zone_2.unmatched_returns[0].delta_weight == 70.0
+        reconciliation = zone_2.final_weight_validation[
+            "deferredReturnReconciliation"
+        ]
+        assert reconciliation["reason"] == "deferred_return_unmatched"
+        assert reconciliation["unmatched"][0]["deltaWeight"] == 70.0
+        store.clear_all()
+
 
 class TestProductAggregatorBasic:
     """ProductAggregator 기본 기능 테스트."""

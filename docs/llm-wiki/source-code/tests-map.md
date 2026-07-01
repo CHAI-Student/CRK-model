@@ -44,8 +44,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   removal and return segment target extraction, mixed return-hint construction,
   compatibility `/trigger` return-hint parity, pressure-like vision-required
   targets, pressure-like pair suppression, simultaneous physical-channel
-  removal target extraction, rapid same-zone trace context, and freezer
-  endpoint fallback trace metadata.
+  removal target extraction, rapid same-zone trace context, freezer mixed-sign
+  net masking guard, and freezer endpoint fallback trace metadata.
 - [test_scenario_matrix_contract.py](../../../services/model/tests/test_scenario_matrix_contract.py):
   Excel-derived scenario fixture counts, all 924 expanded model-contract
   basket judgments, stride-2 latency evidence shape, and explicit 0g payload
@@ -85,16 +85,17 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   compound-trace Melona/Yomamte same-tier residual ordering, unresolved
   multi-segment fail-open passthrough,
   dual-camera single preference over top-only repeats, static top-only ranking
-  demotion, upper-ROI hand proximity, hand-path hard reject with alternative
-  candidates, hand-path all-blocked fail-open behavior, and freezer filter OPS
-  visibility.
+  demotion, upper-ROI hand proximity, top-side hand detections failing open
+  without filtering candidates, top-middle hand detections still filtering
+  candidates, hand-path hard reject with alternative candidates, hand-path
+  all-blocked fail-open behavior, and freezer filter OPS visibility.
   Async failure tests cover model-service exception re-raise, unknown task
   wrapping, missing async extractor support, frame queue timeout, and zero-frame
   failure after retry.
 - [test_yolo_wrapper_geometry.py](../../../services/model/tests/test_yolo_wrapper_geometry.py):
   default left-crop and optional crop/letterbox geometry.
 - [test_voting_ensemble.py](../../../services/model/tests/test_voting_ensemble.py):
-  Top/Side voting weights and ordering.
+  Top/Side voting weights and ordering, including the current top-middle bias.
 - [test_decision_engine.py](../../../services/model/tests/test_decision_engine.py):
   strict mismatch, loadcell-only, rescue candidates, detected-single fallback,
   strict single-candidate source/rank priority, same-product repeated counts
@@ -157,7 +158,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   aggregation, returns, net-delta recovery, batch returns, chronological
   trigger replay, relaxed same-zone single return tolerance, mixed
   return/removal hint replay, return-hint count reduction, close-time
-  unresolved final-weight mismatch exclusion, and complex scenarios.
+  unresolved final-weight mismatch exclusion, freezer mixed-sign
+  return/removal close reconciliation, and complex scenarios.
 - [test_cross_zone_return.py](../../../services/model/tests/test_cross_zone_return.py):
   cross-zone return repair, combination recovery scenarios, effective
   net-delta order, and edge cases.

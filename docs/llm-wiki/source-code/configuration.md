@@ -167,10 +167,10 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   camera floor cannot become regular votes, threshold/ROI rescue, weight-gated
   rescue, stage-count fallback, or diagnostic fallback identity evidence.
 - `MODEL__VISION__TOP_WEIGHT=0.60`,
-  `MODEL__VISION__SIDE_WEIGHT=0.65`,
-  `MODEL__VISION__TOP_ONLY_WEIGHT=0.55`, and
-  `MODEL__VISION__SIDE_ONLY_WEIGHT=0.60` boost strong vision candidates in
-  ranking.
+  `MODEL__VISION__SIDE_WEIGHT=0.40`,
+  `MODEL__VISION__TOP_ONLY_WEIGHT=0.60`, and
+  `MODEL__VISION__SIDE_ONLY_WEIGHT=0.40` bias freezer dual-top ranking toward
+  physical `top_middle` over physical `top_side`.
 - `MODEL__VISION__SIDE_ROI_X_MAX=400.0` keeps the hard side ROI boundary in
   the field-tuned left-crop operating region.
 - `MODEL__VISION__SIDE_ROI_SOFT_MARGIN_PX=5.0` opens a conditional regular

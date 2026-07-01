@@ -135,6 +135,42 @@ def test_history_can_find_removal_even_when_net_delta_is_positive():
     ]
 
 
+def test_freezer_mixed_sign_prefers_removal_segment_over_masked_net_delta():
+    service = TriggerService(
+        video_processor=None,
+        engine=None,
+        session_store=SessionStore(),
+    )
+    loadcells = (
+        _plateau(0, 1000.0)
+        + _plateau(5, 1070.0)
+        + _plateau(10, 920.0)
+    )
+
+    default_analysis = loadcell_stats.analyze_weight_delta(loadcells, window_size=2)
+    freezer_analysis = service._analyze_weight_delta(loadcells, cabinet_type="freezer")
+    metadata = service._loadcell_trace_metadata(loadcells, freezer_analysis, zone=2)
+
+    assert default_analysis.delta == -80.0
+    assert default_analysis.decision_delta == -80.0
+    assert freezer_analysis.delta == -80.0
+    assert freezer_analysis.decision_delta == -150.0
+    assert freezer_analysis.purchase_delta_candidates[0]["source"] == (
+        "unpaired_negative_total"
+    )
+    assert [target["weight"] for target in freezer_analysis.return_segment_targets] == [
+        70.0
+    ]
+    assert [target["weight"] for target in freezer_analysis.removal_segment_targets] == [
+        150.0
+    ]
+    assert metadata["decision_delta_weight"] == -150.0
+    assert metadata["mixed_sign_net_masking_guard"]["accepted"] is True
+    assert metadata["mixed_sign_net_masking_guard"]["net_delta"] == -80.0
+    assert metadata["mixed_sign_net_masking_guard"]["return_total"] == 70.0
+    assert metadata["mixed_sign_net_masking_guard"]["removal_total"] == 150.0
+
+
 def test_history_exposes_return_segment_before_followup_removal():
     loadcells = (
         _single_channel_plateau(0, 3093.9)

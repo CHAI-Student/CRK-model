@@ -745,6 +745,10 @@ class VideoProcessor:
         )
 
     @staticmethod
+    def _uses_hand_tracking_camera(camera_type: str) -> bool:
+        return (camera_type or "").lower() == "top"
+
+    @staticmethod
     def _freezer_handled_filter_enabled(delta_weight: Optional[float]) -> bool:
         return (
             str(config.machine.cabinet_type).lower() == "freezer"
@@ -2351,11 +2355,12 @@ class VideoProcessor:
         camera_type: str,
         bbox_size: float,
     ) -> float:
-        min_floor = (
-            self._freezer_motion_floor()
-            if self._uses_freezer_dual_top_profile(camera_type)
-            else float(self.min_motion_displacement)
-        )
+        if self._uses_freezer_dual_top_profile(camera_type):
+            min_floor = self._freezer_motion_floor()
+            if min_floor <= 0.0:
+                return 0.0
+        else:
+            min_floor = float(self.min_motion_displacement)
         return max(min_floor, bbox_size * 0.10)
 
     def _low_confidence_roi_eligible(
@@ -3143,10 +3148,19 @@ class VideoProcessor:
     def _inference_allowed_class_ids(
         self,
         product_allowed_class_ids: List[int],
+        camera_type: str,
         log_prefix: str,
     ) -> List[int]:
         if not product_allowed_class_ids:
             return []
+
+        camera = (camera_type or "top").lower()
+        if not self._uses_hand_tracking_camera(camera):
+            logger.info(
+                f"[{log_prefix}] inference_classes=products_only "
+                f"camera={camera} product_classes={len(product_allowed_class_ids)}"
+            )
+            return list(product_allowed_class_ids)
 
         hand_class_id = int(config.vision.hand_class_id)
         inference_ids = list(
@@ -3154,7 +3168,8 @@ class VideoProcessor:
         )
         logger.info(
             f"[{log_prefix}] inference_classes=products_plus_hand "
-            f"product_classes={len(product_allowed_class_ids)} hand_class_id={hand_class_id}"
+            f"camera={camera} product_classes={len(product_allowed_class_ids)} "
+            f"hand_class_id={hand_class_id}"
         )
         return inference_ids
 
@@ -3334,8 +3349,14 @@ class VideoProcessor:
             allowed_class_ids,
             "VIDEO",
         )
-        inference_allowed_class_ids = self._inference_allowed_class_ids(
+        top_inference_allowed_class_ids = self._inference_allowed_class_ids(
             product_allowed_class_ids,
+            "top",
+            "VIDEO",
+        )
+        side_inference_allowed_class_ids = self._inference_allowed_class_ids(
+            product_allowed_class_ids,
+            "side",
             "VIDEO",
         )
 
@@ -3346,14 +3367,14 @@ class VideoProcessor:
 
         # v4.6: 손 경로 추적기 생성 (Top 카메라에서만 사용)
         top_hand_tracker: Optional[HandPathTracker] = None
-        if self.hand_path_filter_enabled:
+        if self.hand_path_filter_enabled and self._uses_hand_tracking_camera("top"):
             top_hand_tracker = self._new_hand_path_tracker()
 
         # Process top camera video
         if top_path:
             logger.info("[VIDEO] Top 카메라 처리 시작...")
             top_stats = self._process_single_video(
-                top_path, top_ensemble, "top", inference_allowed_class_ids,
+                top_path, top_ensemble, "top", top_inference_allowed_class_ids,
                 hand_path_tracker=top_hand_tracker,
                 trace_context=trace_context,
                 low_confidence_stats=low_confidence_stats,
@@ -3385,12 +3406,8 @@ class VideoProcessor:
         if side_path:
             logger.info("[VIDEO] Side 카메라 처리 시작...")
             side_stats = self._process_single_video(
-                side_path, side_ensemble, "side", inference_allowed_class_ids,
-                hand_path_tracker=(
-                    top_hand_tracker
-                    if self._uses_freezer_dual_top_profile("side")
-                    else None
-                ),
+                side_path, side_ensemble, "side", side_inference_allowed_class_ids,
+                hand_path_tracker=None,
                 trace_context=trace_context,
                 low_confidence_stats=low_confidence_stats,
                 roi_filtered_stats=roi_filtered_stats,
@@ -3616,8 +3633,14 @@ class VideoProcessor:
             allowed_class_ids,
             "VIDEO-ASYNC",
         )
-        inference_allowed_class_ids = self._inference_allowed_class_ids(
+        top_inference_allowed_class_ids = self._inference_allowed_class_ids(
             product_allowed_class_ids,
+            "top",
+            "VIDEO-ASYNC",
+        )
+        side_inference_allowed_class_ids = self._inference_allowed_class_ids(
+            product_allowed_class_ids,
+            "side",
             "VIDEO-ASYNC",
         )
         frame_stride = 2
@@ -3627,7 +3650,7 @@ class VideoProcessor:
 
         # v5.3: 손 경로 추적기 (Top 카메라에서만 사용)
         top_hand_tracker: Optional[HandPathTracker] = None
-        if self.hand_path_filter_enabled:
+        if self.hand_path_filter_enabled and self._uses_hand_tracking_camera("top"):
             top_hand_tracker = self._new_hand_path_tracker()
 
         # 프레임 큐: (camera_type, frame_idx, frame, extractor_done)
@@ -3783,6 +3806,11 @@ class VideoProcessor:
                     frame_idx,
                 )
                 yolo_started = time.perf_counter()
+                inference_allowed_class_ids = (
+                    top_inference_allowed_class_ids
+                    if camera_type == "top"
+                    else side_inference_allowed_class_ids
+                )
                 detections = await asyncio.to_thread(
                     self._detect_frame, frame, inference_allowed_class_ids, camera_type
                 )
@@ -3792,8 +3820,10 @@ class VideoProcessor:
                 stats.yolo_inference_count += 1
                 self._record_preprocess(trace_context, camera_type)
 
-                if top_hand_tracker is not None and self._uses_freezer_dual_top_profile(
-                    camera_type
+                if (
+                    top_hand_tracker is not None
+                    and self._uses_hand_tracking_camera(camera_type)
+                    and self._uses_freezer_dual_top_profile(camera_type)
                 ):
                     top_hand_tracker.update_frame(detections, frame_idx)
 

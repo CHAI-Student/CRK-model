@@ -56,8 +56,10 @@ vision-supported product identity.
   freezer candidates.
 - Current freezer product confidence thresholds are `0.70` for both Top and
   Side, matching the smaller freezer product-set deployment. Hand tracking uses
-  a separate `0.40` floor for class `0`, so weaker hand detections can still
-  support interaction evidence without lowering product vote confidence.
+  a separate `0.40` floor for class `0`, but freezer `dual_top_proxy` only
+  enables hand class `0` and hand-path filtering on physical `top_middle`.
+  Physical `top_side` remains product-only and cannot filter candidates through
+  hand evidence.
 - Motion filtering defaults to a 10px bbox-center movement floor and no longer
   fails open when all regular candidates are static; low-confidence moving
   evidence is still available through threshold rescue.
@@ -71,9 +73,10 @@ vision-supported product identity.
   filtered outside the side ROI.
 - Voting tracks per-class evidence such as count, max confidence, average
   confidence, top/side evidence, and vote ratio.
-- Top-only and side-only cases have configurable voting weights; current field
-  tuning uses stronger weights (`top=0.60`, `side=0.65`, `top_only=0.55`,
-  `side_only=0.60`, common-class bonus `0.20`).
+- Top-only and side-only cases have configurable voting weights; current
+  freezer dual-top tuning biases physical `top_middle` over `top_side`
+  (`top=0.60`, `side=0.40`, `top_only=0.60`, `side_only=0.40`,
+  common-class bonus `0.20`).
 - Final candidate ranking treats regular `source=vision` output as stronger
   than `roi_rescue` or `threshold_rescue` output, so high-quality YOLO/voting
   evidence is not pushed below rescue-only evidence during `top_k` trimming.
@@ -121,9 +124,10 @@ vision-supported product identity.
 - Freezer interaction evidence now sits between raw vision and weight
   selection. The trace records actual path displacement, max movement, center
   span, trajectory support, static-shelf likelihood, upper-ROI hand validity,
-  hand proximity counts/ratios, and hand-path pass/block state. Static top-only
-  shelf-like candidates are demoted, while valid hand-path blocks become hard
-  rejects only when at least one hand-near alternative candidate remains.
+  hand proximity counts/ratios, and hand-path pass/block state from physical
+  `top_middle` only. Static top-only shelf-like candidates are demoted, while
+  valid top-middle hand-path blocks become hard rejects only when at least one
+  hand-near alternative candidate remains.
 - When strong vision sees a stock-positive product whose Node weight is missing
   or `0g`, the product identity remains as `partial` with
   `vision_identity_preserved_weight_unavailable`; loadcell-derived count

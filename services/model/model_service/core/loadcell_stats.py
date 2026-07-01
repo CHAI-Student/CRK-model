@@ -103,6 +103,7 @@ class LoadcellDeltaAnalysis:
     vision_required_segment_targets: list[dict[str, object]] = field(default_factory=list)
     paired_loadcell_movements: list[dict[str, object]] = field(default_factory=list)
     ignored_loadcell_movements: list[dict[str, object]] = field(default_factory=list)
+    mixed_sign_net_masking_guard: dict[str, object] = field(default_factory=dict)
     pressure_like_event: bool = False
     decision_delta: float = 0.0
     decision_delta_reliable: bool = False
@@ -179,11 +180,15 @@ def mixed_return_segment_diagnostics(
 ) -> dict[str, object]:
     """Return trace diagnostics for mixed return/removal segment replay."""
     return_targets = list(getattr(delta_analysis, "return_segment_targets", []) or [])
+    mixed_sign_guard = dict(
+        getattr(delta_analysis, "mixed_sign_net_masking_guard", {}) or {}
+    )
     return {
         "accepted": bool(return_weight_hints),
         "decision_delta": round(float(decision_delta), 1),
         "return_segment_targets": return_targets,
         "return_weight_hints": list(return_weight_hints),
+        "mixed_sign_net_masking_guard": mixed_sign_guard,
         "reason": (
             "return_hints_attached_to_negative_trigger"
             if return_weight_hints
@@ -850,6 +855,7 @@ def analyze_movement_history(
     stable_region_valid: bool,
     stable_plateaus: Sequence[LoadcellStablePlateau],
     segments: Sequence[LoadcellDeltaSegment],
+    prefer_mixed_sign_removal_delta: bool = False,
 ) -> dict[str, object]:
     """Summarize purchase-like movements from stable loadcell history."""
 
@@ -971,6 +977,48 @@ def analyze_movement_history(
                 return
         candidates.append(candidate)
 
+    total_unpaired_negative = (
+        sum(abs(float(segments[index].delta)) for index in unpaired_negative_indices)
+        if unpaired_negative_indices
+        else 0.0
+    )
+    chargeable_negative_indices = [
+        index
+        for index in unpaired_negative_indices
+        if abs(float(segments[index].delta)) >= min_delta
+    ]
+    chargeable_positive_indices = [
+        index
+        for index in unpaired_positive_indices
+        if abs(float(segments[index].delta)) >= min_delta
+    ]
+    mixed_sign_negative_total = (
+        sum(abs(float(segments[index].delta)) for index in chargeable_negative_indices)
+        if chargeable_negative_indices
+        else 0.0
+    )
+    mixed_sign_positive_total = (
+        sum(abs(float(segments[index].delta)) for index in chargeable_positive_indices)
+        if chargeable_positive_indices
+        else 0.0
+    )
+    prefer_unpaired_negative_total = bool(
+        prefer_mixed_sign_removal_delta
+        and chargeable_negative_indices
+        and chargeable_positive_indices
+    )
+
+    if prefer_unpaired_negative_total:
+        add_candidate(
+            _candidate_dict(
+                source="unpaired_negative_total",
+                weight=mixed_sign_negative_total,
+                delta=-mixed_sign_negative_total,
+                segment_indices=chargeable_negative_indices,
+                reason="freezer_mixed_sign_removal_total_preferred",
+            )
+        )
+
     if stable_region_valid and net_delta < -min_delta:
         add_candidate(
             _candidate_dict(
@@ -983,16 +1031,17 @@ def analyze_movement_history(
         )
 
     if unpaired_negative_indices:
-        total_unpaired = sum(abs(float(segments[index].delta)) for index in unpaired_negative_indices)
-        add_candidate(
-            _candidate_dict(
-                source="unpaired_negative_total",
-                weight=total_unpaired,
-                delta=-total_unpaired,
-                segment_indices=unpaired_negative_indices,
-                reason="sum_of_unpaired_removal_segments",
+        total_unpaired = total_unpaired_negative
+        if not prefer_unpaired_negative_total:
+            add_candidate(
+                _candidate_dict(
+                    source="unpaired_negative_total",
+                    weight=total_unpaired,
+                    delta=-total_unpaired,
+                    segment_indices=unpaired_negative_indices,
+                    reason="sum_of_unpaired_removal_segments",
+                )
             )
-        )
         last_index = unpaired_negative_indices[-1]
         add_candidate(
             _candidate_dict(
@@ -1024,6 +1073,18 @@ def analyze_movement_history(
         if candidates
         else float(net_delta)
     )
+    mixed_sign_guard: dict[str, object] = {}
+    if prefer_unpaired_negative_total:
+        selected = candidates[0] if candidates else {}
+        mixed_sign_guard = {
+            "accepted": True,
+            "reason": "mixed_sign_net_masking_guard",
+            "net_delta": round(float(net_delta), 1),
+            "return_total": round(float(mixed_sign_positive_total), 1),
+            "removal_total": round(float(mixed_sign_negative_total), 1),
+            "selected_source": selected.get("source"),
+            "selected_decision_delta": round(float(decision_delta), 1),
+        }
     return {
         "purchase_delta_candidates": candidates,
         "removal_segment_targets": removal_segment_targets,
@@ -1031,6 +1092,7 @@ def analyze_movement_history(
         "vision_required_segment_targets": vision_required_segment_targets,
         "paired_loadcell_movements": paired_movements,
         "ignored_loadcell_movements": ignored_movements,
+        "mixed_sign_net_masking_guard": mixed_sign_guard,
         "pressure_like_event": pressure_like_event,
         "decision_delta": decision_delta,
     }
@@ -1041,12 +1103,14 @@ def _apply_movement_history(
     *,
     net_delta: float,
     stable_region_valid: bool,
+    prefer_mixed_sign_removal_delta: bool = False,
 ) -> None:
     movement_history = analyze_movement_history(
         net_delta=net_delta,
         stable_region_valid=stable_region_valid,
         stable_plateaus=analysis.stable_plateaus,
         segments=analysis.segments,
+        prefer_mixed_sign_removal_delta=prefer_mixed_sign_removal_delta,
     )
     analysis.purchase_delta_candidates = list(
         movement_history["purchase_delta_candidates"]
@@ -1065,6 +1129,9 @@ def _apply_movement_history(
     )
     analysis.ignored_loadcell_movements = list(
         movement_history["ignored_loadcell_movements"]
+    )
+    analysis.mixed_sign_net_masking_guard = dict(
+        movement_history["mixed_sign_net_masking_guard"]
     )
     analysis.pressure_like_event = bool(movement_history["pressure_like_event"])
     analysis.decision_delta = float(movement_history["decision_delta"])
@@ -1170,6 +1237,7 @@ def analyze_weight_delta(
     window_size: int | None = None,
     stability_threshold: float | None = None,
     endpoint_fallback_enabled: bool = False,
+    prefer_mixed_sign_removal_delta: bool = False,
 ) -> LoadcellDeltaAnalysis:
     """Analyze trigger-level loadcell movement with stable-window diagnostics."""
 
@@ -1271,6 +1339,7 @@ def analyze_weight_delta(
         analysis,
         net_delta=analysis.delta,
         stable_region_valid=True,
+        prefer_mixed_sign_removal_delta=prefer_mixed_sign_removal_delta,
     )
     _apply_endpoint_fallback_if_eligible(
         analysis,

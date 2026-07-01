@@ -74,8 +74,8 @@ start writing sample images during inference.
   `net_delta_weight`, `removal_segment_targets`,
   `channel_removal_segment_targets`, `channel_delta_diagnostics`,
   `return_segment_targets`, `vision_required_segment_targets`,
-  `paired_loadcell_movements`, `ignored_loadcell_movements`, and
-  `pressure_like_event`
+  `paired_loadcell_movements`, `ignored_loadcell_movements`,
+  `mixed_sign_net_masking_guard`, and `pressure_like_event`
 - recent same-zone loadcell context:
   `recent_same_zone_window_seconds`, `recent_same_zone_events`, and
   `recent_return_weights_g`
@@ -106,9 +106,11 @@ start writing sample images during inference.
 - weight diagnostics, including `trigger_relevance` for `return_loadcell_only`,
   `balanced_out`, and `cancelled_by_return` paths, plus
   `mixed_return_segments` when a negative trigger carries internal return
-  hints for DoorSession replay, `effective_count_guard` when return hints can
-  reduce a raw repeated-count result, and `same_weight_candidate_collision`
-  when regular candidate identity beats a same-weight active/rescue collision.
+  hints for DoorSession replay, including
+  `mixed_sign_net_masking_guard` when freezer signed segments override a masked
+  net delta, `effective_count_guard` when return hints can reduce a raw
+  repeated-count result, and `same_weight_candidate_collision` when regular
+  candidate identity beats a same-weight active/rescue collision.
   Freezer decisions add `decision_branch=freezer_vision_first` with
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
   `weight_residual`, `freezer_multi_kind_weight_fit`,
@@ -154,6 +156,10 @@ rotation policy.
   `return_weight_hints` and will be deferred to CLOSE reconciliation, while the
   visible decision can still be based on the smaller negative
   `decision_delta_weight`.
+- In freezer mode, `mixed_sign_net_masking_guard.accepted=true` means a
+  positive segment was masking a larger removal. Use `net_delta`,
+  `return_total`, `removal_total`, and `selected_decision_delta` to confirm the
+  service judged the removal total while preserving the return hint for CLOSE.
 - If `delta_weight=0.0g` skipped inference, inspect `loadcell.payload_state`
   before blaming vision. `empty_payload` means Camera sent no loadcell samples,
   `invalid_only` means filtered values did not parse, `all_zero` means the
