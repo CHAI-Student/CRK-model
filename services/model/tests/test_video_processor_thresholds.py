@@ -1972,9 +1972,20 @@ def test_video_processor_freezer_filter_prefers_count_supported_bagel_repeat(
     assert repeat_candidates[0]["count"] == 2
 
 
+@pytest.mark.parametrize(
+    ("delta_weight", "expected_residual"),
+    [
+        (-303.0, 9.0),
+        (-304.0, 8.0),
+        (-305.0, 7.0),
+        (-313.0, 1.0),
+    ],
+)
 def test_video_processor_freezer_single_bagel_candidate_counts_repeat(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    delta_weight: float,
+    expected_residual: float,
 ) -> None:
     from model_service.core.config import config
     from model_service.video import VideoProcessor, VoteResult
@@ -2016,7 +2027,7 @@ def test_video_processor_freezer_single_bagel_candidate_counts_repeat(
                 instance_count_hint=1,
             )
         ],
-        delta_weight=-313.0,
+        delta_weight=delta_weight,
         product_weights={27: 156.0},
         product_stocks={27: 10},
         trace_context=trace_context,
@@ -2029,7 +2040,9 @@ def test_video_processor_freezer_single_bagel_candidate_counts_repeat(
     assert diagnostics["reason"] == "same_product_repeat_weight_gate"
     assert diagnostics["selected"]["count"] == 2
     assert diagnostics["selected"]["expectedWeight"] == 312.0
-    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(1.0)
+    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(
+        expected_residual
+    )
     assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
 
 

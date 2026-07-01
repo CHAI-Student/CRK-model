@@ -913,10 +913,7 @@ class VideoProcessor:
 
     @classmethod
     def _freezer_count_allowed_residual(cls, count: int) -> float:
-        count_scaled = float(config.weight.tolerance_grams) + (
-            float(config.weight.same_product_count_tolerance_grams) * max(1, int(count))
-        )
-        return min(cls._freezer_weight_tolerance_grams(), count_scaled)
+        return cls._freezer_weight_tolerance_grams()
 
     @classmethod
     def _freezer_same_product_repeat_diagnostic(
@@ -957,19 +954,17 @@ class VideoProcessor:
         if max_count < 2:
             return {**base, "accepted": False, "reason": "count_cap_below_repeat"}
 
-        best_count = 1
-        best_residual = float(single_residual)
-        for count in range(2, max_count + 1):
-            residual = abs(target_weight - (unit_weight * count))
-            if residual < best_residual:
-                best_count = count
-                best_residual = residual
+        if nearest_count > max_count:
+            return {
+                **base,
+                "count": int(nearest_count),
+                "accepted": False,
+                "reason": "nearest_repeat_count_exceeds_cap",
+            }
 
-        if best_count < 2:
-            return None
-
-        expected_weight = unit_weight * best_count
-        allowed_residual = cls._freezer_count_allowed_residual(best_count)
+        expected_weight = unit_weight * nearest_count
+        repeat_residual = abs(target_weight - expected_weight)
+        allowed_residual = cls._freezer_count_allowed_residual(nearest_count)
         vote_count = max(
             int(getattr(vote, "vote_count", 0) or 0),
             int(getattr(vote, "raw_vote_count", 0) or 0),
@@ -980,9 +975,9 @@ class VideoProcessor:
         )
         diagnostic = {
             **base,
-            "count": int(best_count),
+            "count": int(nearest_count),
             "expectedWeight": round(float(expected_weight), 1),
-            "countWeightResidual": round(float(best_residual), 1),
+            "countWeightResidual": round(float(repeat_residual), 1),
             "countAllowedResidual": round(float(allowed_residual), 1),
             "confidence": round(float(confidence), 4),
             "freezerExitPathVotes": int(exit_path_votes),
@@ -997,8 +992,10 @@ class VideoProcessor:
             diagnostic["reason"] = "insufficient_exit_path_votes"
         elif vote_count < min_votes:
             diagnostic["reason"] = "insufficient_repeat_votes"
-        elif best_residual > allowed_residual:
+        elif repeat_residual > allowed_residual:
             diagnostic["reason"] = "repeat_residual_exceeds_tolerance"
+        elif repeat_residual >= float(single_residual):
+            diagnostic["reason"] = "single_residual_not_worse"
         else:
             diagnostic["accepted"] = True
             diagnostic["reason"] = "same_product_repeat_weight_gate"

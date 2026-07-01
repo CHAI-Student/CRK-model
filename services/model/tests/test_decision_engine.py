@@ -1277,7 +1277,20 @@ def test_freezer_vision_first_prefers_count_supported_bagel_repeat(monkeypatch):
     ]
 
 
-def test_freezer_vision_first_counts_bagel_repeat_from_weight(monkeypatch):
+@pytest.mark.parametrize(
+    ("delta_weight", "expected_residual"),
+    [
+        (-303.0, 9.0),
+        (-304.0, 8.0),
+        (-305.0, 7.0),
+        (-313.0, 1.0),
+    ],
+)
+def test_freezer_vision_first_counts_bagel_repeat_from_weight(
+    monkeypatch,
+    delta_weight,
+    expected_residual,
+):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     trace = FakeLoadcellTrace({})
     engine = ProductDecisionEngine(strict_mode=True)
@@ -1292,7 +1305,7 @@ def test_freezer_vision_first_counts_bagel_repeat_from_weight(monkeypatch):
 
     result = engine.judge(
         vision_candidates=[candidate],
-        delta_weight=-313.0,
+        delta_weight=delta_weight,
         active_products=[
             make_active_product(
                 27,
@@ -1309,11 +1322,13 @@ def test_freezer_vision_first_counts_bagel_repeat_from_weight(monkeypatch):
         (27, 2)
     ]
     assert result.weight_explained == 312.0
-    assert result.weight_residual == pytest.approx(1.0)
+    assert result.weight_residual == pytest.approx(expected_residual)
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     assert diagnostics["reason"] == "same_product_repeat_weight_gate"
     assert diagnostics["selected"][0]["count"] == 2
-    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(1.0)
+    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(
+        expected_residual
+    )
     assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
 
 
@@ -1365,6 +1380,41 @@ def test_freezer_vision_first_rejects_unsafe_bagel_repeat(
     rejected = diagnostics["rejectedSameProductRepeatCandidates"]
     assert rejected[0]["class_id"] == 27
     assert rejected[0]["sameProductRepeatRejectedReason"] == expected_reason
+
+
+def test_freezer_vision_first_keeps_single_when_bagel_x1_is_closer(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+    candidate = make_candidate(
+        class_id=27,
+        name="BAG_NULLDAM_BAGEL_140G",
+        confidence=0.80,
+        raw_vote_count=4,
+        instance_count_hint=1,
+    )
+    candidate.freezer_exit_path_votes = 9
+
+    result = engine.judge(
+        vision_candidates=[candidate],
+        delta_weight=-230.0,
+        active_products=[
+            make_active_product(
+                27,
+                "BAG_NULLDAM_BAGEL_140G",
+                weight=156.0,
+                stock=10,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (27, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert "sameProductRepeatCandidates" not in diagnostics
+    assert diagnostics["selected"][0]["count"] == 1
 
 
 def test_freezer_vision_first_static_single_loses_to_trajectory_candidate(monkeypatch):
