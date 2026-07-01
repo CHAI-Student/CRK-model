@@ -106,6 +106,9 @@ Status: current complete file map
   FFmpeg/CV2 frame extraction, diagnostics, retry paths.
 - [video/frame_trace.py](../../../services/model/model_service/video/frame_trace.py):
   per-trigger JSONL/detail trace and optional sample export.
+- [video/freezer_candidate_policy.py](../../../services/model/model_service/video/freezer_candidate_policy.py):
+  shared freezer repeat/count fit helpers used by video handled filtering and
+  decision-engine repeat correction.
 - [video/video_processor.py](../../../services/model/model_service/video/video_processor.py):
   sync/async video processing, filters, rescue candidates, frame stride.
 - [video/voting_ensemble.py](../../../services/model/model_service/video/voting_ensemble.py):

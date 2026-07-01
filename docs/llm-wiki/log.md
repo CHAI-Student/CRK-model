@@ -1,5 +1,26 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer full-delta repeat repair
+
+- Closed the freezer `-309.5g` bagel failure mode end-to-end. A single regular
+  `BAG_NULLDAM_BAGEL_140G` candidate with `156g` unit weight and confidence
+  above `MODEL__WEIGHT__FREEZER_MULTI_MIN_CONFIDENCE=0.45` can now become
+  `x2` through `repeatEvidenceMode=single_regular_vision_identity`, yielding
+  about `312g` explained weight and a `2.5g` residual.
+- Tightened direct `freezer_vision_first` output: when product weights are
+  valid and positive, the final basket must explain the full stable negative
+  delta inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. If repeat
+  or multi-kind fitting cannot explain the delta, the engine returns no-charge
+  `UNCERTAIN` with `final_weight_mismatch_guard` instead of preserving a
+  mismatched chargeable `PARTIAL x1`.
+- Extracted shared freezer repeat/count diagnostics into
+  `video/freezer_candidate_policy.py` so `VideoProcessor` handled filtering and
+  `ProductDecisionEngine` repeat correction report the same count, expected
+  weight, residual, rejection reason, and `repeatEvidenceMode`.
+- Added trigger/CLOSE regression coverage for the field log shape and updated
+  OPS diagnostics to distinguish pre-engine candidate `count_hint` from final
+  engine `product_count`.
+
 ## [2026-07-01] maintenance | freezer top-middle hand filtering and vote bias
 
 - Limited freezer `dual_top_proxy` hand-path filtering to the physical

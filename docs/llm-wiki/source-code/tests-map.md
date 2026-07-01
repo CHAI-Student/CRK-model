@@ -67,6 +67,10 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   Recent freezer coverage verifies that zone-sliced `loadcells` remain the
   effective payload, even when the deprecated compatibility field is present,
   and traces retain `loadcell_scope=zone`.
+  It also covers the full trigger/CLOSE freezer bagel field shape:
+  `delta=-309.5g`, one `BAG_NULLDAM_BAGEL_140G` candidate at `156g` and
+  `confidence=0.528`, final `x2`, and no unresolved CLOSE final-weight
+  mismatch.
   It also verifies that propagated video processing failures mark worker
   sessions and traces as `error` instead of calling the decision engine.
 - [test_video_processor_thresholds.py](../../../services/model/tests/test_video_processor_thresholds.py):
@@ -138,7 +142,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   Haluyache/Letsbe/Jagabee `-503g` segmented removal, rejection of
   `last_unpaired_negative_segment` as a standalone forced fallback target, and
   no-charge `UNCERTAIN` results when a successful branch does not explain the
-  full stable removal delta.
+  full stable removal delta. Freezer full-delta regressions now also verify
+  that valid-weight `freezer_vision_first` `x1` mismatches become no-charge
+  `UNCERTAIN` when repeat confidence or residual checks fail.
   Freezer decision tests cover confidence-first single selection outside the
   normal weight tolerance, weight residual tie-breaks only inside the
   confidence band, candidate-only identity, freezer `15g` weight-gated

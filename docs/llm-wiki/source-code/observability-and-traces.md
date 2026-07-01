@@ -34,9 +34,14 @@ Important patterns include:
 - `[VIDEO-ASYNC]` fatal extractor, frame queue, and YOLO task errors propagate
   to the trigger worker and should end with trace/session `status=error`, not
   `status=complete` with empty candidates.
-- `[OPS][CANDIDATES]`: ranked candidates, weights, confidence, camera flags,
-  source.
-- `[OPS][RESULT]`: final status, products, total price.
+- `[OPS][CANDIDATES]`: ranked pre-engine handled candidates, weights,
+  confidence, camera flags, source, `count_hint`, and `freezer_exit_votes`.
+  These are not final chargeable counts.
+- `[OPS][FREEZER-CANDIDATE-FILTER]`: freezer handled-filter enablement,
+  raw/handled counts, selected count, expected weight, count residual,
+  `repeatEvidenceMode`, and first repeat rejection reason when available.
+- `[OPS][RESULT]`: final engine status, products, `product_count`, and total
+  price.
 - `[OPS][CLOSE]`: close summary across zones.
 - `[OPS][CLOSE_DIAGNOSTIC]`: no-charge skipped-trigger diagnostics by zone,
   such as `diagnostic=loadcell_payload_all_zero`, emitted without adding any
@@ -115,7 +120,9 @@ start writing sample images during inference.
   `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
   `weight_residual`, `freezer_multi_kind_weight_fit`,
   `freezer_multi_kind_weight_mismatch`, and selected/considered candidate
-  diagnostics.
+  diagnostics. Valid-weight freezer mismatches can also end in
+  `final_weight_mismatch_guard` when the final basket does not explain the full
+  stable removal delta inside freezer tolerance.
 - final result and storage result
 
 Trace JSONL/detail files are raw operational evidence. The current wiki policy
@@ -160,6 +167,15 @@ rotation policy.
   positive segment was masking a larger removal. Use `net_delta`,
   `return_total`, `removal_total`, and `selected_decision_delta` to confirm the
   service judged the removal total while preserving the return hint for CLOSE.
+- In freezer mode, a log sequence with `[OPS][CANDIDATES] ... count_hint=1`
+  followed by `[OPS][RESULT] ... product_count=2` is expected for accepted
+  same-product repeat correction. For the bagel field shape
+  `delta=-309.5g`, `BAG_NULLDAM_BAGEL_140G`, `unit_weight=156g`, and
+  `confidence=0.528`, inspect
+  `weight_diagnostics.freezer_vision_first.selected[*].count=2` and
+  `countWeightResidual~=2.5g`. If the final result stays empty with
+  `final_weight_mismatch_guard`, repeat or multi-kind fitting failed and the
+  trigger was intentionally no-charge.
 - If `delta_weight=0.0g` skipped inference, inspect `loadcell.payload_state`
   before blaming vision. `empty_payload` means Camera sent no loadcell samples,
   `invalid_only` means filtered values did not parse, `all_zero` means the

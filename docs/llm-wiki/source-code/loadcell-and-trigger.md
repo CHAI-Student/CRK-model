@@ -92,9 +92,12 @@ so queue wait is a real latency dimension.
   `requested_zone`, `effective_channel_count`, and any received
   `global_channel_count` for diagnostics.
 - `calculate_weight_delta()` is the shared route/service helper.
-- `api/routes/trigger.py` and `TriggerService` keep compatibility wrapper
-  helpers, but the implementation delegates to `core/loadcell_stats.py` so
-  loadcell math has a single source of truth.
+- `api/routes/trigger.py` and `TriggerService` delegate cabinet-specific
+  loadcell options to `core/loadcell_stats.py`
+  (`endpoint_fallback_enabled_for_cabinet()` and
+  `prefer_mixed_sign_removal_delta_for_cabinet()`), so compatibility `/trigger`
+  and the queued service path share one source of truth for freezer endpoint
+  fallback and mixed-sign removal-delta preference.
 
 ## Trigger Inputs And Outputs
 
@@ -167,6 +170,16 @@ queued work can be skipped if a later return balances it before video starts.
   after the decision engine result explains the full stable removal delta
   inside the existing branch tolerance. Partial sub-segment fallbacks return a
   no-charge `UNCERTAIN` result with `final_weight_mismatch_guard` diagnostics.
+- Freezer `freezer_vision_first` valid-weight mismatches are subject to that
+  same full-delta rule. The video/OPS candidate list may still show one
+  handled product with `count_hint=1`, but the engine can correct the final
+  `product_count` to `2+` through repeat fitting or suppress the result as
+  no-charge `UNCERTAIN` when the full delta cannot be explained.
+- Both trigger entrypoints keep public request/response schemas unchanged while
+  adding internal OPS fields: candidate lines include `count_hint` and
+  `freezer_exit_votes`, freezer filter lines include selected count, expected
+  weight, count residual, `repeatEvidenceMode`, and repeat rejection reason,
+  and result lines include final engine `product_count`.
 - Mixed return/removal triggers keep the public response shape unchanged. A
   trigger like `+216.7g` then `-16.5g` is judged as the `-16.5g` removal, while
   the hidden return is attached to the internal DoorSession `TriggerResult` as

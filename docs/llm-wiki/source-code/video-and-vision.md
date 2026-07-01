@@ -1,6 +1,7 @@
 # Source Code Map: Video And Vision
 
 Source: [video/frame_extractor.py](../../../services/model/model_service/video/frame_extractor.py),
+[video/freezer_candidate_policy.py](../../../services/model/model_service/video/freezer_candidate_policy.py),
 [video/video_processor.py](../../../services/model/model_service/video/video_processor.py),
 [video/voting_ensemble.py](../../../services/model/model_service/video/voting_ensemble.py),
 [vision/yolo_wrapper.py](../../../services/model/model_service/vision/yolo_wrapper.py),
@@ -143,7 +144,11 @@ selected frames, accumulates per-camera evidence, and returns ranked
   bagel candidate at `309.5g` can become `156g x2` when the repeat residual is
   inside freezer tolerance and closer than `x1`. This can override a tighter
   top-only single candidate only inside the `same_product_count_tolerance`
-  residual gap; dual-camera exit-path singles remain preferred.
+  residual gap; dual-camera exit-path singles remain preferred. The count fit,
+  cap checks, expected weight, residual, and rejection reason come from
+  `video/freezer_candidate_policy.py`, which is shared with the decision
+  engine to keep pre-engine handled filtering and final repeat correction
+  aligned.
 - Freezer ROI stage names are split by meaning: `freezer_roi_passed` is the
   only stage that increments `freezerExitPathVotes`; `freezer_roi_filtered`
   records rejected ROI evidence and `freezerRoiFilteredVotes` only.
@@ -168,7 +173,11 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `multi_item_trace_multi_weight_fit`,
   `multi_item_trace_evidence_passthrough_unresolved`, or true handled output.
   The OPS line also includes selected count, expected weight, count residual,
-  and the first same-product repeat rejection reason when available.
+  `repeatEvidenceMode`, and the first same-product repeat rejection reason when
+  available. Candidate OPS lines expose `count_hint` and
+  `freezer_exit_votes`; final result OPS lines expose engine `product_count`,
+  so field logs can distinguish pre-engine candidate hints from chargeable
+  basket counts.
 - Side ROI filtering protects against side-camera noise outside the useful
   left-side region with hard `center_x <= side_roi_x_max`.
 - The side ROI default is hard `center_x <= 400` plus a conditional

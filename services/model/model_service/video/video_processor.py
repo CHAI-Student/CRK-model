@@ -50,6 +50,7 @@ from model_service.core.exceptions import ModelServiceError, VideoProcessingErro
 from model_service.vision import YOLODetection, YOLOWrapper
 from model_service.vision.hand_path_tracker import HandPathTracker
 
+from . import freezer_candidate_policy
 from .frame_extractor import create_frame_extractor
 from .frame_trace import TriggerTraceContext
 from .voting_ensemble import VoteResult, VotingEnsemble
@@ -881,7 +882,7 @@ class VideoProcessor:
 
     @staticmethod
     def _freezer_weight_tolerance_grams() -> float:
-        return max(0.0, float(config.weight.freezer_weight_tolerance_grams))
+        return freezer_candidate_policy.freezer_weight_tolerance_grams()
 
     @classmethod
     def _freezer_count_tolerance(cls, count: int) -> float:
@@ -896,28 +897,19 @@ class VideoProcessor:
         product_weights: Optional[Dict[int, float]],
     ) -> int:
         unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
-        if unit_weight is None:
-            return 1
         try:
             hint = int(getattr(vote, "instance_count_hint", 1) or 1)
         except (TypeError, ValueError):
             hint = 1
-        hint = max(1, min(hint, int(config.weight.max_count_per_item)))
-        if hint <= 1:
-            return 1
-
-        best_count = 1
-        best_residual = abs(target_weight - unit_weight)
-        for count in range(2, hint + 1):
-            residual = abs(target_weight - unit_weight * count)
-            if residual <= cls._freezer_count_tolerance(count) and residual < best_residual:
-                best_count = count
-                best_residual = residual
-        return best_count
+        return freezer_candidate_policy.supported_instance_count(
+            unit_weight=unit_weight,
+            target_weight=target_weight,
+            instance_count_hint=hint,
+        )
 
     @classmethod
     def _freezer_count_allowed_residual(cls, count: int) -> float:
-        return cls._freezer_weight_tolerance_grams()
+        return freezer_candidate_policy.freezer_weight_tolerance_grams()
 
     @classmethod
     def _freezer_same_product_repeat_diagnostic(
@@ -933,85 +925,24 @@ class VideoProcessor:
         product_stocks: Optional[Dict[int, int]],
         single_regular_vision_identity: bool = False,
     ) -> Optional[dict[str, Any]]:
-        if unit_weight is None or unit_weight <= 0.0:
-            return None
-        nearest_count = int(round(target_weight / unit_weight))
-        if nearest_count < 2:
-            return None
-
         stock = cls._freezer_candidate_stock(vote, product_stocks)
-        caps = [
-            max(1, int(config.weight.max_items_per_segment)),
-            max(1, int(config.weight.same_product_max_count)),
-            max(1, int(config.weight.max_count_per_item)),
-        ]
-        if stock is not None:
-            caps.append(max(0, stock))
-        max_count = min(caps)
-        base = {
-            "class_id": int(vote.class_id),
-            "name": vote.class_name,
-            "nearestCount": nearest_count,
-            "maxCount": int(max_count),
-            "unitWeight": round(float(unit_weight), 1),
-            "stock": stock,
-        }
-        if max_count < 2:
-            return {**base, "accepted": False, "reason": "count_cap_below_repeat"}
-
-        if nearest_count > max_count:
-            return {
-                **base,
-                "count": int(nearest_count),
-                "accepted": False,
-                "reason": "nearest_repeat_count_exceeds_cap",
-            }
-
-        expected_weight = unit_weight * nearest_count
-        repeat_residual = abs(target_weight - expected_weight)
-        allowed_residual = cls._freezer_count_allowed_residual(nearest_count)
         vote_count = max(
             int(getattr(vote, "vote_count", 0) or 0),
             int(getattr(vote, "raw_vote_count", 0) or 0),
         )
-        min_votes = max(
-            int(config.vision.freezer_min_vote_count),
-            int(config.weight.detected_single_fallback_min_votes),
+        return freezer_candidate_policy.same_product_repeat_diagnostic(
+            class_id=int(vote.class_id),
+            name=vote.class_name,
+            target_weight=target_weight,
+            unit_weight=unit_weight,
+            stock=stock,
+            single_residual=single_residual,
+            confidence=confidence,
+            exit_path_votes=exit_path_votes,
+            vote_count=vote_count,
+            source=source,
+            single_regular_vision_identity=single_regular_vision_identity,
         )
-        diagnostic = {
-            **base,
-            "count": int(nearest_count),
-            "expectedWeight": round(float(expected_weight), 1),
-            "countWeightResidual": round(float(repeat_residual), 1),
-            "countAllowedResidual": round(float(allowed_residual), 1),
-            "confidence": round(float(confidence), 4),
-            "freezerExitPathVotes": int(exit_path_votes),
-            "voteCount": int(vote_count),
-            "minRepeatVotes": int(min_votes),
-            "singleRegularVisionIdentity": bool(single_regular_vision_identity),
-            "accepted": False,
-        }
-        if str(source) != "vision":
-            diagnostic["reason"] = "not_regular_vision_candidate"
-        elif confidence < float(config.weight.freezer_multi_min_confidence):
-            diagnostic["reason"] = "confidence_below_repeat_floor"
-        elif repeat_residual > allowed_residual:
-            diagnostic["reason"] = "repeat_residual_exceeds_tolerance"
-        elif repeat_residual >= float(single_residual):
-            diagnostic["reason"] = "single_residual_not_worse"
-        elif bool(single_regular_vision_identity) and vote_count > 0:
-            diagnostic["accepted"] = True
-            diagnostic["reason"] = "same_product_repeat_weight_gate"
-            diagnostic["repeatEvidenceMode"] = "single_regular_vision_identity"
-        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
-            diagnostic["reason"] = "insufficient_exit_path_votes"
-        elif vote_count < min_votes:
-            diagnostic["reason"] = "insufficient_repeat_votes"
-        else:
-            diagnostic["accepted"] = True
-            diagnostic["reason"] = "same_product_repeat_weight_gate"
-            diagnostic["repeatEvidenceMode"] = "exit_path_votes"
-        return diagnostic
 
     @staticmethod
     def _freezer_stage_entry(

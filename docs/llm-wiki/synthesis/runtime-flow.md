@@ -19,6 +19,7 @@ Camera POST /trigger
   -> YOLOWrapper detects per processed frame
   -> filters and VotingEnsemble produce vision candidates
   -> ProductDecisionEngine.judge() fuses candidates, delta_weight, active_products
+     (chargeable negative baskets must explain the full stable removal delta)
   -> SessionStore stores the trigger result
   -> DoorSessionStore.add_trigger_with_global() updates active door session
   -> ProductAggregator rebuilds removal/return counts
@@ -48,7 +49,10 @@ Camera POST /trigger
 
 1. `vision_only`
 2. freezer `freezer_vision_first` branch when
-   `MODEL__MACHINE__CABINET_TYPE=freezer` and the delta is negative
+   `MODEL__MACHINE__CABINET_TYPE=freezer` and the delta is negative; valid
+   positive-weight freezer baskets are repeat/multi-fit corrected or suppressed
+   by `final_weight_mismatch_guard` if they do not explain the full removal
+   delta inside freezer tolerance
 3. stage-count/no-final-candidate recovery
 4. legacy `loadcell_only_no_vision` only under explicit `weight_aware`
 5. `no_detection_min_weight`

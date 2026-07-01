@@ -3,6 +3,7 @@
 Source: [engine/decision_engine.py](../../../services/model/model_service/engine/decision_engine.py),
 [engine/models.py](../../../services/model/model_service/engine/models.py),
 [service/trigger_service.py](../../../services/model/model_service/service/trigger_service.py),
+[video/freezer_candidate_policy.py](../../../services/model/model_service/video/freezer_candidate_policy.py),
 [weight/count_calculator.py](../../../services/model/model_service/weight/count_calculator.py),
 [weight/strict_weight_matcher.py](../../../services/model/model_service/weight/strict_weight_matcher.py),
 [session/product_aggregator.py](../../../services/model/model_service/session/product_aggregator.py)
@@ -105,8 +106,9 @@ Important inputs:
   `weight_residual`, `selectionTier`, `freezerExitPathVotes`, and the full
   considered/selected candidate list. `freezerExitPathVotes` comes from
   `freezer_roi_passed` or explicit legacy vote fields, not ROI-rejected
-  detections. A large residual becomes `partial`, not an automatic identity
-  rejection.
+  detections. A large residual can remain `partial` only when product weight is
+  unavailable/diagnostic; when the selected product has a valid positive
+  weight, the final full-delta guard below can suppress the mismatched basket.
 - Single freezer removal segments now use a handled-candidate narrowing step:
   raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
   engine input, and DoorSession snapshots receive the one handled product
@@ -149,6 +151,16 @@ Important inputs:
   votes as `EnsembleResult.raw_vote_count`; `EnsembleResult.vote_count` remains
   the Top/Side consensus scale, so repeat gates must read raw frame evidence
   from `raw_vote_count` whenever they use the multi-candidate evidence path.
+- Direct `freezer_vision_first` results with valid positive product weights are
+  post-checked by `_enforce_full_delta_match()` using
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Same-product repeat is
+  tried before this guard; if no repeat or multi-kind fit explains the full
+  stable negative delta, the engine returns no-charge `UNCERTAIN` with
+  `final_weight_mismatch_guard` instead of preserving a chargeable mismatched
+  `PARTIAL x1`. The field shape `delta=-309.5g`, one
+  `BAG_NULLDAM_BAGEL_140G` candidate, `unit_weight=156g`,
+  `confidence=0.528` should therefore become `x2`; the same candidate below
+  the repeat confidence floor is rejected as no-charge mismatch.
 - Direct `freezer_vision_first` selection reads the same interaction evidence
   as the video handled-filter path. `staticShelfLikely` top-only candidates are
   softly demoted unless trajectory or hand-path support exists. The hand

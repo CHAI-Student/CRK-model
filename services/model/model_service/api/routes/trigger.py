@@ -134,19 +134,6 @@ def _calculate_weight_delta(loadcells: List[LoadcellData]) -> float:
     return loadcell_stats.calculate_weight_delta(loadcells)
 
 
-def _endpoint_fallback_enabled_for_cabinet(cabinet_type: Optional[str]) -> bool:
-    resolved_cabinet_type = (cabinet_type or config.machine.cabinet_type).strip().lower()
-    return (
-        resolved_cabinet_type == "freezer"
-        and config.loadcell.freezer_endpoint_fallback_enabled
-    )
-
-
-def _prefer_mixed_sign_removal_delta_for_cabinet(cabinet_type: Optional[str]) -> bool:
-    resolved_cabinet_type = (cabinet_type or config.machine.cabinet_type).strip().lower()
-    return resolved_cabinet_type == "freezer"
-
-
 def _analyze_weight_delta(
     loadcells: List[LoadcellData],
     *,
@@ -154,9 +141,11 @@ def _analyze_weight_delta(
 ) -> loadcell_stats.LoadcellDeltaAnalysis:
     analysis = loadcell_stats.analyze_weight_delta(
         loadcells,
-        endpoint_fallback_enabled=_endpoint_fallback_enabled_for_cabinet(cabinet_type),
+        endpoint_fallback_enabled=loadcell_stats.endpoint_fallback_enabled_for_cabinet(
+            cabinet_type
+        ),
         prefer_mixed_sign_removal_delta=(
-            _prefer_mixed_sign_removal_delta_for_cabinet(cabinet_type)
+            loadcell_stats.prefer_mixed_sign_removal_delta_for_cabinet(cabinet_type)
         ),
     )
     mixed_sign_guard = dict(analysis.mixed_sign_net_masking_guard or {})
@@ -592,7 +581,7 @@ def _log_freezer_candidate_filter_ops(
         "freezer_min_votes=%s freezer_min_ratio=%.3f "
         "freezer_motion_min_px=%.1f freezer_exit_votes=%s "
         "selected_count=%s expected_weight=%s count_residual=%s "
-        "repeat_reject=%s",
+        "repeat_mode=%s repeat_reject=%s",
         zone,
         camera_layout,
         enabled,
@@ -607,6 +596,7 @@ def _log_freezer_candidate_filter_ops(
         selected.get("count", "n/a"),
         selected.get("expectedWeight", "n/a"),
         selected.get("countWeightResidual", "n/a"),
+        selected.get("repeatEvidenceMode", "n/a"),
         repeat_reject,
     )
     if camera_layout != "dual_top_proxy":
@@ -1196,7 +1186,9 @@ async def trigger_judgment(
                 f"name={vote.class_name} weight={weight_text} "
                 f"confidence={vote.weighted_confidence:.3f} "
                 f"top={vote.top_detected} side={vote.side_detected} "
-                f"source={getattr(vote, 'source', 'vision')}"
+                f"source={getattr(vote, 'source', 'vision')} "
+                f"count_hint={getattr(vote, 'instance_count_hint', 1)} "
+                f"freezer_exit_votes={getattr(vote, 'freezer_exit_path_votes', 0)}"
             )
         if not vote_results:
             ops_logger.info(f"[OPS][CANDIDATES] zone={request.zone} none")
@@ -1365,6 +1357,7 @@ async def trigger_judgment(
             f"[OPS][RESULT] zone={request.zone} "
             f"status={result.status.value} "
             f"products={product_text} "
+            f"product_count={sum(product.count for product in products)} "
             f"total_price={final_total_price}"
         )
 

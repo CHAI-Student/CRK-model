@@ -928,6 +928,165 @@ async def test_trigger_service_worker_complete_writes_trace_entry(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_trigger_service_freezer_single_bagel_candidate_counts_repeat_and_closes(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    import model_service.service.trigger_service as trigger_service_module
+    from model_service.core.config import config
+    from model_service.engine.decision_engine import ProductDecisionEngine
+    from model_service.service.trigger_service import (
+        LoadcellReading,
+        TriggerInput,
+        TriggerService,
+    )
+    from model_service.session import DoorSessionStore
+    from model_service.video import VoteResult
+
+    trace_factory = make_trace_factory(tmp_path)
+    monkeypatch.setattr(trigger_service_module, "TriggerTraceContext", trace_factory)
+    monkeypatch.setattr(
+        trigger_service_module,
+        "generate_session_id",
+        lambda zone: "freezer-bagel-repeat-session",
+    )
+    monkeypatch.setattr(trigger_service_module.config.async_streaming, "enabled", True)
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.weight, "freezer_multi_min_confidence", 0.45)
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+
+    class FakeVideoProcessor:
+        async def process_videos_async(self, **kwargs):
+            return SimpleNamespace(
+                vote_results=[
+                    VoteResult(
+                        class_id=27,
+                        class_name="BAG_NULLDAM_BAGEL_140G",
+                        vote_count=1,
+                        max_confidence=0.528,
+                        avg_confidence=0.528,
+                        vote_ratio=1.0,
+                        top_detected=False,
+                        side_detected=True,
+                        top_vote_count=0,
+                        side_vote_count=1,
+                        top_max_confidence=0.0,
+                        side_max_confidence=0.528,
+                        weighted_confidence=0.528,
+                        raw_vote_count=1,
+                        side_motion_passed=True,
+                        motion_gate_passed=True,
+                        instance_count_hint=1,
+                    )
+                ],
+                stats=SimpleNamespace(
+                    top_frames=0,
+                    side_frames=3,
+                    processing_time_ms=7.0,
+                ),
+            )
+
+    active_product = SimpleNamespace(
+        yolo_class_id=27,
+        product_name="BAG_NULLDAM_BAGEL_140G",
+        product_eng_name="BAG_NULLDAM_BAGEL_140G",
+        product_weight=156.0,
+        stock_qty=10,
+        sale_price=2800,
+        product_idx="P_BAGEL",
+        has_loadcell="true",
+    )
+
+    class FakeActiveProductStore:
+        def has_products(self):
+            return True
+
+        def get_all_products(self):
+            return [active_product]
+
+        def get_allowed_class_ids(self):
+            return [27]
+
+        def get_by_yolo_class_id(self, product_id):
+            return active_product if int(product_id) == 27 else None
+
+        def get_stats(self):
+            return {"source": "test"}
+
+    door_store = DoorSessionStore(
+        yaml_dir=str(tmp_path / "sessions"),
+        get_product_weight=lambda product_id: {27: 156.0}.get(product_id, 0.0),
+    )
+    try:
+        door_store.get_or_start_global_session()
+        service = TriggerService(
+            video_processor=FakeVideoProcessor(),
+            engine=ProductDecisionEngine(strict_mode=True),
+            session_store=session_store,
+            door_session_store=door_store,
+            active_product_store=FakeActiveProductStore(),
+        )
+        service._queue = asyncio.Queue(maxsize=service.QUEUE_MAX_SIZE)
+
+        top_path = tmp_path / "top.avi"
+        side_path = tmp_path / "side.avi"
+        top_path.write_bytes(b"top")
+        side_path.write_bytes(b"side")
+        input_data = TriggerInput(
+            zone=1,
+            loadcells=[
+                LoadcellReading(**item)
+                for item in two_channel_loadcells_for_delta(-309.5)
+            ],
+            top_video_path=str(top_path),
+            side_video_path=str(side_path),
+        )
+
+        queued = await service.enqueue_trigger(input_data)
+        assert queued.status == "queued"
+        item = service._queue.get_nowait()
+        await service._process_trigger_internal(item)
+
+        session_data = session_store.get("freezer-bagel-repeat-session")
+        assert session_data is not None
+        assert session_data.status == "complete"
+        assert [(product.name, product.count) for product in session_data.products] == [
+            ("BAG_NULLDAM_BAGEL_140G", 2)
+        ]
+        door_session = door_store.get_session(zone=1)
+        assert door_session is not None
+        assert [
+            (product.name, product.count)
+            for product in door_session.get_active_products()
+        ] == [("BAG_NULLDAM_BAGEL_140G", 2)]
+
+        global_session = door_store.finalize_global_session()
+        zone_session = global_session.zone_sessions[1]
+        assert [
+            (product.name, product.count)
+            for product in zone_session.get_active_products()
+        ] == [("BAG_NULLDAM_BAGEL_140G", 2)]
+        assert (
+            zone_session.final_weight_validation is None
+            or zone_session.final_weight_validation.get("reason")
+            != "unresolved_final_weight_mismatch"
+        )
+
+        detail = json.loads(read_trigger_detail_files(tmp_path / "logs")[0].read_text())
+        diagnostics = detail["weight_diagnostics"]["freezer_vision_first"]
+        assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+        assert diagnostics["selected"][0]["count"] == 2
+        assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(
+            2.5,
+            abs=0.2,
+        )
+    finally:
+        door_store.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_trigger_service_worker_marks_video_processing_error(
     monkeypatch,
     tmp_path,

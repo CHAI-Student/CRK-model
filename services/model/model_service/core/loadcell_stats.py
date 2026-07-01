@@ -1232,6 +1232,23 @@ def _apply_endpoint_fallback_if_eligible(
     ]
 
 
+def resolved_cabinet_type(cabinet_type: str | None = None) -> str:
+    return (cabinet_type or config.machine.cabinet_type).strip().lower()
+
+
+def endpoint_fallback_enabled_for_cabinet(cabinet_type: str | None = None) -> bool:
+    return (
+        resolved_cabinet_type(cabinet_type) == "freezer"
+        and config.loadcell.freezer_endpoint_fallback_enabled
+    )
+
+
+def prefer_mixed_sign_removal_delta_for_cabinet(
+    cabinet_type: str | None = None,
+) -> bool:
+    return resolved_cabinet_type(cabinet_type) == "freezer"
+
+
 def analyze_weight_delta(
     loadcells: Sequence[SupportsFilteredValue],
     window_size: int | None = None,

@@ -137,9 +137,12 @@ shape without rereading every long historical document.
   removal segment, the handled list defaults to one product; weight residual
   breaks ties inside the top confidence band. Same-product `x2+` candidates can
   now be inferred from target weight even when `instance_count_hint=1`, but only
-  for final vision candidates with freezer exit-path votes, enough vote
-  evidence, confidence above the freezer multi floor, stock/count caps, and a
-  residual inside the freezer/count-scaled tolerance.
+  for final vision candidates with confidence above the freezer multi floor,
+  stock/count caps, and a residual inside freezer tolerance. Multi-candidate
+  repeat competition still requires freezer exit-path votes and enough vote
+  evidence; a single regular `vision` identity can use
+  `repeatEvidenceMode=single_regular_vision_identity` when the repeated weight
+  explains the delta better than `x1`.
 - Freezer handled selection also uses interaction evidence, not only exit-path
   counts. Trace diagnostics record path displacement, max movement, center
   span, trajectory pass, static shelf likelihood, upper-ROI hand validity,
@@ -166,6 +169,14 @@ shape without rereading every long historical document.
   combined/segment weight fits that freezer tolerance; ordinary nonzero freezer
   deltas no longer return top-1/top-2/top-3 candidates together when their sum
   greatly exceeds the measured removal.
+- Freezer negative removals with valid positive product weights must also
+  explain the full stable removal delta before they become chargeable. A single
+  handled `156g` candidate at `delta=-309.5g` is corrected to `x2` when the
+  repeat gate accepts it; if confidence/caps/residual reject the repeat, the
+  valid-weight `x1` basket becomes no-charge `UNCERTAIN` with
+  `final_weight_mismatch_guard` instead of a chargeable `PARTIAL`. This guard
+  does not suppress strong `vision_first` identity when the Node product weight
+  is unavailable or intentionally diagnostic-only.
 - Side-camera ROI keeps hard `center_x <= 400` in the left 480 crop and adds a
   conditional `+5px` regular-candidate soft band. This catches Pepsi detections
   around `x=402..404` while leaving farther-right Trevi-style detections out.

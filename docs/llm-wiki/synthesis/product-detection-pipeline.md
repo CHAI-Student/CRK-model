@@ -95,9 +95,10 @@ vision-supported product identity.
   legacy mode for active/loadcell fallback behavior.
 - Loadcell evidence is still used for count and validation. When vision and
   loadcell agree, the result can be `complete`; when strong vision conflicts
-  with loadcell, the vision product remains as `partial` with mismatch
-  diagnostics; when no vision-derived identity exists, the result is no-charge
-  `no_detection` or `uncertain`.
+  with loadcell, refrigerated/legacy paths can keep the vision product as
+  `partial` with mismatch diagnostics; freezer valid-weight removals apply the
+  stricter full-delta guard below. When no vision-derived identity exists, the
+  result is no-charge `no_detection` or `uncertain`.
 - Freezer mode narrows this further: final freezer candidates are the only
   chargeable identity source. The normal gram tolerance is not used to reject a
   strong freezer candidate. Raw vision top-K is preserved in diagnostics, but
@@ -109,7 +110,9 @@ vision-supported product identity.
   segment/compound or combined-candidate weight support inside
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Strong dual-camera evidence
   without a weight fit records `freezer_multi_kind_weight_mismatch` and falls
-  back to one handled freezer product.
+  back to one handled freezer product for engine evaluation; that product is
+  still chargeable only if its final count explains the full negative delta
+  inside freezer tolerance.
 - Freezer same-product repeats are allowed as a conservative candidate-filter
   and vision-first engine override. The repeat count is inferred from
   `target_weight / unit_weight`, then checked against confidence,
@@ -121,6 +124,12 @@ vision-supported product identity.
   exit-path single remains preferred. Frame-level vote evidence is carried into
   the engine through `raw_vote_count`, while `vote_count` keeps its consensus
   meaning.
+- After freezer repeat and multi-kind fitting, valid positive-weight freezer
+  baskets must explain the full stable negative delta. A `156g` bagel candidate
+  at `delta=-309.5g` should become `x2` when confidence/caps allow it; if the
+  same candidate cannot pass repeat or residual checks, the engine returns
+  no-charge `UNCERTAIN` with `final_weight_mismatch_guard` instead of billing a
+  mismatched `x1`.
 - Freezer interaction evidence now sits between raw vision and weight
   selection. The trace records actual path displacement, max movement, center
   span, trajectory support, static-shelf likelihood, upper-ROI hand validity,
