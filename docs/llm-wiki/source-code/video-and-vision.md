@@ -176,6 +176,10 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - `VotingEnsemble` combines Top and Side votes using configured weights,
   top-only/side-only weights, common-class bonus, min vote ratio, and min vote
   count.
+- Trigger conversion preserves frame-level `VoteResult.vote_count` as
+  `EnsembleResult.raw_vote_count` for downstream repeat-count gates. The
+  converted `EnsembleResult.vote_count` continues to mean Top/Side consensus
+  (`1` or `2`), not total frame votes.
 - Threshold rescue still allows low-confidence moving evidence to be retained
   for later weight gating, separate from regular motion-filtered candidates.
 - Threshold rescue candidates carry `roi_conflict` diagnostics when the same

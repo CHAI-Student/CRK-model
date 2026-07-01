@@ -388,6 +388,35 @@ def test_video_processor_empty_allowed_ids_fail_closed(monkeypatch):
     assert result.vote_results == []
 
 
+def test_vote_result_conversion_preserves_frame_vote_count():
+    from model_service.api.routes.trigger import (
+        _vote_results_to_ensemble as route_vote_results_to_ensemble,
+    )
+    from model_service.service.trigger_service import TriggerService
+    from model_service.video.voting_ensemble import VoteResult
+
+    vote = VoteResult(
+        class_id=27,
+        class_name="BAG_NULLDAM_BAGEL_140G",
+        vote_count=4,
+        max_confidence=0.91,
+        avg_confidence=0.88,
+        weighted_confidence=0.80,
+        top_detected=True,
+        top_vote_count=4,
+        instance_count_hint=1,
+        freezer_exit_path_votes=9,
+    )
+
+    service_candidate = TriggerService._vote_results_to_ensemble(object(), [vote])[0]
+    route_candidate = route_vote_results_to_ensemble([vote])[0]
+
+    assert service_candidate.vote_count == 1
+    assert service_candidate.raw_vote_count == 4
+    assert route_candidate.vote_count == 1
+    assert route_candidate.raw_vote_count == 4
+
+
 def test_video_processor_motion_filter_rejects_static_candidates():
     from model_service.video import VideoProcessor
     from model_service.video.voting_ensemble import VotingEnsemble

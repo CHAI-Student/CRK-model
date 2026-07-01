@@ -1277,6 +1277,96 @@ def test_freezer_vision_first_prefers_count_supported_bagel_repeat(monkeypatch):
     ]
 
 
+def test_freezer_vision_first_counts_bagel_repeat_from_weight(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+    candidate = make_candidate(
+        class_id=27,
+        name="BAG_NULLDAM_BAGEL_140G",
+        confidence=0.80,
+        raw_vote_count=4,
+        instance_count_hint=1,
+    )
+    candidate.freezer_exit_path_votes = 9
+
+    result = engine.judge(
+        vision_candidates=[candidate],
+        delta_weight=-313.0,
+        active_products=[
+            make_active_product(
+                27,
+                "BAG_NULLDAM_BAGEL_140G",
+                weight=156.0,
+                stock=10,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (27, 2)
+    ]
+    assert result.weight_explained == 312.0
+    assert result.weight_residual == pytest.approx(1.0)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["selected"][0]["count"] == 2
+    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(1.0)
+    assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
+
+
+@pytest.mark.parametrize(
+    ("stock", "delta_weight", "raw_vote_count", "expected_reason"),
+    [
+        (1, -313.0, 4, "count_cap_below_repeat"),
+        (10, -340.0, 4, "repeat_residual_exceeds_tolerance"),
+        (10, -313.0, 3, "insufficient_repeat_votes"),
+    ],
+)
+def test_freezer_vision_first_rejects_unsafe_bagel_repeat(
+    monkeypatch,
+    stock,
+    delta_weight,
+    raw_vote_count,
+    expected_reason,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+    candidate = make_candidate(
+        class_id=27,
+        name="BAG_NULLDAM_BAGEL_140G",
+        confidence=0.80,
+        raw_vote_count=raw_vote_count,
+        instance_count_hint=1,
+    )
+    candidate.freezer_exit_path_votes = 9
+
+    result = engine.judge(
+        vision_candidates=[candidate],
+        delta_weight=delta_weight,
+        active_products=[
+            make_active_product(
+                27,
+                "BAG_NULLDAM_BAGEL_140G",
+                weight=156.0,
+                stock=stock,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (27, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
+    assert rejected[0]["class_id"] == 27
+    assert rejected[0]["sameProductRepeatRejectedReason"] == expected_reason
+
+
 def test_freezer_vision_first_static_single_loses_to_trajectory_candidate(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     trace = FakeLoadcellTrace({})

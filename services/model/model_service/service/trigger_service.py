@@ -3602,6 +3602,10 @@ class TriggerService:
         """VoteResult를 EnsembleResult로 변환."""
         ensemble_results = []
         for vote in vote_results:
+            raw_vote_count = max(
+                int(getattr(vote, "raw_vote_count", 0) or 0),
+                int(getattr(vote, "vote_count", 0) or 0),
+            )
             ensemble = EnsembleResult(
                 class_id=vote.class_id,
                 class_name=vote.class_name,
@@ -3610,7 +3614,7 @@ class TriggerService:
                 combined_confidence=vote.weighted_confidence,
                 vote_count=2 if (vote.top_detected and vote.side_detected) else 1,
                 source=getattr(vote, "source", "vision"),
-                raw_vote_count=getattr(vote, "raw_vote_count", 0),
+                raw_vote_count=raw_vote_count,
                 top_motion_passed=getattr(vote, "top_motion_passed", False),
                 side_motion_passed=getattr(vote, "side_motion_passed", False),
                 motion_gate_passed=getattr(vote, "motion_gate_passed", True),

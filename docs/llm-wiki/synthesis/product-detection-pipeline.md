@@ -113,7 +113,8 @@ vision-supported product identity.
   vote count, confidence, stock/count caps, and both freezer and count-scaled
   residual tolerances. A top-only repeat can beat a top-only single only within
   the configured repeat residual gap; a dual-camera exit-path single remains
-  preferred.
+  preferred. Frame-level vote evidence is carried into the engine through
+  `raw_vote_count`, while `vote_count` keeps its consensus meaning.
 - Freezer interaction evidence now sits between raw vision and weight
   selection. The trace records actual path displacement, max movement, center
   span, trajectory support, static-shelf likelihood, upper-ROI hand validity,

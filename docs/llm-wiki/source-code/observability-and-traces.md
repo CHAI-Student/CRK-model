@@ -89,8 +89,10 @@ start writing sample images during inference.
   for rejected ROI evidence. `freezerExitPathVotes` increments only from
   passed ROI evidence or explicit legacy fields; rejected ROI counts are kept
   as `freezerRoiFilteredVotes`. Freezer traces also expose motion,
-  trajectory, upper-ROI hand proximity fields, and `instance_count_hint` for
-  multi-bbox same-class evidence.
+  trajectory, upper-ROI hand proximity fields, `instance_count_hint` for
+  multi-bbox same-class evidence, and repeat diagnostics such as
+  `sameProductRepeatCandidates`/`rejectedSameProductRepeatCandidates` when
+  weight-supported same-product counts are evaluated.
 - runtime vision config such as `yolo_model_path`,
   `yolo_internal_conf_threshold`, hand class/confidence settings, and the
   top/side `regular_threshold`

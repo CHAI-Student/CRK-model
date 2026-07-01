@@ -142,7 +142,10 @@ Important inputs:
   `tolerance_grams + count * same_product_count_tolerance_grams` window. Trace
   diagnostics expose `sameProductRepeatCandidates`,
   `rejectedSameProductRepeatCandidates`, `count`, `expectedWeight`, and
-  `countWeightResidual`.
+  `countWeightResidual`. The trigger conversion layer preserves frame-level
+  votes as `EnsembleResult.raw_vote_count`; `EnsembleResult.vote_count` remains
+  the Top/Side consensus scale, so repeat gates must read raw frame evidence
+  from `raw_vote_count`.
 - Direct `freezer_vision_first` selection reads the same interaction evidence
   as the video handled-filter path. `staticShelfLikely` top-only candidates are
   softly demoted unless trajectory or hand-path support exists. The hand

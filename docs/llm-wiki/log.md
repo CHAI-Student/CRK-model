@@ -1,5 +1,18 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer bagel repeat count fix
+
+- Fixed freezer same-product repeat counting for cases such as
+  `BAG_NULLDAM_BAGEL_140G` where one visible candidate with
+  `instance_count_hint=1` still matches the measured removal as `x2`
+  (`156g x2 ~= 313g`).
+- Preserved frame-level `VoteResult.vote_count` as `EnsembleResult.raw_vote_count`
+  in both trigger conversion paths, while keeping `EnsembleResult.vote_count`
+  as the existing Top/Side consensus scale.
+- Added regressions for bagel-only freezer `x2`, conversion vote preservation,
+  handled-filter repeat diagnostics, and stock/residual/vote-count rejection
+  guards.
+
 ## [2026-07-01] maintenance | freezer product and hand confidence floors
 
 - Raised current freezer product vote defaults to `0.70` for Top and Side, and

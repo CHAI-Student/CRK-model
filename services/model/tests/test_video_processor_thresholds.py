@@ -1972,6 +1972,67 @@ def test_video_processor_freezer_filter_prefers_count_supported_bagel_repeat(
     assert repeat_candidates[0]["count"] == 2
 
 
+def test_video_processor_freezer_single_bagel_candidate_counts_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-bagel-only-repeat",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "27": {
+            "class_id": 27,
+            "name": "BAG_NULLDAM_BAGEL_140G",
+            "freezerExitPathVotes": 9,
+            "freezer_roi_filtered": 9,
+            "cameras": {"top": {"freezerExitPathVotes": 9}},
+        }
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                class_id=27,
+                class_name="BAG_NULLDAM_BAGEL_140G",
+                vote_count=4,
+                max_confidence=0.91,
+                avg_confidence=0.88,
+                weighted_confidence=0.80,
+                top_detected=True,
+                top_vote_count=4,
+                instance_count_hint=1,
+            )
+        ],
+        delta_weight=-313.0,
+        product_weights={27: 156.0},
+        product_stocks={27: 10},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [27]
+    assert handled[0].instance_count_hint == 2
+    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["selected"]["count"] == 2
+    assert diagnostics["selected"]["expectedWeight"] == 312.0
+    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(1.0)
+    assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
+
+
 def test_video_processor_freezer_repeat_requires_exit_path_votes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
