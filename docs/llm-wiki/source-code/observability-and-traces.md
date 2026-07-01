@@ -179,7 +179,9 @@ rotation policy.
   `final_weight_validation.freezerCloseAggregate` and
   `[OPS][FREEZER-CLOSE-AGGREGATE]` for unstable door sessions.
   `policy=signed_net_delta` and `globalNetDelta`/`global_net_delta` identify
-  the signed target. `outputZone` identifies the zone that will receive the
+  the signed target. `triggerSelectedWeight` and `triggerSelectedResidual`
+  show whether existing trigger products were preserved. For fallback
+  aggregate output, `outputZone` identifies the zone that will receive the
   whole final basket, `role=rerouted` zones should have
   `weightDeltaOverride=0.0`, and the output zone should have an override equal
   to the signed global net. A near-zero global net clears participant products;
@@ -189,8 +191,8 @@ rotation policy.
   reason=vision_identity_passthrough`, `[OPS][CANDIDATES] ... count_hint=1`,
   and `[OPS][RESULT] ... product_count=2` is expected when the ordered solver
   accepts a same-product repeat. For the bagel field shape
-  `delta=-309.5g`, `BAG_NULLDAM_BAGEL_140G`, `unit_weight=156g`, and
-  `confidence=0.528`, inspect
+  `delta=-309.5g`, `BAG_NULLDAM_BAGEL_140G`, `unit_weight=156g`, and raw
+  identity confidence above the freezer product floor, inspect
   `weight_diagnostics.freezer_vision_first.selected[*].count=2` and
   `combinationResidual~=2.5g`. If the final result stays empty with
   `reason=no_weight_fit_for_vision_candidate_pool`, ordered candidate-pool

@@ -162,11 +162,13 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both
   keep the lower region.
-- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50` are the current freezer field
+- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70` are the current freezer field
   product vote floors. In freezer mode, product detections below the relevant
-  camera floor cannot become regular votes, threshold/ROI rescue, weight-gated
-  rescue, stage-count fallback, or diagnostic fallback identity evidence.
+  raw/max camera floor cannot become regular votes, threshold/ROI rescue,
+  weight-gated rescue, stage-count fallback, diagnostic fallback identity
+  evidence, or close-time aggregate fallback candidates. Weighted/combined
+  confidence remains diagnostic and is not the freezer identity floor.
 - `MODEL__VISION__TOP_WEIGHT=0.60`,
   `MODEL__VISION__SIDE_WEIGHT=0.40`,
   `MODEL__VISION__TOP_ONLY_WEIGHT=0.60`, and

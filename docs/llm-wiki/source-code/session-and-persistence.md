@@ -129,30 +129,31 @@ while the door is open.
   per-zone path.
 - `FreezerCloseAggregateResolver` collects participating trigger candidate
   snapshots and trigger products, sums participating signed `delta_weight`
-  values as `globalNetDelta`, and solves one vision-supported basket against
-  `abs(globalNetDelta)` only when that net is negative. It does not create
-  unseen active-product-only identities; products without usable positive
-  weight are excluded from aggregate count correction and remain
-  diagnostic-only. Low-delta candidate-only freezer triggers at or below
-  freezer tolerance do not force aggregate eligibility.
+  values as `globalNetDelta`, and first validates the already-selected trigger
+  products against `abs(globalNetDelta)`. If that trigger basket fits freezer
+  tolerance, zone products and per-zone `weightDelta` values are preserved.
+  Low-delta candidate-only freezer triggers at or below freezer tolerance do
+  not force aggregate eligibility.
 - If `abs(globalNetDelta)` is within freezer tolerance, aggregate CLOSE clears
   all participant products and returns `weightDeltaOverride=0.0` for every
   participant zone. If `globalNetDelta` is positive, the aggregate output is
-  also no-charge. If `globalNetDelta` is negative but no handled/final
-  candidate combination fits the target, provisional participant products are
-  cleared and diagnostics record a no-charge reason instead of preserving a
-  mismatched basket.
-- Accepted freezer aggregate output is attributed to the latest participating
+  also no-charge. If `globalNetDelta` is negative and the trigger basket misses
+  tolerance, fallback solving uses only raw-confidence-gated handled/final
+  candidate snapshots and trigger products with usable positive weight; unseen
+  active-product-only identities remain impossible.
+- Accepted fallback aggregate output is attributed to the latest participating
   trigger zone, with insertion order as the tie-breaker for same-tick
   timestamps. The output zone receives the full selected basket and a
   close-time `weightDeltaOverride` equal to the signed `globalNetDelta`; other
   participating freezer zones are emptied and receive `weightDeltaOverride=0.0`.
-  Public response schemas stay unchanged: existing zone `products` and
-  `weightDelta` fields are redistributed at CLOSE.
+  Preserved trigger baskets do not set weight overrides. Public response
+  schemas stay unchanged: existing zone `products` and `weightDelta` fields are
+  either preserved or redistributed at CLOSE.
 - `final_weight_validation.freezerCloseAggregate` records
   `policy=signed_net_delta`, eligibility reason, participating zones/triggers,
-  `globalNetDelta`, final target, output zone, selected products, residual,
-  no-charge reason when applicable, role, and weight delta override.
+  `globalNetDelta`, final target, output zone, trigger-selected weight,
+  selected products, residual, no-charge reason when applicable, role, and
+  weight delta override for no-charge/rerouted fallback cases.
 
 ## ActiveProductStore
 

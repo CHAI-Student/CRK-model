@@ -612,6 +612,13 @@ class ProductDecisionEngine:
                 stage_entry=stage_entry,
                 dual_camera_exit_path=dual_camera_exit_path,
             )
+            (
+                confidence_floor_passed,
+                identity_confidence,
+                identity_threshold,
+                top_identity_confidence,
+                side_identity_confidence,
+            ) = self._freezer_candidate_raw_identity_gate(candidate)
             product = active_map.get(class_id)
             diag: dict[str, Any] = {
                 "rank": rank,
@@ -619,6 +626,11 @@ class ProductDecisionEngine:
                 "name": candidate.class_name,
                 "source": source,
                 "confidence": round(confidence, 4),
+                "identity_confidence": round(float(identity_confidence), 4),
+                "identity_threshold": round(float(identity_threshold), 4),
+                "top_confidence": round(float(top_identity_confidence), 4),
+                "side_confidence": round(float(side_identity_confidence), 4),
+                "confidenceFloorPassed": bool(confidence_floor_passed),
                 "raw_vote_count": int(getattr(candidate, "raw_vote_count", 0) or 0),
                 "freezerExitPathVotes": self._freezer_exit_path_votes(
                     candidate,
@@ -8128,6 +8140,60 @@ class ProductDecisionEngine:
             return max(0.0, float(config.vision.top_confidence_threshold))
         return 0.0
 
+    @staticmethod
+    def _freezer_threshold_for_camera(camera: str) -> float:
+        normalized = (camera or "top").strip().lower()
+        if (
+            str(config.machine.cabinet_type).lower() == "freezer"
+            and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+            and normalized in {"top", "side"}
+        ):
+            return max(0.0, float(config.vision.top_confidence_threshold))
+        if normalized == "side":
+            return max(0.0, float(config.vision.side_confidence_threshold))
+        return max(0.0, float(config.vision.top_confidence_threshold))
+
+    def _freezer_candidate_raw_identity_gate(
+        self,
+        candidate: EnsembleResult,
+    ) -> tuple[bool, float, float, float, float]:
+        top_confidence = float(getattr(candidate, "top_confidence", 0.0) or 0.0)
+        side_confidence = float(getattr(candidate, "side_confidence", 0.0) or 0.0)
+        combined_confidence = float(
+            getattr(candidate, "combined_confidence", 0.0) or 0.0
+        )
+        top_threshold = self._freezer_threshold_for_camera("top")
+        side_threshold = self._freezer_threshold_for_camera("side")
+        top_detected = top_confidence > 0.0
+        side_detected = side_confidence > 0.0
+        if top_detected and top_confidence >= top_threshold:
+            passed = True
+        elif side_detected and side_confidence >= side_threshold:
+            passed = True
+        elif not top_detected and not side_detected:
+            passed = combined_confidence >= min(top_threshold, side_threshold)
+        else:
+            passed = False
+        identity_confidence = max(top_confidence, side_confidence, combined_confidence)
+        identity_threshold = min(
+            [
+                threshold
+                for detected, threshold in (
+                    (top_detected, top_threshold),
+                    (side_detected, side_threshold),
+                )
+                if detected
+            ]
+            or [top_threshold, side_threshold]
+        )
+        return (
+            passed,
+            identity_confidence,
+            identity_threshold,
+            top_confidence,
+            side_confidence,
+        )
+
     def _candidate_has_vision_identity_evidence(
         self,
         candidate: EnsembleResult,
@@ -8135,6 +8201,9 @@ class ProductDecisionEngine:
         source = str(getattr(candidate, "source", "vision") or "vision")
         confidence = float(getattr(candidate, "combined_confidence", 0.0) or 0.0)
         if source == "vision":
+            if self._is_freezer_mode():
+                passed, _, _, _, _ = self._freezer_candidate_raw_identity_gate(candidate)
+                return passed
             return confidence >= max(0.0, float(self.confidence_threshold))
         if source in {"threshold_rescue", "roi_rescue"}:
             return bool(getattr(candidate, "weight_gate_passed", False)) and (

@@ -1478,6 +1478,111 @@ def test_video_processor_freezer_filter_warns_when_dual_top_layout_missing(
     assert "expected=dual_top_proxy" in caplog.text
 
 
+def test_video_processor_freezer_filter_rejects_low_raw_identity_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    trace_context = TriggerTraceContext(
+        session_id="freezer-low-raw-confidence",
+        zone=4,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    vote_results = [
+        VoteResult(
+            class_id=44,
+            class_name="STICK_BINGGRAE_MELONA_75ML",
+            vote_count=9,
+            max_confidence=0.58,
+            avg_confidence=0.54,
+            weighted_confidence=0.58,
+            top_detected=True,
+            top_vote_count=9,
+            top_max_confidence=0.58,
+        )
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-316.0,
+        product_weights={44: 79.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    assert handled == []
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert diagnostics["handled_candidate_count"] == 0
+    rejected = diagnostics["rejectedConfidenceCandidates"][0]
+    assert rejected["class_id"] == 44
+    assert rejected["reason"] == "raw_confidence_below_threshold"
+    assert rejected["identity_confidence"] == 0.58
+    assert rejected["identity_threshold"] == 0.70
+
+
+def test_video_processor_freezer_filter_keeps_high_raw_low_weighted_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    trace_context = TriggerTraceContext(
+        session_id="freezer-high-raw-low-weighted",
+        zone=4,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    vote_results = [
+        VoteResult(
+            class_id=23,
+            class_name="BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+            vote_count=11,
+            max_confidence=0.80,
+            avg_confidence=0.76,
+            weighted_confidence=0.48,
+            top_detected=True,
+            top_vote_count=11,
+            top_max_confidence=0.80,
+        )
+    ]
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        vote_results,
+        delta_weight=-183.7,
+        product_weights={23: 176.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    assert [candidate.class_id for candidate in handled] == [23]
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert diagnostics["handled_candidate_count"] == 1
+    considered = diagnostics["considered"][0]
+    assert considered["confidence"] == 0.48
+    assert considered["identity_confidence"] == 0.80
+    assert considered["confidenceFloorPassed"] is True
+
+
 def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2222,13 +2327,13 @@ def test_video_processor_freezer_single_side_bagel_counts_repeat_from_weight(
                 class_name="BAG_NULLDAM_BAGEL_140G",
                 vote_count=1,
                 raw_vote_count=1,
-                max_confidence=0.528,
-                avg_confidence=0.528,
-                weighted_confidence=0.528,
+                max_confidence=0.728,
+                avg_confidence=0.728,
+                weighted_confidence=0.728,
                 top_detected=False,
                 side_detected=True,
                 side_vote_count=1,
-                side_max_confidence=0.528,
+                side_max_confidence=0.728,
                 instance_count_hint=1,
             )
         ],
@@ -2744,9 +2849,15 @@ def test_video_processor_freezer_stage_only_rescues_yomamte_dual_camera(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [46, 13, 37, 24, 44]
+    assert [candidate.class_id for candidate in handled] == [46, 13, 37, 24]
     assert diagnostics["reason"] == "vision_identity_passthrough"
-    assert diagnostics["selectedClassIds"] == [46, 13, 37, 24, 44]
+    assert diagnostics["selectedClassIds"] == [46, 13, 37, 24]
+    rejected = next(
+        item
+        for item in diagnostics["rejectedConfidenceCandidates"]
+        if item["class_id"] == 44
+    )
+    assert rejected["reason"] == "raw_confidence_below_threshold"
 
 
 def test_video_processor_freezer_stage_only_replaces_low_confidence_melona(
@@ -2834,13 +2945,13 @@ def test_video_processor_freezer_stage_only_replaces_low_confidence_melona(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [44]
-    assert handled[0].source == "vision"
+    assert handled == []
     assert diagnostics["reason"] == "vision_identity_passthrough"
     melona = next(
         item for item in diagnostics["considered"] if item["class_id"] == 44
     )
     assert melona["source"] == "vision"
+    assert melona["reason"] == "raw_confidence_below_threshold"
 
 
 @pytest.mark.asyncio

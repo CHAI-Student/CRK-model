@@ -70,8 +70,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   and traces retain `loadcell_scope=zone`.
   It also covers the full trigger/CLOSE freezer bagel field shape:
   `delta=-309.5g`, one `BAG_NULLDAM_BAGEL_140G` candidate at `156g` and
-  `confidence=0.528`, final `x2`, and no unresolved CLOSE final-weight
-  mismatch.
+  raw identity confidence above the freezer product floor, final `x2`, and no
+  unresolved CLOSE final-weight mismatch.
   It also verifies that propagated video processing failures mark worker
   sessions and traces as `error` instead of calling the decision engine.
 - [test_video_processor_thresholds.py](../../../services/model/tests/test_video_processor_thresholds.py):
@@ -172,11 +172,12 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   for fast close finalization. Close final-weight validation also covers
   repeated-candidate correction followed by matched-only unresolved mismatch
   exclusion when no bounded correction can explain the net removal. Freezer
-  coverage includes signed-net freezer CLOSE aggregate rerouting to the latest
-  trigger zone, whole-basket solving across zones, global-net-zero no-charge
-  clearing, no-fit no-charge clearing, simple single-trigger per-zone
-  preservation, refrigerated non-application, and the superseded deferred
-  candidate-repair cases under aggregate output.
+  coverage includes trigger-first signed-net freezer CLOSE preservation,
+  fallback rerouting to the latest trigger zone only after trigger products
+  miss tolerance, low raw-confidence aggregate candidate rejection,
+  global-net-zero no-charge clearing, no-fit no-charge clearing, simple
+  single-trigger per-zone preservation, refrigerated non-application, and the
+  superseded deferred candidate-repair cases under aggregate output.
 
 ## Which Tests To Run
 

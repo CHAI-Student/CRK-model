@@ -77,9 +77,15 @@ def _candidate_snapshot(
     weight,
     price=1200,
     confidence=0.4,
+    identity_confidence=None,
+    top_confidence=None,
+    side_confidence=0.0,
     source="vision",
     stock=10,
 ):
+    raw_identity = confidence if identity_confidence is None else identity_confidence
+    top_raw = raw_identity if top_confidence is None else top_confidence
+    side_raw = side_confidence
     return {
         "rank": rank,
         "product_id": product_id,
@@ -89,9 +95,12 @@ def _candidate_snapshot(
         "unit_price": price,
         "stock_qty": stock,
         "confidence": confidence,
+        "identity_confidence": raw_identity,
         "source": source,
-        "top": False,
-        "side": True,
+        "top": top_raw > 0,
+        "side": side_raw > 0,
+        "top_confidence": top_raw,
+        "side_confidence": side_raw,
     }
 
 
@@ -363,14 +372,228 @@ def test_freezer_close_aggregate_combines_multiple_zones_to_last_trigger_zone(
         response = _handle_door_close(FakeCloseReadyStore(global_session))
         zone_1 = next(zone for zone in response["zones"] if zone["zone"] == 1)
         zone_4 = next(zone for zone in response["zones"] if zone["zone"] == 4)
-        assert zone_1["products"] == []
-        assert zone_1["weightDelta"] == 0.0
-        assert [product["name"] for product in zone_4["products"]] == [
-            "FREEZER_100G_ITEM",
-            "FREEZER_200G_ITEM",
+        assert [product["name"] for product in zone_1["products"]] == [
+            "FREEZER_100G_ITEM"
         ]
-        assert zone_4["weightDelta"] == -300.0
+        assert zone_1["weightDelta"] == -100.0
+        assert [product["name"] for product in zone_4["products"]] == [
+            "FREEZER_200G_ITEM"
+        ]
+        assert zone_4["weightDelta"] == -200.0
         assert response["decisionSummary"]["totalWeightDelta"] == -300.0
+        aggregate = global_session.zone_sessions[4].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["reason"] == (
+            "freezer_close_aggregate_trigger_products_preserved"
+        )
+        assert aggregate["triggerSelectedWeight"] == 300.0
+        assert aggregate["triggerSelectedResidual"] == 0.0
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_preserves_trigger_products_when_total_fits(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    weights = {13: 156.0, 23: 176.0, 44: 79.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=1,
+            result=TriggerResult(
+                trigger_id="zone1-bagel",
+                session_id="zone1-bagel-session",
+                timestamp=100.0,
+                products=[
+                    _product(
+                        13,
+                        "BAG_NULLDAM_BAGEL_140G",
+                        1,
+                        price=2800,
+                        confidence=1.0,
+                    )
+                ],
+                delta_weight=-147.0,
+                confidence=1.0,
+                video_paths={},
+                vision_candidates=[
+                    _candidate_snapshot(
+                        13,
+                        "BAG_NULLDAM_BAGEL_140G",
+                        rank=1,
+                        weight=156.0,
+                        price=2800,
+                        confidence=1.0,
+                        identity_confidence=1.0,
+                    ),
+                    _candidate_snapshot(
+                        44,
+                        "STICK_BINGGRAE_MELONA_75ML",
+                        rank=3,
+                        weight=79.0,
+                        price=800,
+                        confidence=0.8,
+                        identity_confidence=0.8,
+                    ),
+                ],
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=4,
+            result=TriggerResult(
+                trigger_id="zone4-burger",
+                session_id="zone4-burger-session",
+                timestamp=120.0,
+                products=[
+                    _product(
+                        23,
+                        "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                        1,
+                        price=2700,
+                        confidence=1.0,
+                    )
+                ],
+                delta_weight=-176.3,
+                confidence=1.0,
+                video_paths={},
+                vision_candidates=[
+                    _candidate_snapshot(
+                        23,
+                        "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                        rank=1,
+                        weight=176.0,
+                        price=2700,
+                        confidence=1.0,
+                        identity_confidence=1.0,
+                    ),
+                    _candidate_snapshot(
+                        44,
+                        "STICK_BINGGRAE_MELONA_75ML",
+                        rank=3,
+                        weight=79.0,
+                        price=800,
+                        confidence=0.8,
+                        identity_confidence=0.8,
+                    ),
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+
+        zone_1 = next(zone for zone in response["zones"] if zone["zone"] == 1)
+        zone_4 = next(zone for zone in response["zones"] if zone["zone"] == 4)
+        assert [product["name"] for product in zone_1["products"]] == [
+            "BAG_NULLDAM_BAGEL_140G"
+        ]
+        assert [product["name"] for product in zone_4["products"]] == [
+            "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G"
+        ]
+        assert response["decisionSummary"]["totalWeightDelta"] == -323.3
+        assert response["decisionSummary"]["totalPrice"] == 5500
+        aggregate = global_session.zone_sessions[4].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["reason"] == (
+            "freezer_close_aggregate_trigger_products_preserved"
+        )
+        assert aggregate["globalNetDelta"] == -323.3
+        assert aggregate["triggerSelectedWeight"] == 332.0
+        assert aggregate["triggerSelectedResidual"] == 8.7
+        assert sorted(
+            aggregate["selectedProducts"],
+            key=lambda product: product["productId"],
+        ) == [
+            {"productId": 13, "name": "BAG_NULLDAM_BAGEL_140G", "count": 1},
+            {
+                "productId": 23,
+                "name": "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                "count": 1,
+            },
+        ]
+        assert all(
+            product["name"] != "STICK_BINGGRAE_MELONA_75ML"
+            for zone in response["zones"]
+            for product in zone["products"]
+        )
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_rejects_low_raw_confidence_candidate(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {44: 79.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=4,
+            result=TriggerResult(
+                trigger_id="zone4-low-raw-melona",
+                session_id="zone4-low-raw-melona-session",
+                timestamp=120.0,
+                products=[],
+                delta_weight=-316.0,
+                confidence=0.0,
+                video_paths={},
+                loadcell_diagnostics={
+                    "mixed_sign_internal_segments": True,
+                    "compound_positive_segment_count": 1,
+                    "compound_negative_segment_count": 1,
+                    "net_delta_weight": -316.0,
+                    "decision_delta_weight": -316.0,
+                },
+                vision_candidates=[
+                    _candidate_snapshot(
+                        44,
+                        "STICK_BINGGRAE_MELONA_75ML",
+                        rank=1,
+                        weight=79.0,
+                        price=800,
+                        confidence=0.58,
+                        identity_confidence=0.58,
+                    )
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+
+        zone_4 = global_session.zone_sessions[4]
+        assert zone_4.get_active_products() == []
+        aggregate = zone_4.final_weight_validation["freezerCloseAggregate"]
+        assert aggregate["accepted"] is False
+        assert aggregate["candidateCount"] == 0
+        assert aggregate["selectedProducts"] == []
+        assert aggregate["noChargeReason"] == (
+            "no_candidate_combination_for_signed_net_delta"
+        )
     finally:
         store.clear_all()
 
@@ -1005,6 +1228,7 @@ def test_freezer_close_aggregate_supersedes_deferred_candidate_repair(
                     weight=79.0,
                     price=1000,
                     confidence=0.462,
+                    identity_confidence=0.9,
                 ),
             ],
         ),

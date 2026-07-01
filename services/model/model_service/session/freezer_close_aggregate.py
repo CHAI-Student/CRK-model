@@ -134,9 +134,46 @@ class FreezerCloseAggregateResolver:
             return diagnostics
 
         target_weight = abs(float(global_net_delta))
+        (
+            current_counts,
+            current_groups,
+            current_weight,
+        ) = self._current_trigger_product_selection(participants)
+        current_residual = abs(target_weight - current_weight)
+        diagnostics.update(
+            {
+                "finalTargetWeight": round(float(target_weight), 1),
+                "triggerSelectedWeight": round(float(current_weight), 1),
+                "triggerSelectedResidual": round(float(current_residual), 1),
+                "triggerSelectedProducts": self._selected_product_diagnostics(
+                    current_counts,
+                    current_groups,
+                ),
+            }
+        )
+        if current_counts and current_residual <= self._tolerance:
+            diagnostics.update(
+                {
+                    "accepted": True,
+                    "reason": "freezer_close_aggregate_trigger_products_preserved",
+                    "selectedWeight": round(float(current_weight), 1),
+                    "residual": round(float(current_residual), 1),
+                    "allowedResidual": round(float(self._tolerance), 1),
+                    "selectedProducts": self._selected_product_diagnostics(
+                        current_counts,
+                        current_groups,
+                    ),
+                }
+            )
+            self._apply_preserve_output(
+                participants,
+                output_zone=output_zone,
+                diagnostics=diagnostics,
+            )
+            return diagnostics
+
         candidate_groups = self._candidate_groups(participants)
         diagnostics["candidateCount"] = len(candidate_groups)
-        diagnostics["finalTargetWeight"] = round(float(target_weight), 1)
         combination = self._find_best_combination(
             candidate_groups,
             target_weight,
@@ -280,10 +317,15 @@ class FreezerCloseAggregateResolver:
                 self._merge_candidate(groups, parsed, item, source_rank=999)
         return groups
 
-    @staticmethod
+    @classmethod
     def _candidate_from_snapshot(
+        cls,
         candidate: dict[str, object],
     ) -> Optional[_CandidateGroup]:
+        if str(candidate.get("source", "vision") or "vision") != "vision":
+            return None
+        if not cls._snapshot_identity_confidence_passed(candidate):
+            return None
         try:
             product_id = int(candidate.get("product_id"))
             unit_weight = float(candidate.get("unit_weight", 0.0) or 0.0)
@@ -303,8 +345,41 @@ class FreezerCloseAggregateResolver:
             unit_price=int(candidate.get("unit_price", 0) or 0),
             stock_qty=int(candidate.get("stock_qty", 0) or 0),
             best_rank=int(candidate.get("rank", 999) or 999),
-            best_confidence=float(candidate.get("confidence", 0.0) or 0.0),
+            best_confidence=float(
+                candidate.get(
+                    "identity_confidence",
+                    candidate.get("confidence", 0.0),
+                )
+                or 0.0
+            ),
         )
+
+    @staticmethod
+    def _snapshot_identity_confidence_passed(candidate: dict[str, object]) -> bool:
+        try:
+            top_confidence = float(candidate.get("top_confidence", 0.0) or 0.0)
+            side_confidence = float(candidate.get("side_confidence", 0.0) or 0.0)
+            identity_confidence = float(
+                candidate.get(
+                    "identity_confidence",
+                    candidate.get("confidence", 0.0),
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            return False
+
+        top_detected = bool(candidate.get("top")) or top_confidence > 0.0
+        side_detected = bool(candidate.get("side")) or side_confidence > 0.0
+        top_threshold = _snapshot_threshold_for_camera("top")
+        side_threshold = _snapshot_threshold_for_camera("side")
+        if top_detected and top_confidence >= top_threshold:
+            return True
+        if side_detected and side_confidence >= side_threshold:
+            return True
+        if not top_detected and not side_detected:
+            return identity_confidence >= min(top_threshold, side_threshold)
+        return False
 
     def _candidate_from_trigger_product(
         self,
@@ -432,11 +507,11 @@ class FreezerCloseAggregateResolver:
         return sorted(
             matches,
             key=lambda item: (
-                item.residual,
                 item.total_count,
                 item.kind_count,
-                -item.score,
                 item.rank_sum,
+                item.residual,
+                -item.score,
             ),
         )[0]
 
@@ -492,6 +567,25 @@ class FreezerCloseAggregateResolver:
                 dict(output_products) if zone == output_zone else {}
             )
 
+    @staticmethod
+    def _apply_preserve_output(
+        participants: List[_Participant],
+        *,
+        output_zone: int,
+        diagnostics: dict[str, object],
+    ) -> None:
+        for item in participants:
+            zone_diagnostics = dict(diagnostics)
+            zone_diagnostics["role"] = "preserved"
+            if item.zone == output_zone:
+                zone_diagnostics["outputZoneRole"] = "latest_trigger_zone"
+            item.session.final_weight_validation = dict(
+                item.session.final_weight_validation or {}
+            )
+            item.session.final_weight_validation[
+                "freezerCloseAggregate"
+            ] = zone_diagnostics
+
     def _apply_no_charge_output(
         self,
         participants: List[_Participant],
@@ -519,6 +613,30 @@ class FreezerCloseAggregateResolver:
                 "freezerCloseAggregate"
             ] = zone_diagnostics
             item.session.aggregated_products = {}
+
+    def _current_trigger_product_selection(
+        self,
+        participants: List[_Participant],
+    ) -> tuple[Dict[int, int], Dict[int, _CandidateGroup], float]:
+        counts: Dict[int, int] = {}
+        groups: Dict[int, _CandidateGroup] = {}
+        for item in participants:
+            for product in item.trigger.products:
+                count = int(getattr(product, "count", 0) or 0)
+                if count <= 0:
+                    continue
+                parsed = self._candidate_from_trigger_product(product)
+                if parsed is None:
+                    continue
+                product_id = int(parsed.product_id)
+                counts[product_id] = counts.get(product_id, 0) + count
+                self._merge_candidate(groups, parsed, item, source_rank=999)
+        selected_weight = sum(
+            groups[product_id].unit_weight * count
+            for product_id, count in counts.items()
+            if product_id in groups
+        )
+        return counts, groups, float(selected_weight)
 
     @staticmethod
     def _aggregated_products(
@@ -621,6 +739,19 @@ def _diagnostic_float(
         return round(float(diagnostics[key]), 1)
     except (TypeError, ValueError):
         return None
+
+
+def _snapshot_threshold_for_camera(camera: str) -> float:
+    normalized = (camera or "top").strip().lower()
+    if (
+        str(config.machine.cabinet_type).strip().lower() == "freezer"
+        and str(config.vision.camera_layout).strip().lower() == "dual_top_proxy"
+        and normalized in {"top", "side"}
+    ):
+        return float(config.vision.top_confidence_threshold)
+    if normalized == "side":
+        return float(config.vision.side_confidence_threshold)
+    return float(config.vision.top_confidence_threshold)
 
 
 def _eligibility_reason(participants: List[_Participant]) -> str:

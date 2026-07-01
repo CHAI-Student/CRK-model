@@ -699,6 +699,53 @@ class VideoProcessor:
             return float(config.vision.side_confidence_threshold)
         return float(config.vision.top_confidence_threshold)
 
+    @classmethod
+    def _freezer_identity_confidence_gate(
+        cls,
+        vote: VoteResult,
+    ) -> tuple[bool, float, float, float, float]:
+        top_detected = bool(getattr(vote, "top_detected", False))
+        side_detected = bool(getattr(vote, "side_detected", False))
+        max_confidence = float(getattr(vote, "max_confidence", 0.0) or 0.0)
+        top_confidence = float(getattr(vote, "top_max_confidence", 0.0) or 0.0)
+        side_confidence = float(getattr(vote, "side_max_confidence", 0.0) or 0.0)
+        if top_detected and top_confidence <= 0.0 and not side_detected:
+            top_confidence = max_confidence
+        if side_detected and side_confidence <= 0.0 and not top_detected:
+            side_confidence = max_confidence
+        if (
+            top_detected
+            and side_detected
+            and top_confidence <= 0.0
+            and side_confidence <= 0.0
+        ):
+            top_confidence = max_confidence
+            side_confidence = max_confidence
+
+        top_threshold = cls._configured_threshold_for_camera("top")
+        side_threshold = cls._configured_threshold_for_camera("side")
+        passed = False
+        thresholds: list[float] = []
+        if top_detected:
+            thresholds.append(top_threshold)
+            passed = passed or top_confidence >= top_threshold
+        if side_detected:
+            thresholds.append(side_threshold)
+            passed = passed or side_confidence >= side_threshold
+        if not thresholds:
+            thresholds = [top_threshold, side_threshold]
+            passed = max_confidence >= min(thresholds)
+
+        identity_confidence = max(top_confidence, side_confidence, max_confidence)
+        identity_threshold = min(thresholds)
+        return (
+            passed,
+            identity_confidence,
+            identity_threshold,
+            top_confidence,
+            side_confidence,
+        )
+
     def _threshold_for_camera(self, camera_type: str) -> float:
         if self._uses_freezer_dual_top_profile(camera_type):
             return float(self.top_confidence_threshold)
@@ -1457,6 +1504,13 @@ class VideoProcessor:
             camera_exit_counts = cls._freezer_stage_camera_exit_counts(stage_entry)
             roi_x_avg, roi_y_avg = cls._freezer_stage_center(stage_entry)
             exit_path_votes = cls._freezer_exit_path_votes(vote, trace_context)
+            (
+                confidence_floor_passed,
+                identity_confidence,
+                identity_threshold,
+                top_confidence,
+                side_confidence,
+            ) = cls._freezer_identity_confidence_gate(vote)
             interaction_payload = interaction or cls._freezer_candidate_interaction_evidence(
                 vote,
                 stage_entry=stage_entry,
@@ -1470,6 +1524,11 @@ class VideoProcessor:
                     float(getattr(vote, "weighted_confidence", 0.0) or 0.0),
                     4,
                 ),
+                "identity_confidence": round(float(identity_confidence), 4),
+                "identity_threshold": round(float(identity_threshold), 4),
+                "top_confidence": round(float(top_confidence), 4),
+                "side_confidence": round(float(side_confidence), 4),
+                "confidenceFloorPassed": bool(confidence_floor_passed),
                 "source": str(getattr(vote, "source", "vision") or "vision"),
                 "freezerExitPathVotes": int(exit_path_votes),
                 "cameraExitCounts": dict(camera_exit_counts),
@@ -1519,6 +1578,7 @@ class VideoProcessor:
         considered_vision: list[dict[str, Any]] = []
         passthrough_items: list[dict[str, Any]] = []
         rejected_source_items: list[dict[str, Any]] = []
+        rejected_confidence_items: list[dict[str, Any]] = []
         for index, vote in enumerate(ranked_votes):
             source = str(getattr(vote, "source", "vision") or "vision")
             stage_entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
@@ -1541,6 +1601,10 @@ class VideoProcessor:
 
             entry = vision_entry(index=index, vote=vote, interaction=interaction)
             considered_vision.append(entry)
+            if not bool(entry.get("confidenceFloorPassed")):
+                entry["reason"] = "raw_confidence_below_threshold"
+                rejected_confidence_items.append(entry)
+                continue
             passthrough_items.append(
                 {
                     "index": index,
@@ -1623,6 +1687,7 @@ class VideoProcessor:
             "considered": considered_vision,
             "rejectedInteractionCandidates": interaction_rejected_items,
             "rejectedSourceCandidates": rejected_source_items,
+            "rejectedConfidenceCandidates": rejected_confidence_items,
         }
         cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
         logger.info(

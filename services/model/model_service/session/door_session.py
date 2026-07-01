@@ -229,6 +229,11 @@ def build_trigger_candidate_snapshot(
         )
         top_confidence = _coerce_float(_candidate_value(candidate, "top_confidence", 0.0))
         side_confidence = _coerce_float(_candidate_value(candidate, "side_confidence", 0.0))
+        identity_confidence = max(top_confidence, side_confidence)
+        if identity_confidence <= 0.0:
+            identity_confidence = _coerce_float(
+                _candidate_value(candidate, "identity_confidence", confidence),
+            )
 
         snapshots.append(
             {
@@ -240,6 +245,7 @@ def build_trigger_candidate_snapshot(
                 "unit_price": unit_price,
                 "stock_qty": stock_qty,
                 "confidence": round(confidence, 4),
+                "identity_confidence": round(identity_confidence, 4),
                 "source": str(_candidate_value(candidate, "source", "vision") or "vision"),
                 "top": bool(top_confidence > 0),
                 "side": bool(side_confidence > 0),

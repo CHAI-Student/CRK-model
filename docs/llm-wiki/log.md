@@ -1,5 +1,23 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer trigger-first close and raw confidence gate
+
+- Added the freezer trigger-products-first CLOSE rule. In aggregate-eligible
+  freezer sessions, CLOSE now checks the already-selected trigger products
+  against signed `globalNetDelta` before running any total-weight fallback
+  solver. If the selected trigger basket is within
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`, products and per-zone
+  `weightDelta` values are preserved.
+- Recorded the Bagel + Burger field failure mode. Bagel `156g` plus Burger
+  `176g` explains `globalNetDelta=-323.3g` with an `8.7g` residual, so it
+  stays selected and a lower-residual `Melona x4` fallback is not allowed to
+  replace it.
+- Tightened freezer product identity to raw/max camera confidence. The field
+  `.env.example` now uses product thresholds `0.70/0.70`; weighted/combined
+  confidence remains diagnostic, while raw/max confidence below threshold is
+  excluded from handled candidates, engine charge options, and CLOSE fallback
+  candidates.
+
 ## [2026-07-01] maintenance | freezer vision candidate pool ordered solver
 
 - Retired freezer loadcell-residual candidate narrowing before engine judgment.
@@ -21,7 +39,8 @@
 - Updated the freezer field `.env.example` profile to
   `models/set9_imbalance_16.engine`, product thresholds `0.50/0.50`, hand
   threshold `0.30`, top/side weights `0.60/0.40`, freezer tolerance `15.0`,
-  and Top FFmpeg gamma/contrast `1.0/1.0`.
+  and Top FFmpeg gamma/contrast `1.0/1.0`. This threshold note is superseded
+  by the later raw-confidence `0.70/0.70` field profile above.
 
 ## [2026-07-01] maintenance | freezer signed-net close aggregate simplification
 

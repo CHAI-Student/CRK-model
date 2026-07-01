@@ -54,8 +54,8 @@ vision-supported product identity.
   pass the freezer motion floor, and pass freezer vote thresholds. Threshold
   rescue and ROI rescue are disabled so weak/static evidence does not enter
   freezer candidates.
-- Current freezer product confidence thresholds are `0.50` for both Top and
-  Side, matching the smaller freezer product-set deployment. Hand tracking uses
+- Current freezer product confidence thresholds are `0.70` raw/max confidence
+  for both Top and Side, matching the stricter freezer field setting. Hand tracking uses
   a separate `0.30` floor for class `0`, but freezer `dual_top_proxy` only
   enables hand class `0` and hand-path filtering on physical `top_middle`.
   Physical `top_side` remains product-only and cannot filter candidates through
@@ -103,9 +103,10 @@ vision-supported product identity.
   freezer candidates are the only chargeable identity source; stage-only,
   active-only, and weight-nearest products remain diagnostics. The handled
   freezer candidate list sent to OPS, the engine, and DoorSession keeps every
-  regular candidate that passed threshold, ROI, motion, and valid top-middle
-  hand-path gates. It does not select one product by loadcell residual before
-  judgment.
+  regular candidate that passed raw threshold, ROI, motion, and valid
+  top-middle hand-path gates. Weighted/combined confidence is diagnostic and
+  cannot satisfy the freezer raw identity floor. The video path does not
+  select one product by loadcell residual before judgment.
 - Freezer count and combination selection happens in the decision engine. The
   ordered solver tests rank-1 `x1`, rank-2 `x1`, then same-product counts by
   count and rank, then mixed combinations by total count and rank. The first
@@ -162,9 +163,9 @@ vision-supported product identity.
 - Segment-first matching ranks weak stage traces as unsupported evidence. This
   prevents low-confidence small-product repeats from beating active large-bottle
   explanations or being reported as `COMPLETE`.
-- In freezer mode, product stage/diagnostic/rescue evidence below the `0.50`
-  product floor is also unsupported for identity creation. Trace/debug records
-  can still show the rejected observation, but it cannot become a final
+- In freezer mode, product stage/diagnostic/rescue evidence below the `0.70`
+  raw/max product floor is also unsupported for identity creation. Trace/debug
+  records can still show the rejected observation, but it cannot become a final
   product fallback.
 - Stage-count evidence that passed the weight gate can be promoted to a
   synthetic `stage_weight_gate` candidate when active stock/weight are valid,
@@ -268,17 +269,16 @@ vision-supported product identity.
   remain. This does not change individual `/trigger` responses. Return-bearing
   sessions are reconciled first through deferred returns; unresolved unmatched
   or cross-zone records can still block repeat correction.
-- Freezer CLOSE can then run the signed-net aggregate resolver for unstable
-  freezer sessions with mixed-sign internal segment diagnostics, multiple
-  meaningful freezer triggers, or freezer triggers across zones. It sums the
-  participating signed `delta_weight` values, clears all participant products
-  when that global net is near zero, and solves a negative net target from
-  vision-supported candidate snapshots and trigger products only. Internal
-  positive freezer segments are not subtracted as return hints. Accepted
-  baskets are sent on the latest participating trigger zone; no-fit negative
-  nets clear provisional products and record no-charge diagnostics. This
-  changes only CLOSE placement and `weightDelta` values in the existing zone
-  array; trigger responses and public schemas stay unchanged.
+- Freezer CLOSE can then run the trigger-first signed-net aggregate resolver
+  for unstable freezer sessions with mixed-sign internal segment diagnostics,
+  multiple meaningful freezer triggers, or freezer triggers across zones. It
+  sums the participating signed `delta_weight` values and first checks whether
+  the already-selected trigger products explain that global net inside freezer
+  tolerance. Fitting trigger baskets are preserved. Only mismatched baskets are
+  cleared and re-solved from raw-confidence-gated vision-supported candidate
+  snapshots and trigger products. Accepted fallback baskets are sent on the
+  latest participating trigger zone; no-fit negative nets clear provisional
+  products and record no-charge diagnostics. Public schemas stay unchanged.
 - CLOSE final-weight validation is identity-stable for clean vision-supported
   baskets. If every current product id is backed by strong regular vision
   evidence, a different repeated candidate cannot replace the basket only

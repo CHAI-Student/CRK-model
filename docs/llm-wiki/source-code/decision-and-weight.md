@@ -125,15 +125,19 @@ Important inputs:
   solving.
 - Freezer product identity creation also respects the freezer product
   confidence floor. Stage-count, diagnostic, threshold-rescue, ROI-rescue, and
-  weight-gated rescue evidence below the current `0.50` product threshold can
-  remain visible in diagnostics, but it cannot create a final product fallback.
+  weight-gated rescue evidence below the current `0.70` raw/max product
+  threshold can remain visible in diagnostics, but it cannot create a final
+  product fallback. Weighted/combined confidence is diagnostic only for this
+  gate; at least one detected camera's raw/max product confidence must meet
+  the configured floor.
 - Same-product freezer repeats are now inferred only by the ordered solver.
   Dual-top same-class observations are normalized to `count_hint=1` before the
   engine; `x2/x3` appears only when the rank-ordered same-product count pass
   fits the target and stock/count caps allow it. The field shape
   `delta=-309.5g`, one `BAG_NULLDAM_BAGEL_140G` candidate, `unit_weight=156g`,
-  and `confidence=0.528` becomes `x2` because `156g x2 ~= 309.5g`; a
-  non-fitting single remains no-charge instead of chargeable `PARTIAL x1`.
+  and raw identity confidence above the product floor becomes `x2` because
+  `156g x2 ~= 309.5g`; a low raw-confidence candidate remains diagnostic-only,
+  and a non-fitting single remains no-charge instead of chargeable `PARTIAL x1`.
 - Multi-kind freezer results are selected only after all same-product count
   attempts miss. Mixed combinations are still limited to candidates in the
   visual pool with valid active-product stock and positive unit weight.
@@ -203,7 +207,7 @@ Important inputs:
   passed the weight gate, have an in-stock positive-weight active product, meet
   `MODEL__WEIGHT__DETECTED_SINGLE_FALLBACK_MIN_VOTES`, and reach confidence
   `>=0.08`. In current freezer mode, this same recovery path is additionally
-  gated by the product confidence floor, so sub-`0.50` stage evidence cannot
+  gated by the product confidence floor, so sub-`0.70` raw stage evidence cannot
   create freezer product identity. If the same class already exists in
   `vision_candidates` as a non-regular rescue/stage candidate, weight-gated
   stage evidence can upgrade that entry to `source=stage_weight_gate`; regular
@@ -570,24 +574,22 @@ Important inputs:
   the detected `products`/`totalPrice` for Edge output and record
   `finalWeightValidation.outputPolicy=products_as_detected` plus
   `unresolvedProducts` diagnostics.
-- Freezer sessions add a close-only signed-net aggregate solver after deferred
-  return reconciliation and final-weight validation. This is a basket-level
-  policy, not a new trigger-time identity source. It applies only to freezer
-  sessions with mixed-sign internal segment diagnostics, multiple meaningful
-  freezer triggers, or freezer triggers across zones. It builds its candidate
-  pool from participating trigger vision snapshots and trigger products with
-  valid positive weights, sums the participating signed `delta_weight` values
-  as `globalNetDelta`, and solves `abs(globalNetDelta)` only when the net is
-  negative. Internal positive freezer segments are diagnostics-only and are not
-  subtracted as `return_weight_hints`.
-- Accepted freezer aggregate results are attributed to the latest participating
-  freezer trigger zone. Other participating freezer zones are cleared and get a
-  close-time `weightDelta` override of `0.0`; the output zone receives the
-  final selected basket and a `weightDelta` equal to the signed global net. If
+- Freezer sessions add a close-only trigger-first signed-net aggregate solver
+  after deferred return reconciliation and final-weight validation. This is a
+  basket-level policy, not a new trigger-time identity source. It applies only
+  to freezer sessions with mixed-sign internal segment diagnostics, multiple
+  meaningful freezer triggers, or freezer triggers across zones. It first sums
+  participating signed `delta_weight` values as `globalNetDelta` and checks the
+  already-selected trigger products against `abs(globalNetDelta)`.
+- If trigger products explain the signed net inside freezer tolerance, CLOSE
+  preserves the existing zone products and per-zone `weightDelta` values. If
+  they miss tolerance, CLOSE clears provisional products and solves
+  `abs(globalNetDelta)` only from raw-confidence-gated participating trigger
+  vision snapshots plus trigger products with valid positive weights. Accepted
+  fallback aggregate results are attributed to the latest participating
+  freezer trigger zone; other participating zones get `weightDelta=0.0`. If
   the signed net is near zero or no candidate combination fits a negative net,
-  participant products are cleared and the result is no-charge. This preserves
-  public response schemas while changing CLOSE placement for unstable freezer
-  sessions.
+  participant products are cleared and the result is no-charge.
 
 ## Related Wiki Pages
 

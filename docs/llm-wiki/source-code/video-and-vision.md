@@ -104,12 +104,14 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` is only a deprecated split
   fallback. Threshold rescue and ROI rescue are disabled for freezer
   candidates so only strong in-ROI evidence reaches the decision engine.
-- Current freezer product vote floors are `0.50` for both Top and Side through
+- Current freezer product vote floors are `0.70` for both Top and Side through
   `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD`. Product detections below that
-  floor may still appear in traces as rejected observations, but they cannot
-  create regular votes, rescue candidates, stage-count fallback, or diagnostic
-  fallback identity evidence in freezer mode.
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD`. Product detections below the
+  relevant raw/max camera floor may still appear in traces as rejected
+  observations, but they cannot create regular votes, rescue candidates,
+  stage-count fallback, diagnostic fallback identity evidence, or close-time
+  aggregate fallback candidates in freezer mode. Weighted/combined confidence
+  is logged separately and does not satisfy this raw identity floor.
 - Hand tracking has a separate floor:
   `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30`. Hand detections below this
   value are removed before `HandPathTracker` sees them; hand class id remains
@@ -122,7 +124,7 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - After video processing, freezer dual-top removals keep a vision candidate
   pool. `VideoProcessor.filter_freezer_handled_candidates()` passes through all
   regular `source=vision` candidates inside top-K that already passed the
-  product threshold, freezer ROI, motion, and valid top-middle hand-path gates.
+  raw product threshold, freezer ROI, motion, and valid top-middle hand-path gates.
   It no longer narrows by loadcell residual, multi-kind weight fit, or
   same-product repeat. The filter normalizes dual-top same-class
   `instance_count_hint` to `1`; repeated counts are inferred later by the
@@ -153,7 +155,8 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `[FREEZER-CANDIDATE-FILTER]` line. In the current policy, a normal enabled
   freezer removal should show `reason=vision_identity_passthrough` with
   `raw=N` and `handled=N` after visual gates and hand-path rejection. Candidate
-  OPS lines expose `count_hint` and
+  diagnostics expose weighted `confidence`, raw `identity_confidence`, camera
+  raw confidences, the active `identity_threshold`, `count_hint`, and
   `freezer_exit_votes`; final result OPS lines expose engine `product_count`,
   so field logs can distinguish pre-engine candidate hints from chargeable
   basket counts.

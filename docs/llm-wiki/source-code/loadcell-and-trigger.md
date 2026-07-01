@@ -196,11 +196,13 @@ queued work can be skipped if a later return balances it before video starts.
 - For freezer sessions, internal mixed-sign positive segments no longer create
   trigger-time `return_weight_hints`. If the door-open session has mixed-sign
   internal segment diagnostics, two or more meaningful freezer triggers, or
-  freezer triggers across zones, chargeable output can be re-solved at CLOSE by
-  the freezer aggregate resolver from the signed sum of participating
-  `delta_weight` values and assigned to the latest participating freezer
-  trigger zone. This keeps the trigger schema unchanged while avoiding shared
-  dual-top camera overlap from locking in a per-zone basket too early.
+  freezer triggers across zones, CLOSE first validates the already-selected
+  trigger products against the signed sum of participating `delta_weight`
+  values. If that basket fits freezer tolerance, per-zone output is preserved;
+  otherwise the freezer aggregate resolver re-solves from raw-confidence-gated
+  trigger candidates and assigns fallback output to the latest participating
+  freezer trigger zone. This keeps the trigger schema unchanged while avoiding
+  shared dual-top camera overlap from locking in a mismatched per-zone basket.
 - Freezer CLOSE final-weight validation can now repair a no-product or
   final-weight-mismatch partial result by borrowing a later unused candidate
   snapshot from the same global door session. The repair is single-removal

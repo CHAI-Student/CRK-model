@@ -107,8 +107,8 @@ shape without rereading every long historical document.
 - Python service code defaults still point at `models/0204_morning.engine`, but
   the current copyable `.env.example` is freezer-field oriented and overrides
   the engine path to `models/set9_imbalance_16.engine`. Current freezer product
-  vote floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50`; hand tracking uses the
+  vote floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70`; hand tracking uses the
   separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30` with hand class id
   `0`, but freezer `dual_top_proxy` only includes hand class `0` for the
   physical `top_middle` stream. The physical `top_side` stream remains
@@ -126,18 +126,19 @@ shape without rereading every long historical document.
   template uses the upper half
   (`MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper`,
   `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT`, default `240`). It applies
-  stronger motion/vote floors and a `0.50` product confidence floor, while
+  stronger motion/vote floors and a `0.70` raw product confidence floor, while
   hand detections are filtered independently at `0.30`. Threshold/ROI/stage/
   diagnostic fallback evidence below the product floor cannot create freezer
   product identity. `freezer_roi_passed` increments exit-path votes; rejected
   `freezer_roi_filtered` evidence remains diagnostic only.
 - Freezer handled candidates are now a vision candidate pool, not a
-  weight-narrowed single choice. Raw regular candidates that pass product
-  threshold, ROI, motion, and valid top-middle hand-path gates stay in OPS
-  candidates, trace candidate snapshots, engine input, and DoorSession close
-  snapshots. The handled filter normalizes dual-top same-class counts to
-  `count_hint=1`; stage-only, active-only, and weight-nearest products remain
-  diagnostics only.
+  weight-narrowed single choice. Raw regular candidates that pass raw/max
+  product threshold, ROI, motion, and valid top-middle hand-path gates stay in
+  OPS candidates, trace candidate snapshots, engine input, and DoorSession
+  close snapshots. Weighted/combined confidence is diagnostic; freezer charge
+  eligibility uses the per-camera raw/max identity confidence. The handled
+  filter normalizes dual-top same-class counts to `count_hint=1`; stage-only,
+  active-only, and weight-nearest products remain diagnostics only.
 - Freezer loadcell validation runs in the decision engine as an ordered
   candidate-pool combination search. The engine tests candidate rank-1 `x1`,
   rank-2 `x1`, and so on, then same-product counts by count/rank, then mixed
@@ -190,19 +191,20 @@ shape without rereading every long historical document.
   then `-150g` remains `decision_delta=-80g`, and `+47.6g` then `-295.3g`
   remains about `decision_delta=-247.7g`. Positive-only freezer return triggers
   still use the normal return path.
-- Freezer now uses a signed-net CLOSE aggregate policy for unstable door-open
-  sessions. Simple single stable negative freezer triggers without mixed-sign
-  diagnostics keep the existing per-zone path. If a freezer session has
-  mixed-sign internal segment diagnostics, two or more meaningful freezer
-  triggers, or freezer triggers across zones, CLOSE discards provisional
-  participant products and sums the participating signed `delta_weight` values.
-  If that global net is within freezer tolerance, all participant products and
-  `weightDelta` values are cleared. If the global net is negative, CLOSE solves
-  `abs(globalNetDelta)` from handled/final trigger candidates and trigger
-  products only, then attributes the accepted final basket to the latest
-  participating freezer trigger zone. Other participant zones return
-  `weightDelta=0.0`; the output zone returns the signed net `weightDelta` in
-  the existing public zone array schema.
+- Freezer now uses a trigger-first signed-net CLOSE aggregate policy for
+  unstable door-open sessions. Simple single stable negative freezer triggers
+  without mixed-sign diagnostics keep the existing per-zone path. If a freezer
+  session has mixed-sign internal segment diagnostics, two or more meaningful
+  freezer triggers, or freezer triggers across zones, CLOSE first checks
+  whether the already-selected trigger products explain `abs(globalNetDelta)`
+  inside freezer tolerance. If they do, products and per-zone `weightDelta`
+  values are preserved; for example Bagel `156g` + Burger `176g` at
+  `globalNetDelta=-323.3g` stays as Bagel + Burger because the `8.7g`
+  residual is within `15g`. Only when trigger products miss tolerance does
+  CLOSE clear provisional products and solve `abs(globalNetDelta)` from
+  raw-confidence-gated handled/final trigger candidates and trigger products,
+  attributing accepted fallback baskets to the latest participating freezer
+  trigger zone.
 - Chargeable negative deltas use matched-only finalization. After regular
   matching fails, forced fallback can still return a low-confidence `PARTIAL`
   from active product weights, but only when the product weight sum explains

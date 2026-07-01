@@ -779,7 +779,7 @@ def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
             make_candidate(46, "STICK_LALA_SWEET_GRAPE_ZERO_70ML", confidence=1.0),
             make_candidate(37, "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G", confidence=1.0),
             make_candidate(13, "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G", confidence=1.0),
-            make_candidate(44, "STICK_BINGGRAE_MELONA_75ML", confidence=0.5242),
+            make_candidate(44, "STICK_BINGGRAE_MELONA_75ML", confidence=0.7242),
             make_candidate(24, "BAG_JACKSONVILLE_BIG_HOT_DOG_115G", confidence=0.4311),
             make_candidate(
                 42,
@@ -858,7 +858,7 @@ def test_freezer_vision_first_prefers_melona_residual_over_yomamte_exit_votes(
             make_candidate(
                 30,
                 "BOX_BINGGRAE_YOMAMTE_150ML",
-                confidence=0.5075,
+                confidence=0.8075,
                 raw_vote_count=103,
             ),
             make_candidate(
@@ -967,7 +967,7 @@ def test_freezer_vision_first_keeps_video_handled_yomamte_over_stage_melona(
             make_candidate(
                 30,
                 "BOX_BINGGRAE_YOMAMTE_150ML",
-                confidence=0.5149,
+                confidence=0.7149,
             ),
         ],
         delta_weight=-87.1,
@@ -1025,7 +1025,7 @@ def test_freezer_vision_first_strict_vision_candidate_blocks_stage_only_priority
             make_candidate(
                 30,
                 "BOX_BINGGRAE_YOMAMTE_150ML",
-                confidence=0.5149,
+                confidence=0.7149,
             ),
         ],
         delta_weight=-87.1,
@@ -1322,13 +1322,13 @@ def test_freezer_vision_first_counts_single_side_bagel_repeat_from_weight(
     candidate = make_candidate(
         class_id=27,
         name="BAG_NULLDAM_BAGEL_140G",
-        confidence=0.528,
+        confidence=0.728,
         raw_vote_count=1,
         instance_count_hint=1,
     )
     candidate.vote_count = 1
     candidate.top_confidence = 0.0
-    candidate.side_confidence = 0.528
+    candidate.side_confidence = 0.728
     candidate.freezer_exit_path_votes = 0
 
     result = engine.judge(
@@ -1356,6 +1356,40 @@ def test_freezer_vision_first_counts_single_side_bagel_repeat_from_weight(
     assert diagnostics["selected"][0]["count"] == 2
     assert diagnostics["selected"][0]["combinationResidual"] == pytest.approx(2.5)
     assert diagnostics["orderedCombinationSearch"]["accepted"] is True
+
+
+def test_freezer_vision_first_rejects_low_raw_confidence_candidate(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+    candidate = make_candidate(
+        class_id=44,
+        name="STICK_BINGGRAE_MELONA_75ML",
+        confidence=0.58,
+        raw_vote_count=9,
+    )
+    candidate.top_confidence = 0.58
+    candidate.side_confidence = 0.0
+
+    result = engine.judge(
+        vision_candidates=[candidate],
+        delta_weight=-79.0,
+        active_products=[
+            make_active_product(44, "STICK_BINGGRAE_MELONA_75ML", weight=79.0),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.NO_DETECTION
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "no_supported_vision_candidates"
+    considered = diagnostics["considered"][0]
+    assert considered["reason"] == "insufficient_vision_identity_evidence"
+    assert considered["identity_confidence"] == 0.58
+    assert considered["identity_threshold"] == 0.70
 
 
 def test_freezer_ordered_solver_selects_rank1_cheese_burger_before_dumpling(
