@@ -565,26 +565,11 @@ def _log_freezer_candidate_filter_ops(
         and float(delta_weight) < 0.0,
     )
     reason = diagnostics.get("reason", "not_recorded")
-    selected = diagnostics.get("selected")
-    selected = selected if isinstance(selected, dict) else {}
-    repeat_reject = "none"
-    for item in diagnostics.get("rejectedSameProductRepeatCandidates", []) or []:
-        if not isinstance(item, dict):
-            continue
-        repeat_reject = str(
-            item.get("sameProductRepeatRejectedReason")
-            or item.get("repeatSelectionRejectedReason")
-            or item.get("reason")
-            or "rejected"
-        )
-        break
     ops_logger.info(
         "[OPS][FREEZER-CANDIDATE-FILTER] zone=%s camera_layout=%s "
         "enabled=%s raw=%s handled=%s reason=%s top_k=%s "
         "freezer_min_votes=%s freezer_min_ratio=%.3f "
-        "freezer_motion_min_px=%.1f freezer_exit_votes=%s "
-        "selected_count=%s expected_weight=%s count_residual=%s "
-        "repeat_mode=%s repeat_reject=%s",
+        "freezer_motion_min_px=%.1f freezer_exit_votes=%s",
         zone,
         camera_layout,
         enabled,
@@ -596,11 +581,6 @@ def _log_freezer_candidate_filter_ops(
         float(config.vision.freezer_min_vote_ratio),
         float(config.vision.freezer_motion_min_displacement_px),
         int(config.vision.freezer_min_exit_path_votes),
-        selected.get("count", "n/a"),
-        selected.get("expectedWeight", "n/a"),
-        selected.get("countWeightResidual", "n/a"),
-        selected.get("repeatEvidenceMode", "n/a"),
-        repeat_reject,
     )
     if camera_layout != "dual_top_proxy":
         ops_logger.warning(

@@ -52,9 +52,8 @@ vending stack. The README now frames it as the legacy/reference TensorRT
 ## Environment Defaults
 
 `.env.example` is the sanitized freezer-first field template. It sets freezer
-mode, dual-top camera layout, and `models/set7_v8best.engine` while keeping
+mode, dual-top camera layout, and `models/set9_imbalance_16.engine` while keeping
 credentials as placeholders. Important groups:
-Important groups:
 
 - API: `MODEL__API__HOST`, `MODEL__API__PORT`, `MODEL__API__LOG_LEVEL`.
 - Vision: model path, freezer product Top/Side confidence floors, separate

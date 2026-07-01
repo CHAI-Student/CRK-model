@@ -33,12 +33,12 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 
 - `MODEL__API__PORT=8002`
 - Code default `MODEL__VISION__YOLO_MODEL_PATH=models/0204_morning.engine`;
-  the copyable freezer `.env.example` sets `models/set7_v8best.engine`.
+  the copyable freezer `.env.example` sets `models/set9_imbalance_16.engine`.
 - `MODEL__VISION__YOLO_INTERNAL_CONF_THRESHOLD=0.01` keeps raw YOLO
   collection broad; service-side regular candidate thresholds do the main
   filtering.
 - `MODEL__VISION__HAND_CLASS_ID=0` identifies hand detections, and
-  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` is the separate hand-tracking
+  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30` is the separate hand-tracking
   confidence floor. This is intentionally lower than the current freezer
   product vote floor because hand recall is weaker.
 - `MODEL__VISION__LOG_ENGINE_CLASSES=off` by default. Set it to `on`/`true`/`1`
@@ -81,16 +81,16 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   refrigerated loadcell/vision/weight policy. The copyable `.env.example` is
   freezer-first and sets `MODEL__MACHINE__CABINET_TYPE=freezer`, keeping
   zone-sliced loadcell input but using freezer-specific upper-half dual-top
-  filtering and a vision-first decision branch where weight is only a
-  tie-break/diagnostic signal.
+  filtering and a vision-candidate-pool decision branch where weight validates
+  ordered count/combination choices.
 - `MODEL__WEIGHT__FREEZER_CONFIDENCE_TIE_BAND=0.08` controls how close
   freezer single-item fallback candidates must be in confidence before weight
   residual can break the tie.
 - `MODEL__WEIGHT__FREEZER_MULTI_MIN_CONFIDENCE=0.45` is the freezer
   multi-kind vision evidence floor.
 - `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` is the freezer-only
-  loadcell tolerance for single-candidate reliability and combined multi-kind
-  weight fits.
+  loadcell tolerance for ordered candidate-pool count and combination
+  validation.
 - `MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED` is retained for
   config compatibility, but ordinary nonzero freezer deltas still require
   segment/combined-weight support inside the freezer tolerance before returning
@@ -155,14 +155,15 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   (`center_y <= 240`). `lower` remains a rollback value. The legacy
   `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` key is a deprecated split fallback
   only and should not be used in new templates.
-- `MODEL__VISION__FREEZER_MIN_EXIT_PATH_VOTES=3` is the minimum
-  `freezer_roi_passed`/`freezerExitPathVotes` evidence required for
-  freezer handled-candidate weight-gate and near-weight rescue tiers.
+- `MODEL__VISION__FREEZER_MIN_EXIT_PATH_VOTES=3` remains part of freezer
+  interaction diagnostics and legacy exit-path evidence. The current freezer
+  handled filter no longer uses it to narrow candidates by loadcell residual
+  before engine judgment.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both
   keep the lower region.
-- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70` are the current freezer field
+- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50` are the current freezer field
   product vote floors. In freezer mode, product detections below the relevant
   camera floor cannot become regular votes, threshold/ROI rescue, weight-gated
   rescue, stage-count fallback, or diagnostic fallback identity evidence.
@@ -177,10 +178,10 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   candidate band through `center_x <= 405` for threshold-passed side detections
   that still survive motion filtering; low-confidence threshold rescue remains
   hard-ROI gated.
-- The Jetson templates currently set `MODEL__VISION__FFMPEG_TOP_GAMMA=1.2`,
-  `MODEL__VISION__FFMPEG_TOP_CONTRAST=1.2`,
+- The current freezer field template sets `MODEL__VISION__FFMPEG_TOP_GAMMA=1.0`,
+  `MODEL__VISION__FFMPEG_TOP_CONTRAST=1.0`,
   `MODEL__VISION__FFMPEG_SIDE_GAMMA=1.0`, and
-  `MODEL__VISION__FFMPEG_SIDE_CONTRAST=1.0` for the Pepsi field profile.
+  `MODEL__VISION__FFMPEG_SIDE_CONTRAST=1.0`.
 - `MODEL__VISION__ROI_RESCUE_REQUIRE_MOTION=true` and
   `MODEL__VISION__ROI_RESCUE_MAX_OVER_LIMIT_PX=0.0` keep right-side/static
   ROI-filtered detections from re-entering as rescue candidates.

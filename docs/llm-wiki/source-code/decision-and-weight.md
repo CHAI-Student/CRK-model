@@ -94,76 +94,51 @@ Important inputs:
 - Freezer results can only use products present in final vision candidates and
   in the active-product snapshot. Loadcell-only, active-only, or weight-nearest
   products that are absent from candidates remain no-charge misses.
-- The normal `MODEL__WEIGHT__TOLERANCE_GRAMS` value is not a hard product
-  reject gate in freezer mode. Single-item freezer selection first assigns a
-  weight/exit-path tier, then sorts same-tier options by interaction penalty,
-  source support, weight residual, dual-camera exit-path support,
-  `freezerExitPathVotes`, confidence, and rank. The confidence-band residual
-  fallback is still used when no strict/near weight-gate option exists. A
-  single freezer result is weight-reliable when residual is within
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`.
+- The freezer branch uses a vision candidate pool followed by ordered
+  loadcell validation. Candidate identity order comes from the passed vision
+  candidates, not from loadcell residual. The solver tests rank-1 `x1`, rank-2
+  `x1`, and so on, then rank-ordered same-product counts, then mixed
+  combinations by total count and rank. The first expected weight within
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` is selected.
+- This order is deliberate: for the cheese burger field failure, target
+  `183.7g`, rank-1 cheese burger `176g`, and lower-rank dumpling `189g`, the
+  engine selects cheese burger `x1` because rank-1 `x1` already fits freezer
+  tolerance. Weight residual is a pass/fail signal, not an identity ranking
+  score once a higher-ranked candidate is inside tolerance.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
-  `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
-  `weight_residual`, `selectionTier`, `freezerExitPathVotes`, and the full
+  `weight_used_as=combination_validation` or `diagnostic`,
+  `weight_reliable`, `weight_residual`, `selectionTier`,
+  `orderedCombinationSearch`, `freezerExitPathVotes`, and the full
   considered/selected candidate list. `freezerExitPathVotes` comes from
   `freezer_roi_passed` or explicit legacy vote fields, not ROI-rejected
-  detections. A large residual can remain `partial` only when product weight is
-  unavailable/diagnostic; when the selected product has a valid positive
-  weight, the final full-delta guard below can suppress the mismatched basket.
-- Single freezer removal segments now use a handled-candidate narrowing step:
-  raw top-K vision candidates stay in trace diagnostics, but OPS candidates,
-  engine input, and DoorSession snapshots receive the one handled product
-  selected by freezer exit-path evidence and weight residual before falling
-  back to top confidence-band weight residual. Multi-segment trace evidence is
-  diagnostic support, not a sufficient reason to keep raw freezer candidates:
-  viable multi-kind weight fits are preserved, otherwise strict/near single or
-  same-product repeat narrowing can still run.
-- Stage-only freezer rescue is limited to candidate-miss recovery. When the
-  video handled-filter has already accepted one supported freezer candidate,
-  direct `freezer_vision_first` will not recreate considered-but-unselected
-  classes as `freezer_stage_exit_path`. If a non-stage candidate has a strict
-  freezer weight-gate fit, ambiguous dual-camera stage-only evidence is
-  demoted into normal single ranking instead of taking the special priority
-  tier.
+  detections. If no candidate-pool combination fits a valid positive-weight
+  freezer target, the branch returns no-charge `UNCERTAIN` with
+  `reason=no_weight_fit_for_vision_candidate_pool`.
+- Single freezer removal segments no longer use pre-engine
+  loadcell-residual narrowing. OPS candidates, engine input, and DoorSession
+  snapshots receive the visual candidate pool from
+  `VideoProcessor.filter_freezer_handled_candidates()`. The engine performs the
+  count and combination decision from that pool.
+- Stage-only freezer rescue is diagnostic-only under this branch. If a product
+  is absent from the passed vision candidate pool, it cannot be created from
+  stage evidence, active products, or nearest weight during freezer ordered
+  solving.
 - Freezer product identity creation also respects the freezer product
   confidence floor. Stage-count, diagnostic, threshold-rescue, ROI-rescue, and
-  weight-gated rescue evidence below the current `0.70` product threshold can
+  weight-gated rescue evidence below the current `0.50` product threshold can
   remain visible in diagnostics, but it cannot create a final product fallback.
-- Multi-kind freezer results require segment/compound or combined-candidate
-  weight support inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`.
-  Strong dual-camera exit-path evidence alone no longer selects multiple
-  freezer candidates for ordinary nonzero deltas; rejected sets record
-  `freezer_multi_kind_weight_mismatch` and fall back to the single handled
-  freezer selection path.
-- Same-product freezer repeats can be inferred from weight even when
-  `instance_count_hint=1`. The candidate must still be a final vision
-  candidate with confidence above the freezer multi floor, positive stock, and
-  a count bounded by stock, `max_items_per_segment`,
-  `same_product_max_count`, and `max_count_per_item`. Multi-candidate repeat
-  competition still requires freezer exit-path votes and enough vote evidence.
-  If the only candidate identity is a regular `vision` product, the count may
-  instead promote from weight alone when the repeated residual is inside
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS` and is closer than `x1`;
-  this covers side-only bagel cases such as `156g x2` against a `309.5g`
-  removal. Trace diagnostics expose `sameProductRepeatCandidates`,
-  `rejectedSameProductRepeatCandidates`, `singleRegularVisionIdentity`,
-  `repeatEvidenceMode`, `count`, `expectedWeight`, and
-  `countWeightResidual`. The trigger conversion layer preserves frame-level
-  votes as `EnsembleResult.raw_vote_count`; `EnsembleResult.vote_count` remains
-  the Top/Side consensus scale, so repeat gates must read raw frame evidence
-  from `raw_vote_count` whenever they use the multi-candidate evidence path.
-- Direct `freezer_vision_first` results with valid positive product weights are
-  post-checked by `_enforce_full_delta_match()` using
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Same-product repeat is
-  tried before this guard; if no repeat or multi-kind fit explains the full
-  stable negative delta, the engine returns no-charge `UNCERTAIN` with
-  `final_weight_mismatch_guard` instead of preserving a chargeable mismatched
-  `PARTIAL x1`. The field shape `delta=-309.5g`, one
-  `BAG_NULLDAM_BAGEL_140G` candidate, `unit_weight=156g`,
-  `confidence=0.528` should therefore become `x2`; the same candidate below
-  the repeat confidence floor is rejected as no-charge mismatch.
+- Same-product freezer repeats are now inferred only by the ordered solver.
+  Dual-top same-class observations are normalized to `count_hint=1` before the
+  engine; `x2/x3` appears only when the rank-ordered same-product count pass
+  fits the target and stock/count caps allow it. The field shape
+  `delta=-309.5g`, one `BAG_NULLDAM_BAGEL_140G` candidate, `unit_weight=156g`,
+  and `confidence=0.528` becomes `x2` because `156g x2 ~= 309.5g`; a
+  non-fitting single remains no-charge instead of chargeable `PARTIAL x1`.
+- Multi-kind freezer results are selected only after all same-product count
+  attempts miss. Mixed combinations are still limited to candidates in the
+  visual pool with valid active-product stock and positive unit weight.
 - Direct `freezer_vision_first` selection reads the same interaction evidence
-  as the video handled-filter path. `staticShelfLikely` top-only candidates are
+  as the video candidate-pool path. `staticShelfLikely` top-only candidates are
   softly demoted unless trajectory or hand-path support exists. The hand
   fields include `handPathValidUpperRoi`, `handInteractionPassed`,
   `handNearFrameCount`, `handNearVoteRatio`, `minHandDistancePx`,
@@ -228,7 +203,7 @@ Important inputs:
   passed the weight gate, have an in-stock positive-weight active product, meet
   `MODEL__WEIGHT__DETECTED_SINGLE_FALLBACK_MIN_VOTES`, and reach confidence
   `>=0.08`. In current freezer mode, this same recovery path is additionally
-  gated by the product confidence floor, so sub-`0.70` stage evidence cannot
+  gated by the product confidence floor, so sub-`0.50` stage evidence cannot
   create freezer product identity. If the same class already exists in
   `vision_candidates` as a non-regular rescue/stage candidate, weight-gated
   stage evidence can upgrade that entry to `source=stage_weight_gate`; regular

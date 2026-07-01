@@ -1,5 +1,28 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer vision candidate pool ordered solver
+
+- Retired freezer loadcell-residual candidate narrowing before engine judgment.
+  `VideoProcessor.filter_freezer_handled_candidates()` now keeps every regular
+  freezer vision candidate that passed the configured product threshold, ROI,
+  motion, and valid top-middle hand-path gates. Stage-only, active-only, and
+  weight-nearest products remain diagnostics only and cannot create freezer
+  identity.
+- Added the freezer ordered weight-combination solver in
+  `ProductDecisionEngine`. It tests candidate-pool options in deterministic
+  vision order: rank-1 `x1`, rank-2 `x1`, then same-product counts by count and
+  rank, then mixed combinations by total count and rank. Weight residual is a
+  pass/fail check inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`, not
+  an identity ranking signal.
+- Recorded the cheese burger field failure mode. With target `183.7g`, rank-1
+  `BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G` at `176g` is selected before a
+  lower-rank `189g` dumpling because rank-1 `x1` already fits freezer
+  tolerance.
+- Updated the freezer field `.env.example` profile to
+  `models/set9_imbalance_16.engine`, product thresholds `0.50/0.50`, hand
+  threshold `0.30`, top/side weights `0.60/0.40`, freezer tolerance `15.0`,
+  and Top FFmpeg gamma/contrast `1.0/1.0`.
+
 ## [2026-07-01] maintenance | freezer signed-net close aggregate simplification
 
 - Superseded the freezer mixed-sign removal-total rule. Freezer trigger

@@ -43,7 +43,7 @@ shape without rereading every long historical document.
 - `.env.example` is now a sanitized freezer-first dual-top template. It sets
   `MODEL__MACHINE__CABINET_TYPE=freezer`,
   `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`, and
-  `MODEL__VISION__YOLO_MODEL_PATH=models/set7_v8best.engine` while leaving
+  `MODEL__VISION__YOLO_MODEL_PATH=models/set9_imbalance_16.engine` while leaving
   credentials and secrets as placeholders.
 - Fatal async video processing failures are not valid no-detection outcomes.
   `process_videos_async()` must propagate extractor, queue, and YOLO task
@@ -88,8 +88,8 @@ shape without rereading every long historical document.
 - `MODEL__MACHINE__CABINET_TYPE=refrigerated` keeps the existing
   loadcell/vision/weight path. `freezer` uses the same zone-sliced
   `/trigger.loadcells` payload but switches identity to a freezer
-  vision-first policy where loadcell weight is a tie-break/diagnostic signal,
-  not a hard product reject gate.
+  vision-candidate-pool policy where loadcell weight validates counts and
+  combinations, not product identity order.
 - Strong vision identity with unavailable product weight is preserved as
   `partial` with `vision_identity_preserved_weight_unavailable`; loadcell count
   correction only runs when the active product has a valid positive weight.
@@ -106,10 +106,10 @@ shape without rereading every long historical document.
   `top_side` using the logical Top processing profile.
 - Python service code defaults still point at `models/0204_morning.engine`, but
   the current copyable `.env.example` is freezer-field oriented and overrides
-  the engine path to `models/set7_v8best.engine`. Current freezer product vote
-  floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70`; hand tracking uses the
-  separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` with hand class id
+  the engine path to `models/set9_imbalance_16.engine`. Current freezer product
+  vote floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50`; hand tracking uses the
+  separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30` with hand class id
   `0`, but freezer `dual_top_proxy` only includes hand class `0` for the
   physical `top_middle` stream. The physical `top_side` stream remains
   product-only for inference and cannot drive hand-path filtering.
@@ -126,23 +126,26 @@ shape without rereading every long historical document.
   template uses the upper half
   (`MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper`,
   `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT`, default `240`). It applies
-  stronger motion/vote floors and a `0.70` product confidence floor, while
-  hand detections are filtered independently at `0.40`. Threshold/ROI/stage/
+  stronger motion/vote floors and a `0.50` product confidence floor, while
+  hand detections are filtered independently at `0.30`. Threshold/ROI/stage/
   diagnostic fallback evidence below the product floor cannot create freezer
   product identity. `freezer_roi_passed` increments exit-path votes; rejected
   `freezer_roi_filtered` evidence remains diagnostic only.
-- Freezer handled candidates are narrower than raw vision top-K. Raw top-K
-  candidates stay in trace diagnostics, while OPS candidates, engine input, and
-  DoorSession close snapshots use handled candidates. For a single freezer
-  removal segment, the handled list defaults to one product; weight residual
-  breaks ties inside the top confidence band. Same-product `x2+` candidates can
-  now be inferred from target weight even when `instance_count_hint=1`, but only
-  for final vision candidates with confidence above the freezer multi floor,
-  stock/count caps, and a residual inside freezer tolerance. Multi-candidate
-  repeat competition still requires freezer exit-path votes and enough vote
-  evidence; a single regular `vision` identity can use
-  `repeatEvidenceMode=single_regular_vision_identity` when the repeated weight
-  explains the delta better than `x1`.
+- Freezer handled candidates are now a vision candidate pool, not a
+  weight-narrowed single choice. Raw regular candidates that pass product
+  threshold, ROI, motion, and valid top-middle hand-path gates stay in OPS
+  candidates, trace candidate snapshots, engine input, and DoorSession close
+  snapshots. The handled filter normalizes dual-top same-class counts to
+  `count_hint=1`; stage-only, active-only, and weight-nearest products remain
+  diagnostics only.
+- Freezer loadcell validation runs in the decision engine as an ordered
+  candidate-pool combination search. The engine tests candidate rank-1 `x1`,
+  rank-2 `x1`, and so on, then same-product counts by count/rank, then mixed
+  combinations by total count and rank. The first combination whose expected
+  weight is within `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` is
+  selected. Weight residual is pass/fail only, so a rank-1 cheese burger
+  `176g` at target `183.7g` beats a lower-rank dumpling `189g` even though the
+  dumpling has a smaller residual.
 - Freezer handled selection also uses interaction evidence, not only exit-path
   counts. Trace diagnostics record path displacement, max movement, center
   span, trajectory pass, static shelf likelihood, upper-ROI hand validity,
@@ -150,39 +153,29 @@ shape without rereading every long historical document.
   static shelf candidates are softly demoted, and valid `top_middle` hand-path
   blocks can hard-reject a candidate only when at least one hand-near
   alternative remains; no-near/all-blocked hand-path cases still fail open.
-- Freezer same-tier single selection now puts weight residual ahead of raw
-  exit-path vote volume. Exit-path votes still gate candidates and break
-  residual ties, but a high-vote top-only candidate no longer beats a
-  better-weighted supported single. Compound/multi-segment loadcell traces no
-  longer automatically pass raw candidates through; they first try viable
-  multi-fit, single, and same-product repeat explanations, then fail open only
-  when unresolved.
-- Freezer stage-only rescue is candidate-miss recovery, not an override for
-  already handled candidates. If the handled-filter accepted one supported
-  product, direct `freezer_vision_first` rejects stage-only resurrection of
-  considered-but-unselected classes; non-stage strict weight-gate candidates
-  also keep ambiguous dual-camera stage-only evidence out of the special
-  priority tier.
+- Freezer stage-only rescue, active-only fallback, and weight-nearest products
+  are not chargeable identity sources under the freezer vision-candidate-pool
+  policy. They may explain diagnostics, but the ordered solver can only charge
+  products that were present in the passed vision candidate pool, active
+  snapshot, stock-positive, and valid positive-weight.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their
   combined/segment weight fits that freezer tolerance; ordinary nonzero freezer
   deltas no longer return top-1/top-2/top-3 candidates together when their sum
   greatly exceeds the measured removal.
-- Freezer negative removals with valid positive product weights must also
-  explain the full stable removal delta before they become chargeable. A single
-  handled `156g` candidate at `delta=-309.5g` is corrected to `x2` when the
-  repeat gate accepts it; if confidence/caps/residual reject the repeat, the
-  valid-weight `x1` basket becomes no-charge `UNCERTAIN` with
-  `final_weight_mismatch_guard` instead of a chargeable `PARTIAL`. This guard
-  does not suppress strong `vision_first` identity when the Node product weight
-  is unavailable or intentionally diagnostic-only.
+- Freezer negative removals with valid positive product weights must explain
+  the full stable removal delta before they become chargeable. A single
+  candidate can still become `x2/x3` when the ordered same-product count pass
+  fits, but a mismatched `x1` basket is not preserved as chargeable output. If
+  no candidate-pool combination fits, the result is no-charge `UNCERTAIN` with
+  ordered-combination diagnostics.
 - Side-camera ROI keeps hard `center_x <= 400` in the left 480 crop and adds a
   conditional `+5px` regular-candidate soft band. This catches Pepsi detections
   around `x=402..404` while leaving farther-right Trevi-style detections out.
 - Current README/tests describe physical zone loadcell channels as summed into
   the zone total. Older docs that mention averaging are historical context.
-- The current Jetson template uses Top FFmpeg gamma/contrast `1.2/1.2` and
+- The current freezer field template uses Top FFmpeg gamma/contrast `1.0/1.0` and
   Side `1.0/1.0`; traces record these values so field runs can be compared
   against candidate recall and YOLO latency.
 - Rapid same-zone judgment now keeps two extra pieces of model-side context:

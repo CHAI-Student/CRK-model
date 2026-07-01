@@ -119,7 +119,7 @@ def same_product_repeat_diagnostic(
         diagnostic["reason"] = "single_residual_not_worse"
     elif bool(single_regular_vision_identity) and vote_count > 0:
         diagnostic["accepted"] = True
-        diagnostic["reason"] = "same_product_repeat_weight_gate"
+        diagnostic["reason"] = "same_product_repeat_diagnostic"
         diagnostic["repeatEvidenceMode"] = "single_regular_vision_identity"
     elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
         diagnostic["reason"] = "insufficient_exit_path_votes"
@@ -127,6 +127,6 @@ def same_product_repeat_diagnostic(
         diagnostic["reason"] = "insufficient_repeat_votes"
     else:
         diagnostic["accepted"] = True
-        diagnostic["reason"] = "same_product_repeat_weight_gate"
+        diagnostic["reason"] = "same_product_repeat_diagnostic"
         diagnostic["repeatEvidenceMode"] = "exit_path_votes"
     return diagnostic

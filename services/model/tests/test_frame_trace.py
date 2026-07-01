@@ -1076,9 +1076,9 @@ async def test_trigger_service_freezer_single_bagel_candidate_counts_repeat_and_
 
         detail = json.loads(read_trigger_detail_files(tmp_path / "logs")[0].read_text())
         diagnostics = detail["weight_diagnostics"]["freezer_vision_first"]
-        assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+        assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
         assert diagnostics["selected"][0]["count"] == 2
-        assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(
+        assert diagnostics["selected"][0]["combinationResidual"] == pytest.approx(
             2.5,
             abs=0.2,
         )

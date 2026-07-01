@@ -38,8 +38,9 @@ Important patterns include:
   confidence, camera flags, source, `count_hint`, and `freezer_exit_votes`.
   These are not final chargeable counts.
 - `[OPS][FREEZER-CANDIDATE-FILTER]`: freezer handled-filter enablement,
-  raw/handled counts, selected count, expected weight, count residual,
-  `repeatEvidenceMode`, and first repeat rejection reason when available.
+  raw/handled counts, and the filter reason. Normal enabled freezer removal
+  paths should show `reason=vision_identity_passthrough`; selected counts and
+  expected weights are engine-result diagnostics, not pre-engine filter output.
 - `[OPS][RESULT]`: final engine status, products, `product_count`, and total
   price.
 - `[OPS][FREEZER-CLOSE-AGGREGATE]`: freezer-only CLOSE aggregate resolver
@@ -99,9 +100,9 @@ start writing sample images during inference.
   passed ROI evidence or explicit legacy fields; rejected ROI counts are kept
   as `freezerRoiFilteredVotes`. Freezer traces also expose motion,
   trajectory, upper-ROI hand proximity fields, `instance_count_hint` for
-  multi-bbox same-class evidence, and repeat diagnostics such as
-  `sameProductRepeatCandidates`/`rejectedSameProductRepeatCandidates` when
-  weight-supported same-product counts are evaluated.
+  multi-bbox same-class evidence, and `orderedCombinationSearch` diagnostics
+  when the decision engine evaluates same-product counts or mixed candidate
+  combinations.
 - runtime vision config such as `yolo_model_path`,
   `yolo_internal_conf_threshold`, hand class/confidence settings, and the
   top/side `regular_threshold`
@@ -124,12 +125,12 @@ start writing sample images during inference.
   `same_weight_candidate_collision` explains when regular candidate identity
   beats a same-weight active/rescue collision.
   Freezer decisions add `decision_branch=freezer_vision_first` with
-  `weight_used_as=tiebreaker` or `diagnostic`, `weight_reliable`,
-  `weight_residual`, `freezer_multi_kind_weight_fit`,
-  `freezer_multi_kind_weight_mismatch`, and selected/considered candidate
-  diagnostics. Valid-weight freezer mismatches can also end in
-  `final_weight_mismatch_guard` when the final basket does not explain the full
-  stable removal delta inside freezer tolerance.
+  `weight_used_as=combination_validation` or `diagnostic`,
+  `weight_reliable`, `weight_residual`, `orderedCombinationSearch`, and
+  selected/considered candidate diagnostics. Valid positive-weight freezer
+  mismatches return no-charge `UNCERTAIN` with
+  `reason=no_weight_fit_for_vision_candidate_pool` when no candidate-pool
+  combination explains the stable removal delta inside freezer tolerance.
 - final result and storage result
 
 Trace JSONL/detail files are raw operational evidence. The current wiki policy
@@ -184,15 +185,22 @@ rotation policy.
   to the signed global net. A near-zero global net clears participant products;
   a negative net with no fitting candidate combination records a no-charge
   reason instead of preserving a mismatched provisional basket.
-- In freezer mode, a log sequence with `[OPS][CANDIDATES] ... count_hint=1`
-  followed by `[OPS][RESULT] ... product_count=2` is expected for accepted
-  same-product repeat correction. For the bagel field shape
+- In freezer mode, a log sequence with `[OPS][FREEZER-CANDIDATE-FILTER] ...
+  reason=vision_identity_passthrough`, `[OPS][CANDIDATES] ... count_hint=1`,
+  and `[OPS][RESULT] ... product_count=2` is expected when the ordered solver
+  accepts a same-product repeat. For the bagel field shape
   `delta=-309.5g`, `BAG_NULLDAM_BAGEL_140G`, `unit_weight=156g`, and
   `confidence=0.528`, inspect
   `weight_diagnostics.freezer_vision_first.selected[*].count=2` and
-  `countWeightResidual~=2.5g`. If the final result stays empty with
-  `final_weight_mismatch_guard`, repeat or multi-kind fitting failed and the
-  trigger was intentionally no-charge.
+  `combinationResidual~=2.5g`. If the final result stays empty with
+  `reason=no_weight_fit_for_vision_candidate_pool`, ordered candidate-pool
+  fitting failed and the trigger was intentionally no-charge.
+- In freezer mode, if a lower-rank product has a smaller residual but a higher
+  rank product already fits tolerance, the higher-rank product should win. The
+  cheese burger field shape is `target=183.7g`, rank-1 cheese burger `176g`,
+  and lower-rank dumpling `189g`; `orderedCombinationSearch.attempts[0]`
+  should be the cheese burger `x1` attempt and the selected product should be
+  cheese burger.
 - If `delta_weight=0.0g` skipped inference, inspect `loadcell.payload_state`
   before blaming vision. `empty_payload` means Camera sent no loadcell samples,
   `invalid_only` means filtered values did not parse, `all_zero` means the

@@ -38,7 +38,7 @@ vision-supported product identity.
   means `videos.top` is top-middle and `videos.side` is top-side. In freezer
   mode both streams use the Top profile for upper-half dual-top filtering by
   default.
-- The current Jetson field profile sets Top FFmpeg gamma/contrast to `1.2/1.2`
+- The current freezer field profile sets Top FFmpeg gamma/contrast to `1.0/1.0`
   and Side to `1.0/1.0`. Trigger traces record the active values and frame
   stride for latency/recall comparison.
 - Raw detection threshold is intentionally low; later filters remove noise.
@@ -54,9 +54,9 @@ vision-supported product identity.
   pass the freezer motion floor, and pass freezer vote thresholds. Threshold
   rescue and ROI rescue are disabled so weak/static evidence does not enter
   freezer candidates.
-- Current freezer product confidence thresholds are `0.70` for both Top and
+- Current freezer product confidence thresholds are `0.50` for both Top and
   Side, matching the smaller freezer product-set deployment. Hand tracking uses
-  a separate `0.40` floor for class `0`, but freezer `dual_top_proxy` only
+  a separate `0.30` floor for class `0`, but freezer `dual_top_proxy` only
   enables hand class `0` and hand-path filtering on physical `top_middle`.
   Physical `top_side` remains product-only and cannot filter candidates through
   hand evidence.
@@ -99,37 +99,26 @@ vision-supported product identity.
   `partial` with mismatch diagnostics; freezer valid-weight removals apply the
   stricter full-delta guard below. When no vision-derived identity exists, the
   result is no-charge `no_detection` or `uncertain`.
-- Freezer mode narrows this further: final freezer candidates are the only
-  chargeable identity source. The normal gram tolerance is not used to reject a
-  strong freezer candidate. Raw vision top-K is preserved in diagnostics, but
-  the handled candidate list sent to OPS, the engine, and DoorSession is
-  narrowed for single freezer removal segments. In that case one product is
-  selected by freezer exit-path evidence and weight residual, with top
-  confidence-band weight residual used only as fallback. Freezer loadcell
-  residual is now reliable to about `15g`, so multi-kind freezer output requires
-  segment/compound or combined-candidate weight support inside
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Strong dual-camera evidence
-  without a weight fit records `freezer_multi_kind_weight_mismatch` and falls
-  back to one handled freezer product for engine evaluation; that product is
-  still chargeable only if its final count explains the full negative delta
-  inside freezer tolerance.
-- Freezer same-product repeats are allowed as a conservative candidate-filter
-  and vision-first engine override. The repeat count is inferred from
-  `target_weight / unit_weight`, then checked against confidence,
-  stock/count caps, and freezer residual tolerance. Multi-candidate repeats
-  still need freezer exit-path votes and vote count, but a single regular
-  `vision` identity can use the tighter weight fit directly when `x2+` is
-  inside tolerance and closer than `x1`. A top-only repeat can beat a top-only
-  single only within the configured repeat residual gap; a dual-camera
-  exit-path single remains preferred. Frame-level vote evidence is carried into
-  the engine through `raw_vote_count`, while `vote_count` keeps its consensus
-  meaning.
-- After freezer repeat and multi-kind fitting, valid positive-weight freezer
-  baskets must explain the full stable negative delta. A `156g` bagel candidate
-  at `delta=-309.5g` should become `x2` when confidence/caps allow it; if the
-  same candidate cannot pass repeat or residual checks, the engine returns
-  no-charge `UNCERTAIN` with `final_weight_mismatch_guard` instead of billing a
-  mismatched `x1`.
+- Freezer mode narrows identity creation, not the vision candidate pool. Final
+  freezer candidates are the only chargeable identity source; stage-only,
+  active-only, and weight-nearest products remain diagnostics. The handled
+  freezer candidate list sent to OPS, the engine, and DoorSession keeps every
+  regular candidate that passed threshold, ROI, motion, and valid top-middle
+  hand-path gates. It does not select one product by loadcell residual before
+  judgment.
+- Freezer count and combination selection happens in the decision engine. The
+  ordered solver tests rank-1 `x1`, rank-2 `x1`, then same-product counts by
+  count and rank, then mixed combinations by total count and rank. The first
+  expected weight inside
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` wins. This is why a
+  rank-1 cheese burger `176g` at target `183.7g` beats a lower-rank dumpling
+  `189g`: both are valid by weight, so vision rank decides.
+- Same-product freezer repeats are inferred only by the ordered solver, not by
+  seeing the same product in both top cameras. The handled filter normalizes
+  dual-top `instance_count_hint` to `1`; `x2/x3` appears only when the count
+  pass fits the target and stock/count caps allow it. If no candidate-pool
+  combination fits a valid positive-weight target, the freezer result is
+  no-charge `UNCERTAIN` with ordered-combination diagnostics.
 - Freezer interaction evidence now sits between raw vision and weight
   selection. The trace records actual path displacement, max movement, center
   span, trajectory support, static-shelf likelihood, upper-ROI hand validity,
@@ -173,7 +162,7 @@ vision-supported product identity.
 - Segment-first matching ranks weak stage traces as unsupported evidence. This
   prevents low-confidence small-product repeats from beating active large-bottle
   explanations or being reported as `COMPLETE`.
-- In freezer mode, product stage/diagnostic/rescue evidence below the `0.70`
+- In freezer mode, product stage/diagnostic/rescue evidence below the `0.50`
   product floor is also unsupported for identity creation. Trace/debug records
   can still show the rejected observation, but it cannot become a final
   product fallback.

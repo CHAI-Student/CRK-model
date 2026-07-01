@@ -358,12 +358,12 @@ def test_freezer_vision_first_accepts_candidate_outside_refrigerated_tolerance(
     assert result.weight_residual == 10.0
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     assert diagnostics["accepted"] is True
-    assert diagnostics["weight_used_as"] == "tiebreaker"
+    assert diagnostics["weight_used_as"] == "combination_validation"
     assert diagnostics["weight_reliable"] is True
     assert diagnostics["freezer_weight_tolerance"] == 15.0
 
 
-def test_freezer_vision_first_uses_weight_only_inside_confidence_band(monkeypatch):
+def test_freezer_vision_first_keeps_rank_order_when_first_candidate_fits(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     monkeypatch.setattr(config.weight, "freezer_multi_min_confidence", 0.99)
     trace = FakeLoadcellTrace({})
@@ -383,10 +383,11 @@ def test_freezer_vision_first_uses_weight_only_inside_confidence_band(monkeypatc
     )
 
     assert result.status == JudgmentStatus.COMPLETE
-    assert [(product.product_id, product.count) for product in result.products] == [(2, 1)]
+    assert [(product.product_id, product.count) for product in result.products] == [(1, 1)]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_confidence_weight_tiebreak"
-    assert diagnostics["selected"][0]["name"] == "CLOSER_WEIGHT"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["selected"][0]["name"] == "HIGHER_CONF"
+    assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [1]
 
 
 def test_freezer_vision_first_does_not_pick_non_candidate_weight_match(monkeypatch):
@@ -412,7 +413,7 @@ def test_freezer_vision_first_does_not_pick_non_candidate_weight_match(monkeypat
     assert diagnostics["selected"][0]["class_id"] == 1
     assert diagnostics["selected"][0]["name"] == "VISION_ONLY_CANDIDATE"
     assert diagnostics["selected"][0]["count"] == 2
-    assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 1
+    assert diagnostics["orderedCombinationSearch"]["attempts"][1]["counts"] == [2]
 
 
 def test_freezer_vision_first_outputs_multi_kind_when_vision_is_strong(monkeypatch):
@@ -427,8 +428,8 @@ def test_freezer_vision_first_outputs_multi_kind_when_vision_is_strong(monkeypat
         ],
         delta_weight=-210.0,
         active_products=[
-            make_active_product(1, "FREEZER_A", weight=100.0, stock=5),
-            make_active_product(2, "FREEZER_B", weight=110.0, stock=5),
+            make_active_product(1, "FREEZER_A", weight=80.0, stock=5),
+            make_active_product(2, "FREEZER_B", weight=130.0, stock=5),
         ],
         trace_context=trace,
     )
@@ -439,7 +440,7 @@ def test_freezer_vision_first_outputs_multi_kind_when_vision_is_strong(monkeypat
         (2, 1),
     ]
     assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
-        "freezer_multi_kind_weight_supported"
+        "freezer_ordered_vision_candidate_pool"
     )
 
 
@@ -488,17 +489,16 @@ def test_freezer_vision_first_rejects_multi_kind_without_weight_fit(
 
     assert result.status == JudgmentStatus.UNCERTAIN
     assert result.products == []
-    assert result.weight_explained == 110.0
+    assert result.weight_explained == 0.0
+    assert result.weight_residual == 999.0
     assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
-        "freezer_single_confidence_weight_tiebreak"
+        "no_weight_fit_for_vision_candidate_pool"
     )
-    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
-    assert guard["accepted"] is False
-    assert guard["branch"] == "freezer_vision_first"
-    mismatch = trace.weight_diagnostics["freezer_multi_kind_weight_mismatch"]
-    assert mismatch["reason"] == "freezer_multi_kind_weight_mismatch"
-    assert mismatch["expected_weight"] == 210.0
-    assert mismatch["allowed_residual"] == 15.0
+    search = trace.weight_diagnostics["freezer_vision_first"][
+        "orderedCombinationSearch"
+    ]
+    assert search["accepted"] is False
+    assert search["reason"] == "no_weight_fit_for_vision_candidate_pool"
 
 
 def test_freezer_vision_first_selects_single_178g_candidate_not_top_three(
@@ -548,10 +548,8 @@ def test_freezer_vision_first_selects_single_178g_candidate_not_top_three(
     assert result.weight_explained == 172.0
     assert result.weight_residual == 6.0
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
-    mismatch = trace.weight_diagnostics["freezer_multi_kind_weight_mismatch"]
-    assert mismatch["weight_residual"] == 330.0
-    assert mismatch["allowed_residual"] == 15.0
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [101]
 
 
 def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(
@@ -604,14 +602,14 @@ def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(
     assert result.status == JudgmentStatus.UNCERTAIN
     assert result.products == []
     assert trace.weight_diagnostics["freezer_vision_first"]["reason"] == (
-        "freezer_single_confidence_weight_tiebreak"
+        "no_weight_fit_for_vision_candidate_pool"
     )
-    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
-    assert guard["accepted"] is False
-    assert guard["branch"] == "freezer_vision_first"
+    assert trace.weight_diagnostics["freezer_vision_first"][
+        "orderedCombinationSearch"
+    ]["accepted"] is False
 
 
-def test_freezer_vision_first_prefers_single_handled_item_by_weight_tiebreak(
+def test_freezer_vision_first_selects_first_ranked_weight_fit(
     monkeypatch,
 ):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
@@ -675,7 +673,7 @@ def test_freezer_vision_first_prefers_single_handled_item_by_weight_tiebreak(
         (44, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_confidence_weight_tiebreak"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
     assert diagnostics["selected"][0]["class_id"] == 44
     assert diagnostics["selected"][0]["raw_instance_count_hint"] == 2
     assert diagnostics["selected"][0]["instance_count_hint"] == 1
@@ -723,11 +721,12 @@ def test_freezer_vision_first_prefers_melona_exit_path_over_static_lala(monkeypa
 
     assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
-        (44, 1)
+        (46, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_near_weight_exit_path"
-    assert diagnostics["selected"][0]["freezerExitPathVotes"] == 19
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["selected"][0]["class_id"] == 46
+    assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [46]
 
 
 def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
@@ -807,11 +806,11 @@ def test_freezer_vision_first_prefers_cup_exit_path_weight_gate(monkeypatch):
 
     assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
-        (42, 1)
+        (44, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
-    assert diagnostics["selected"][0]["freezerExitPathVotes"] == 13
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["selected"][0]["class_id"] == 44
 
 
 def test_freezer_vision_first_prefers_melona_residual_over_yomamte_exit_votes(
@@ -879,19 +878,16 @@ def test_freezer_vision_first_prefers_melona_residual_over_yomamte_exit_votes(
 
     assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
-        (44, 1)
+        (30, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     selected = diagnostics["selected"][0]
-    yomamte = next(item for item in diagnostics["considered"] if item["class_id"] == 30)
-    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
     assert diagnostics["multiItemTraceEvidence"] is True
-    assert selected["class_id"] == 44
-    assert selected["weight_residual"] == 0.2
-    assert selected["dualCameraExitPath"] is True
-    assert yomamte["selectionTier"] == "freezer_single_weight_gate_exit_path"
-    assert yomamte["weight_residual"] == 3.2
-    assert yomamte["dualCameraExitPath"] is False
+    assert selected["class_id"] == 30
+    assert selected["weight_residual"] == 3.2
+    assert selected["selectionTier"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [30]
 
 
 def test_freezer_vision_first_keeps_video_handled_yomamte_over_stage_melona(
@@ -918,12 +914,9 @@ def test_freezer_vision_first_keeps_video_handled_yomamte_over_stage_melona(
         {
             "freezer_candidate_filter": {
                 "accepted": True,
-                "reason": "multi_item_trace_single_narrowed",
+                "reason": "vision_identity_passthrough",
                 "handled_candidate_count": 1,
-                "selected": {
-                    "class_id": 30,
-                    "name": "BOX_BINGGRAE_YOMAMTE_150ML",
-                },
+                "selectedClassIds": [30],
                 "considered": [
                     {"class_id": 30, "name": "BOX_BINGGRAE_YOMAMTE_150ML"},
                     {"class_id": 44, "name": "STICK_BINGGRAE_MELONA_75ML"},
@@ -990,13 +983,10 @@ def test_freezer_vision_first_keeps_video_handled_yomamte_over_stage_melona(
         (30, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
     assert diagnostics["selected"][0]["class_id"] == 30
     assert diagnostics["selected"][0]["weight_residual"] == 5.1
-    rejected = diagnostics["rejectedStageOnlyCandidates"]
-    assert rejected[0]["class_id"] == 44
-    assert rejected[0]["reason"] == "rejected_by_video_handled_filter"
-    assert rejected[0]["selectedClassIds"] == [30]
+    assert "rejectedStageOnlyCandidates" not in diagnostics
 
 
 def test_freezer_vision_first_strict_vision_candidate_blocks_stage_only_priority(
@@ -1051,18 +1041,12 @@ def test_freezer_vision_first_strict_vision_candidate_blocks_stage_only_priority
         (30, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    melona = next(item for item in diagnostics["considered"] if item["class_id"] == 44)
-    assert diagnostics["reason"] == "freezer_single_weight_gate_exit_path"
-    assert melona["selectionTier"] == "freezer_single_near_weight_exit_path"
-    assert melona["stageOnlyPriorityRejectedReason"] == (
-        "strict_vision_weight_gate_preferred"
-    )
-    rejected = diagnostics["rejectedStageOnlyCandidates"]
-    assert rejected[0]["class_id"] == 44
-    assert rejected[0]["reason"] == "strict_vision_weight_gate_preferred"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert [item["class_id"] for item in diagnostics["considered"]] == [30]
+    assert "rejectedStageOnlyCandidates" not in diagnostics
 
 
-def test_freezer_vision_first_rescues_yomamte_stage_only_dual_camera(monkeypatch):
+def test_freezer_vision_first_does_not_create_stage_only_identity(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     monkeypatch.setattr(config.vision, "top_k", 5)
     trace = FakeLoadcellTrace({})
@@ -1166,22 +1150,13 @@ def test_freezer_vision_first_rescues_yomamte_stage_only_dual_camera(monkeypatch
         trace_context=trace,
     )
 
-    assert result.status == JudgmentStatus.COMPLETE
-    assert [(product.product_id, product.count) for product in result.products] == [
-        (30, 1)
-    ]
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert (
-        diagnostics["reason"]
-        == "freezer_single_ambiguous_dual_camera_stage_exit_path"
-    )
-    assert diagnostics["selected"][0]["source"] == "freezer_stage_exit_path"
-    assert diagnostics["selected"][0]["dualCameraExitPath"] is True
-    assert {item["class_id"] for item in diagnostics["ambiguousCandidates"]} == {
-        30,
-        42,
-        44,
-    }
+    assert diagnostics["reason"] == "no_weight_fit_for_vision_candidate_pool"
+    melona = next(item for item in diagnostics["considered"] if item["class_id"] == 44)
+    assert melona["reason"] == "insufficient_vision_identity_evidence"
+    assert "ambiguousCandidates" not in diagnostics
 
 
 def test_freezer_vision_first_uses_instance_hint_for_same_class_count(monkeypatch):
@@ -1212,7 +1187,7 @@ def test_freezer_vision_first_uses_instance_hint_for_same_class_count(monkeypatc
     ] == 2
 
 
-def test_freezer_vision_first_prefers_count_supported_bagel_repeat(monkeypatch):
+def test_freezer_vision_first_selects_rank1_single_before_lower_rank_repeat(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     trace = FakeLoadcellTrace({})
     trace.stage_counts_by_class = {
@@ -1270,19 +1245,17 @@ def test_freezer_vision_first_prefers_count_supported_bagel_repeat(monkeypatch):
 
     assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
-        (27, 2)
+        (37, 1)
     ]
-    assert result.weight_explained == 312.0
-    assert result.weight_residual == pytest.approx(4.8)
+    assert result.weight_explained == 309.0
+    assert result.weight_residual == pytest.approx(1.8)
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
-    assert diagnostics["selected"][0]["class_id"] == 27
-    assert diagnostics["selected"][0]["count"] == 2
-    assert diagnostics["selected"][0]["expected_weight"] == 312.0
-    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(4.8)
-    assert [item["class_id"] for item in diagnostics["sameProductRepeatCandidates"]] == [
-        27
-    ]
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["selected"][0]["class_id"] == 37
+    assert diagnostics["selected"][0]["count"] == 1
+    assert diagnostics["selected"][0]["expected_weight"] == 309.0
+    assert diagnostics["selected"][0]["combinationResidual"] == pytest.approx(1.8)
+    assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [37]
 
 
 @pytest.mark.parametrize(
@@ -1332,9 +1305,9 @@ def test_freezer_vision_first_counts_bagel_repeat_from_weight(
     assert result.weight_explained == 312.0
     assert result.weight_residual == pytest.approx(expected_residual)
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
     assert diagnostics["selected"][0]["count"] == 2
-    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(
+    assert diagnostics["selected"][0]["combinationResidual"] == pytest.approx(
         expected_residual
     )
     assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
@@ -1379,13 +1352,146 @@ def test_freezer_vision_first_counts_single_side_bagel_repeat_from_weight(
     assert result.weight_explained == 312.0
     assert result.weight_residual == pytest.approx(2.5)
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
     assert diagnostics["selected"][0]["count"] == 2
-    assert diagnostics["selected"][0]["countWeightResidual"] == pytest.approx(2.5)
-    assert diagnostics["selected"][0]["singleRegularVisionIdentity"] is True
-    assert diagnostics["selected"][0]["repeatEvidenceMode"] == (
-        "single_regular_vision_identity"
+    assert diagnostics["selected"][0]["combinationResidual"] == pytest.approx(2.5)
+    assert diagnostics["orderedCombinationSearch"]["accepted"] is True
+
+
+def test_freezer_ordered_solver_selects_rank1_cheese_burger_before_dumpling(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    cheese = make_candidate(
+        class_id=23,
+        name="BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+        confidence=1.0,
+        raw_vote_count=16,
+        instance_count_hint=2,
     )
+    dumpling = make_candidate(
+        class_id=13,
+        name="BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+        confidence=0.3101,
+        raw_vote_count=19,
+        instance_count_hint=1,
+    )
+
+    result = engine.judge(
+        vision_candidates=[cheese, dumpling],
+        delta_weight=-183.7,
+        active_products=[
+            make_active_product(
+                23,
+                "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                weight=176.0,
+                stock=87,
+            ),
+            make_active_product(
+                13,
+                "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                weight=189.0,
+                stock=76,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (23, 1)
+    ]
+    assert result.weight_residual == pytest.approx(7.7)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
+    assert diagnostics["selected"][0]["raw_instance_count_hint"] == 2
+    assert diagnostics["selected"][0]["count"] == 1
+    assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [23]
+
+
+def test_freezer_ordered_solver_selects_same_candidate_x2(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(
+                class_id=27,
+                name="BAG_NULLDAM_BAGEL_140G",
+                confidence=0.8,
+                raw_vote_count=4,
+            )
+        ],
+        delta_weight=-309.5,
+        active_products=[
+            make_active_product(27, "BAG_NULLDAM_BAGEL_140G", weight=156.0, stock=10)
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (27, 2)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["selected"][0]["count"] == 2
+    assert diagnostics["orderedCombinationSearch"]["attempts"][1]["counts"] == [2]
+
+
+def test_freezer_ordered_solver_selects_mixed_combo_after_singles_miss(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "FREEZER_A", confidence=0.9),
+            make_candidate(102, "FREEZER_B", confidence=0.8),
+        ],
+        delta_weight=-300.0,
+        active_products=[
+            make_active_product(101, "FREEZER_A", weight=120.0, stock=10),
+            make_active_product(102, "FREEZER_B", weight=180.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 1),
+        (102, 1),
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["orderedCombinationSearch"]["accepted"] is True
+    assert diagnostics["selected"][0]["combinationExpectedWeight"] == 300.0
+
+
+def test_freezer_ordered_solver_records_missing_weight_without_charge(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_candidate(101, "FREEZER_UNKNOWN_WEIGHT", confidence=0.9),
+        ],
+        delta_weight=-120.0,
+        active_products=[
+            make_active_product(101, "FREEZER_UNKNOWN_WEIGHT", weight=0.0, stock=10),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.NO_DETECTION
+    assert result.products == []
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "no_supported_vision_candidates"
+    assert diagnostics["considered"][0]["reason"] == "weight_unavailable"
 
 
 def test_freezer_vision_first_single_bagel_repeat_requires_confidence_floor(
@@ -1397,7 +1503,7 @@ def test_freezer_vision_first_single_bagel_repeat_requires_confidence_floor(
     candidate = make_candidate(
         class_id=27,
         name="BAG_NULLDAM_BAGEL_140G",
-        confidence=0.44,
+        confidence=0.29,
         raw_vote_count=1,
         instance_count_hint=1,
     )
@@ -1418,18 +1524,13 @@ def test_freezer_vision_first_single_bagel_repeat_requires_confidence_floor(
         trace_context=trace,
     )
 
-    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.status == JudgmentStatus.NO_DETECTION
     assert result.products == []
-    assert result.weight_residual == pytest.approx(153.5)
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
-    assert rejected[0]["class_id"] == 27
-    assert rejected[0]["sameProductRepeatRejectedReason"] == (
-        "confidence_below_repeat_floor"
+    assert diagnostics["reason"] == "no_supported_vision_candidates"
+    assert diagnostics["considered"][0]["reason"] == (
+        "insufficient_vision_identity_evidence"
     )
-    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
-    assert guard["accepted"] is False
-    assert guard["reason"] == "result_does_not_explain_full_delta"
 
 
 def test_freezer_vision_first_rejects_valid_weight_single_mismatch(
@@ -1463,13 +1564,11 @@ def test_freezer_vision_first_rejects_valid_weight_single_mismatch(
 
     assert result.status == JudgmentStatus.UNCERTAIN
     assert result.products == []
-    assert result.weight_explained == pytest.approx(156.0)
-    assert result.weight_residual == pytest.approx(124.0)
+    assert result.weight_explained == pytest.approx(0.0)
+    assert result.weight_residual == pytest.approx(280.0)
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert diagnostics["reason"] == "freezer_single_confidence_weight_tiebreak"
-    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
-    assert guard["accepted"] is False
-    assert guard["branch"] == "freezer_vision_first"
+    assert diagnostics["reason"] == "no_weight_fit_for_vision_candidate_pool"
+    assert diagnostics["orderedCombinationSearch"]["accepted"] is False
 
 
 @pytest.mark.parametrize(
@@ -1515,12 +1614,8 @@ def test_freezer_vision_first_rejects_unsafe_bagel_repeat(
     assert result.status == JudgmentStatus.UNCERTAIN
     assert result.products == []
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
-    assert rejected[0]["class_id"] == 27
-    assert rejected[0]["sameProductRepeatRejectedReason"] == expected_reason
-    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
-    assert guard["accepted"] is False
-    assert guard["branch"] == "freezer_vision_first"
+    assert diagnostics["reason"] == "no_weight_fit_for_vision_candidate_pool"
+    assert diagnostics["orderedCombinationSearch"]["accepted"] is False
 
 
 def test_freezer_vision_first_keeps_single_when_bagel_x1_is_closer(monkeypatch):
@@ -1553,14 +1648,11 @@ def test_freezer_vision_first_keeps_single_when_bagel_x1_is_closer(monkeypatch):
     assert result.status == JudgmentStatus.UNCERTAIN
     assert result.products == []
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
-    assert "sameProductRepeatCandidates" not in diagnostics
-    assert diagnostics["selected"][0]["count"] == 1
-    guard = trace.weight_diagnostics["final_weight_mismatch_guard"]
-    assert guard["accepted"] is False
-    assert guard["branch"] == "freezer_vision_first"
+    assert diagnostics["reason"] == "no_weight_fit_for_vision_candidate_pool"
+    assert diagnostics["orderedCombinationSearch"]["accepted"] is False
 
 
-def test_freezer_vision_first_static_single_loses_to_trajectory_candidate(monkeypatch):
+def test_freezer_vision_first_ordered_solver_keeps_rank1_static_candidate(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     trace = FakeLoadcellTrace({})
     trace.stage_counts_by_class = {
@@ -1623,14 +1715,14 @@ def test_freezer_vision_first_static_single_loses_to_trajectory_candidate(monkey
 
     assert result.status == JudgmentStatus.COMPLETE
     assert [(product.product_id, product.count) for product in result.products] == [
-        (102, 1)
+        (101, 1)
     ]
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     static_candidate = next(
         item for item in diagnostics["considered"] if item["class_id"] == 101
     )
     assert static_candidate["interactionPenalty"] is True
-    assert diagnostics["selected"][0]["trajectoryExitPathPassed"] is True
+    assert diagnostics["selected"][0]["class_id"] == 101
 
 
 def test_freezer_vision_first_hand_far_static_single_is_rejected(monkeypatch):

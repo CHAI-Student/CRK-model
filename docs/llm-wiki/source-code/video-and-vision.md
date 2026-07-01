@@ -18,7 +18,7 @@ selected frames, accumulates per-camera evidence, and returns ranked
 ## Frame Extraction
 
 - `StreamingFrameExtractor` uses FFmpeg and records per-attempt diagnostics.
-- The current Jetson field profile applies FFmpeg `eq` gamma/contrast `1.2/1.2`
+- The current freezer field profile applies FFmpeg `eq` gamma/contrast `1.0/1.0`
   on Top and `1.0/1.0` on Side. Trigger traces record these values with the
   frame stride so candidate recall can be compared against latency.
 - It tracks expected frames, decoded frames, bytes read, partial reads,
@@ -104,51 +104,34 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` is only a deprecated split
   fallback. Threshold rescue and ROI rescue are disabled for freezer
   candidates so only strong in-ROI evidence reaches the decision engine.
-- Current freezer product vote floors are `0.70` for both Top and Side through
+- Current freezer product vote floors are `0.50` for both Top and Side through
   `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` and
   `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD`. Product detections below that
   floor may still appear in traces as rejected observations, but they cannot
   create regular votes, rescue candidates, stage-count fallback, or diagnostic
   fallback identity evidence in freezer mode.
 - Hand tracking has a separate floor:
-  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40`. Hand detections below this
+  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30`. Hand detections below this
   value are removed before `HandPathTracker` sees them; hand class id remains
   `MODEL__VISION__HAND_CLASS_ID=0`. This class is included in the top-middle
   inference allowlist only.
 - `MODEL__MACHINE__CABINET_TYPE=freezer` alone is not enough to enable freezer
-  strict candidate narrowing. Dual-top freezer deployments must also set
+  dual-top candidate-pool filtering. Dual-top freezer deployments must also set
   `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`; otherwise the freezer handled
   filter records `disabled_camera_layout` and OPS emits a config warning.
-- After video processing, freezer dual-top removals split raw vision top-K from
-  handled candidates. The raw list is kept for trace review, while the handled
-  list is narrowed to the likely picked item for single removal segments before
-  OPS logging and engine judgment. Multiple handled freezer candidates pass
-  only when their combined weight fits
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`. Compound or multi-segment
-  loadcell evidence no longer bypasses narrowing by itself: the filter first
-  checks weight-fit multi, strict/near single, and same-product repeat
-  explanations, then fails open only when none of them is supported.
-- Inside the same freezer single selection tier, handled filtering sorts by
-  interaction penalty, identity/source support, weight residual, dual-camera
-  exit-path support, freezer exit-path votes, confidence, and candidate rank.
-  This keeps exit-path votes as required evidence and a residual tie-breaker,
-  but prevents a high-vote top-only candidate with a worse residual from
-  beating a tighter supported single.
-- The freezer handled filter is count-aware for same-product repeats. A final
-  vision candidate can become a `same_product_repeat_weight_gate` selection
-  when `target_weight / unit_weight` supports `x2+`, confidence, stock,
-  `max_items_per_segment`, `same_product_max_count`, and
-  `max_count_per_item` all allow it. Multi-candidate repeats still require
-  freezer exit-path votes and vote count. A single regular `vision` identity
-  can use `single_regular_vision_identity` evidence instead, so a side-only
-  bagel candidate at `309.5g` can become `156g x2` when the repeat residual is
-  inside freezer tolerance and closer than `x1`. This can override a tighter
-  top-only single candidate only inside the `same_product_count_tolerance`
-  residual gap; dual-camera exit-path singles remain preferred. The count fit,
-  cap checks, expected weight, residual, and rejection reason come from
-  `video/freezer_candidate_policy.py`, which is shared with the decision
-  engine to keep pre-engine handled filtering and final repeat correction
-  aligned.
+- After video processing, freezer dual-top removals keep a vision candidate
+  pool. `VideoProcessor.filter_freezer_handled_candidates()` passes through all
+  regular `source=vision` candidates inside top-K that already passed the
+  product threshold, freezer ROI, motion, and valid top-middle hand-path gates.
+  It no longer narrows by loadcell residual, multi-kind weight fit, or
+  same-product repeat. The filter normalizes dual-top same-class
+  `instance_count_hint` to `1`; repeated counts are inferred later by the
+  decision engine's ordered weight solver.
+- Stage-only, active-only, weight-nearest, threshold-rescue, and ROI-rescue
+  evidence remains diagnostic-only for freezer identity. The freezer candidate
+  filter records these sources in trace diagnostics when available, but it does
+  not return them as handled candidates or create a chargeable product from
+  them.
 - Freezer ROI stage names are split by meaning: `freezer_roi_passed` is the
   only stage that increments `freezerExitPathVotes`; `freezer_roi_filtered`
   records rejected ROI evidence and `freezerRoiFilteredVotes` only.
@@ -167,14 +150,10 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - Freezer trigger traces now expose `camera_layout`, raw candidate count,
   handled candidate count, freezer filter reason, and the key freezer vote,
   motion, ROI, exit-path, and multi-candidate thresholds. OPS also writes a
-  `[FREEZER-CANDIDATE-FILTER]` line so field logs can show whether extra
-  candidates came from disabled layout, weight-fit multi, rejected multi,
-  `multi_item_trace_single_narrowed`,
-  `multi_item_trace_multi_weight_fit`,
-  `multi_item_trace_evidence_passthrough_unresolved`, or true handled output.
-  The OPS line also includes selected count, expected weight, count residual,
-  `repeatEvidenceMode`, and the first same-product repeat rejection reason when
-  available. Candidate OPS lines expose `count_hint` and
+  `[FREEZER-CANDIDATE-FILTER]` line. In the current policy, a normal enabled
+  freezer removal should show `reason=vision_identity_passthrough` with
+  `raw=N` and `handled=N` after visual gates and hand-path rejection. Candidate
+  OPS lines expose `count_hint` and
   `freezer_exit_votes`; final result OPS lines expose engine `product_count`,
   so field logs can distinguish pre-engine candidate hints from chargeable
   basket counts.

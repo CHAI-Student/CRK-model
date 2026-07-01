@@ -42,7 +42,6 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field, replace
-from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
 from model_service.core.config import config
@@ -1415,9 +1414,7 @@ class VideoProcessor:
         votes = list(vote_results or [])
         stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
         has_stage_evidence = isinstance(stage_counts, dict) and bool(stage_counts)
-        if not cls._freezer_handled_filter_enabled(delta_weight) or (
-            len(votes) <= 1 and not has_stage_evidence
-        ):
+        if not cls._freezer_handled_filter_enabled(delta_weight):
             if cls._is_freezer_mode():
                 reason = cls._freezer_candidate_filter_passthrough_reason(
                     delta_weight=delta_weight,
@@ -1446,751 +1443,196 @@ class VideoProcessor:
             return votes
 
         target_weight = abs(float(delta_weight))
-        has_multi_item_trace_evidence = cls._freezer_trace_has_multi_item_evidence(
-            trace_context
-        )
-
         candidate_limit = max(1, int(config.vision.top_k))
         ranked_votes = votes[:candidate_limit]
-        confidence_band = max(0.0, float(config.weight.freezer_confidence_tie_band))
-        min_exit_path_votes = max(
-            0,
-            int(getattr(config.vision, "freezer_min_exit_path_votes", 3)),
-        )
-        strict_residual_limit = max(
-            0.0,
-            float(config.weight.detected_single_fallback_tolerance_grams),
-        )
-        near_residual_limit = max(
-            strict_residual_limit,
-            cls._freezer_weight_tolerance_grams(),
-        )
 
-        existing_class_ids = {int(vote.class_id) for vote in ranked_votes}
-        stage_only_votes = cls._freezer_stage_only_candidates(
-            existing_class_ids=existing_class_ids,
-            target_weight=target_weight,
-            near_residual_limit=near_residual_limit,
-            min_exit_path_votes=min_exit_path_votes,
-            product_weights=product_weights,
-            trace_context=trace_context,
-        )
-        candidate_pool = [*ranked_votes, *stage_only_votes]
-        candidate_class_ids = {int(vote.class_id) for vote in candidate_pool}
-        regular_vision_class_ids = {
-            int(vote.class_id)
-            for vote in candidate_pool
-            if str(getattr(vote, "source", "vision") or "vision") == "vision"
-        }
-        single_regular_vision_identity = (
-            len(candidate_class_ids) == 1 and len(regular_vision_class_ids) == 1
-        )
-
-        scored: list[dict[str, Any]] = []
-        for index, vote in enumerate(candidate_pool):
-            unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
-            residual = (
-                abs(target_weight - unit_weight)
-                if unit_weight is not None
-                else target_weight
-            )
-            confidence = float(getattr(vote, "weighted_confidence", 0.0) or 0.0)
-            exit_path_votes = cls._freezer_exit_path_votes(vote, trace_context)
+        def vision_entry(
+            *,
+            index: int,
+            vote: VoteResult,
+            interaction: Optional[dict[str, Any]] = None,
+            reason: Optional[str] = None,
+        ) -> dict[str, Any]:
             stage_entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
             camera_exit_counts = cls._freezer_stage_camera_exit_counts(stage_entry)
-            source = str(getattr(vote, "source", "vision") or "vision")
-            stage_only = source == "freezer_stage_exit_path"
-            identity_supported = source != "vision" or confidence >= 0.3
-            dual_camera_exit_path = len(camera_exit_counts) >= 2
             roi_x_avg, roi_y_avg = cls._freezer_stage_center(stage_entry)
-            interaction_evidence = cls._freezer_candidate_interaction_evidence(
+            exit_path_votes = cls._freezer_exit_path_votes(vote, trace_context)
+            interaction_payload = interaction or cls._freezer_candidate_interaction_evidence(
                 vote,
                 stage_entry=stage_entry,
-                dual_camera_exit_path=dual_camera_exit_path,
+                dual_camera_exit_path=len(camera_exit_counts) >= 2,
             )
-            repeat_diagnostic = cls._freezer_same_product_repeat_diagnostic(
-                vote,
-                target_weight=target_weight,
-                unit_weight=unit_weight,
-                single_residual=residual,
-                confidence=confidence,
-                exit_path_votes=exit_path_votes,
-                source=source,
-                product_stocks=product_stocks,
-                single_regular_vision_identity=(
-                    single_regular_vision_identity and source == "vision"
+            entry = {
+                "rank": int(index) + 1,
+                "class_id": int(vote.class_id),
+                "name": vote.class_name,
+                "confidence": round(
+                    float(getattr(vote, "weighted_confidence", 0.0) or 0.0),
+                    4,
                 ),
+                "source": str(getattr(vote, "source", "vision") or "vision"),
+                "freezerExitPathVotes": int(exit_path_votes),
+                "cameraExitCounts": dict(camera_exit_counts),
+                "dualCameraExitPath": len(camera_exit_counts) >= 2,
+                "roiXAvg": (
+                    round(float(roi_x_avg), 1) if roi_x_avg is not None else None
+                ),
+                "roiYAvg": (
+                    round(float(roi_y_avg), 1) if roi_y_avg is not None else None
+                ),
+                "rawInstanceCountHint": max(
+                    1,
+                    int(getattr(vote, "instance_count_hint", 1) or 1),
+                ),
+                "instance_count_hint": 1,
+                "selectionTier": "vision_identity_passthrough",
+                "pathDisplacementPx": interaction_payload.get("pathDisplacementPx"),
+                "maxDistancePx": interaction_payload.get("maxDistancePx"),
+                "centerSpanX": interaction_payload.get("centerSpanX"),
+                "centerSpanY": interaction_payload.get("centerSpanY"),
+                "trajectoryExitPathPassed": bool(
+                    interaction_payload.get("trajectoryExitPathPassed")
+                ),
+                "staticShelfLikely": bool(
+                    interaction_payload.get("staticShelfLikely")
+                ),
+                "handPathValid": bool(interaction_payload.get("handPathValid")),
+                "handPathValidUpperRoi": bool(
+                    interaction_payload.get("handPathValidUpperRoi")
+                ),
+                "handPathPassed": bool(interaction_payload.get("handPathPassed")),
+                "handPathBlocked": bool(interaction_payload.get("handPathBlocked")),
+                "handInteractionPassed": bool(
+                    interaction_payload.get("handInteractionPassed")
+                ),
+                "handNearFrameCount": interaction_payload.get("handNearFrameCount"),
+                "handNearVoteRatio": interaction_payload.get("handNearVoteRatio"),
+                "minHandDistancePx": interaction_payload.get("minHandDistancePx"),
+                "interactionPenalty": bool(
+                    interaction_payload.get("interactionPenalty")
+                ),
+            }
+            if reason:
+                entry["reason"] = reason
+            return entry
+
+        considered_vision: list[dict[str, Any]] = []
+        passthrough_items: list[dict[str, Any]] = []
+        rejected_source_items: list[dict[str, Any]] = []
+        for index, vote in enumerate(ranked_votes):
+            source = str(getattr(vote, "source", "vision") or "vision")
+            stage_entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
+            camera_exit_counts = cls._freezer_stage_camera_exit_counts(stage_entry)
+            interaction = cls._freezer_candidate_interaction_evidence(
+                vote,
+                stage_entry=stage_entry,
+                dual_camera_exit_path=len(camera_exit_counts) >= 2,
             )
-            if (
-                stage_only
-                and int(vote.class_id) in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
-                and dual_camera_exit_path
-                and unit_weight is not None
-                and residual <= near_residual_limit
-                and exit_path_votes >= min_exit_path_votes
-            ):
-                tier = -1
-                reason = "ambiguous_dual_camera_stage_exit_path"
-            elif (
-                unit_weight is not None
-                and residual <= strict_residual_limit
-                and exit_path_votes >= min_exit_path_votes
-            ):
-                tier = 0
-                reason = "weight_gate_exit_path"
-            elif (
-                unit_weight is not None
-                and residual <= near_residual_limit
-                and exit_path_votes >= min_exit_path_votes
-            ):
-                tier = 1
-                reason = "near_weight_exit_path"
-            else:
-                tier = 2
-                reason = "confidence_weight_tiebreak"
-            scored.append(
+            if source != "vision":
+                rejected = vision_entry(
+                    index=index,
+                    vote=vote,
+                    interaction=interaction,
+                    reason="non_regular_vision_source",
+                )
+                considered_vision.append(rejected)
+                rejected_source_items.append(rejected)
+                continue
+
+            entry = vision_entry(index=index, vote=vote, interaction=interaction)
+            considered_vision.append(entry)
+            passthrough_items.append(
                 {
                     "index": index,
                     "vote": vote,
-                    "unit_weight": unit_weight,
-                    "residual": residual,
-                    "confidence": confidence,
-                    "freezer_exit_path_votes": exit_path_votes,
-                    "camera_exit_counts": camera_exit_counts,
-                    "dual_camera_exit_path": dual_camera_exit_path,
-                    "roi_x_avg": roi_x_avg,
-                    "roi_y_avg": roi_y_avg,
-                    "interaction": interaction_evidence,
-                    "interaction_penalty": bool(
-                        interaction_evidence["interactionPenalty"]
+                    "entry": entry,
+                    "interaction": interaction,
+                    "freezer_exit_path_votes": cls._freezer_exit_path_votes(
+                        vote,
+                        trace_context,
                     ),
-                    "hand_path_hard_reject": bool(
-                        interaction_evidence["handPathHardReject"]
-                    ),
-                    "source": source,
-                    "stage_only": stage_only,
-                    "identity_supported": identity_supported,
-                    "source_priority": 1 if stage_only else 0,
-                    "tier": tier,
-                    "reason": reason,
-                    "same_product_repeat": repeat_diagnostic
-                    if repeat_diagnostic and repeat_diagnostic.get("accepted")
-                    else None,
-                    "same_product_repeat_rejection": repeat_diagnostic
-                    if repeat_diagnostic and not repeat_diagnostic.get("accepted")
-                    else None,
                 }
             )
 
-        def considered_entry(item: dict[str, Any]) -> dict[str, Any]:
-            unit_weight = item["unit_weight"]
-            entry = {
-                "rank": int(item["index"]) + 1,
-                "class_id": int(item["vote"].class_id),
-                "name": item["vote"].class_name,
-                "confidence": round(float(item["confidence"]), 4),
-                "unitWeight": round(float(unit_weight), 1)
-                if unit_weight is not None
-                else None,
-                "weightResidual": round(float(item["residual"]), 1),
-                "freezerExitPathVotes": int(item["freezer_exit_path_votes"]),
-                "source": str(item["source"]),
-                "stageOnly": bool(item["stage_only"]),
-                "identitySupported": bool(item["identity_supported"]),
-                "cameraExitCounts": dict(item["camera_exit_counts"]),
-                "dualCameraExitPath": bool(item["dual_camera_exit_path"]),
-                "roiXAvg": (
-                    round(float(item["roi_x_avg"]), 1)
-                    if item["roi_x_avg"] is not None
-                    else None
-                ),
-                "roiYAvg": (
-                    round(float(item["roi_y_avg"]), 1)
-                    if item["roi_y_avg"] is not None
-                    else None
-                ),
-                "selectionTier": str(item["reason"]),
-                "multiItemTraceEvidence": has_multi_item_trace_evidence,
-            }
-            interaction = item.get("interaction") or {}
-            entry.update(
-                {
-                    "pathDisplacementPx": interaction.get("pathDisplacementPx"),
-                    "maxDistancePx": interaction.get("maxDistancePx"),
-                    "centerSpanX": interaction.get("centerSpanX"),
-                    "centerSpanY": interaction.get("centerSpanY"),
-                    "trajectoryExitPathPassed": bool(
-                        interaction.get("trajectoryExitPathPassed")
-                    ),
-                    "staticShelfLikely": bool(
-                        interaction.get("staticShelfLikely")
-                    ),
-                    "handPathValid": bool(interaction.get("handPathValid")),
-                    "handPathValidUpperRoi": bool(
-                        interaction.get("handPathValidUpperRoi")
-                    ),
-                    "handPathPassed": bool(interaction.get("handPathPassed")),
-                    "handPathBlocked": bool(interaction.get("handPathBlocked")),
-                    "handInteractionPassed": bool(
-                        interaction.get("handInteractionPassed")
-                    ),
-                    "handNearFrameCount": interaction.get("handNearFrameCount"),
-                    "handNearVoteRatio": interaction.get("handNearVoteRatio"),
-                    "minHandDistancePx": interaction.get("minHandDistancePx"),
-                    "interactionPenalty": bool(item.get("interaction_penalty")),
-                }
-            )
-            if item.get("interaction_rejected_reason"):
-                entry["interactionRejectedReason"] = str(
-                    item["interaction_rejected_reason"]
-                )
-            repeat = item.get("same_product_repeat")
-            if repeat:
-                entry.update(
-                    {
-                        "sameProductRepeatCandidate": True,
-                        "count": int(repeat["count"]),
-                        "expectedWeight": round(float(repeat["expectedWeight"]), 1),
-                        "countWeightResidual": round(
-                            float(repeat["countWeightResidual"]), 1
-                        ),
-                        "countAllowedResidual": round(
-                            float(repeat["countAllowedResidual"]), 1
-                        ),
-                        "singleRegularVisionIdentity": bool(
-                            repeat.get("singleRegularVisionIdentity")
-                        ),
-                        "repeatEvidenceMode": repeat.get("repeatEvidenceMode"),
-                    }
-                )
-            rejection = item.get("same_product_repeat_rejection")
-            if rejection:
-                entry["sameProductRepeatRejectedReason"] = str(
-                    rejection.get("reason", "rejected")
-                )
-                entry["nearestRepeatCount"] = int(rejection.get("count", 0) or 0)
-                entry["singleRegularVisionIdentity"] = bool(
-                    rejection.get("singleRegularVisionIdentity")
-                )
-                if rejection.get("repeatEvidenceMode"):
-                    entry["repeatEvidenceMode"] = rejection.get("repeatEvidenceMode")
-            return entry
-
-        selectable_scored = list(scored)
         interaction_rejected_items: list[dict[str, Any]] = []
         hand_blocked_items = [
-            item for item in scored if bool(item.get("hand_path_hard_reject"))
+            item
+            for item in passthrough_items
+            if bool((item.get("interaction") or {}).get("handPathHardReject"))
         ]
-        if hand_blocked_items and len(hand_blocked_items) < len(scored):
+        selectable_items = passthrough_items
+        if hand_blocked_items and len(hand_blocked_items) < len(passthrough_items):
             for item in hand_blocked_items:
-                item["interaction_rejected_reason"] = "hand_path_blocked"
-            interaction_rejected_items = hand_blocked_items
-            selectable_scored = [
-                item for item in scored if not bool(item.get("hand_path_hard_reject"))
-            ]
-
-        rejected_multi_diagnostics: Optional[dict[str, Any]] = None
-        multi_min_confidence = float(config.weight.freezer_multi_min_confidence)
-        strong_multi_items = [
-            item
-            for item in selectable_scored
-            if float(item["confidence"]) >= multi_min_confidence
-            and int(item["freezer_exit_path_votes"]) >= min_exit_path_votes
-            and bool(item["dual_camera_exit_path"])
-            and bool(item["identity_supported"])
-        ]
-        if len(strong_multi_items) >= 2:
-            strong_multi_items.sort(
-                key=lambda item: (int(item["index"]), -float(item["confidence"]))
-            )
-            max_kinds = max(2, int(config.weight.max_combination_kinds))
-            allowed_residual = cls._freezer_weight_tolerance_grams()
-            viable_multi: list[dict[str, Any]] = []
-            for size in range(2, min(max_kinds, len(strong_multi_items)) + 1):
-                for combo in combinations(strong_multi_items, size):
-                    selected = list(combo)
-                    expected_weight = 0.0
-                    selected_counts: dict[int, int] = {}
-                    weight_known = True
-                    for item in selected:
-                        unit_weight = item["unit_weight"]
-                        if unit_weight is None:
-                            weight_known = False
-                            break
-                        count = cls._freezer_supported_instance_count(
-                            item["vote"],
-                            target_weight=target_weight,
-                            product_weights=product_weights,
-                        )
-                        selected_counts[int(item["vote"].class_id)] = count
-                        expected_weight += float(unit_weight) * count
-                    if not weight_known:
-                        continue
-                    residual = abs(target_weight - expected_weight)
-                    if residual <= allowed_residual:
-                        viable_multi.append(
-                            {
-                                "selected": selected,
-                                "selected_counts": selected_counts,
-                                "expected_weight": expected_weight,
-                                "residual": residual,
-                                "rank_sum": sum(
-                                    int(item["index"]) for item in selected
-                                ),
-                                "confidence_sum": sum(
-                                    float(item["confidence"]) for item in selected
-                                ),
-                            }
-                        )
-            if not viable_multi:
-                rejected_multi_diagnostics = {
-                    "reason": "freezer_multi_kind_weight_mismatch",
-                    "targetWeight": round(target_weight, 1),
-                    "allowedResidual": round(allowed_residual, 1),
-                    "selectedClassIds": [
-                        int(item["vote"].class_id) for item in strong_multi_items
-                    ],
-                    "considered": [
-                        considered_entry(item) for item in strong_multi_items
-                    ],
-                    "multiItemTraceEvidence": has_multi_item_trace_evidence,
-                }
-            else:
-                viable_multi.sort(
-                    key=lambda item: (
-                        len(item["selected"]),
-                        float(item["residual"]),
-                        int(item["rank_sum"]),
-                        -float(item["confidence_sum"]),
-                    )
-                )
-                selected_multi = viable_multi[0]
-                selected_items = selected_multi["selected"]
-                selected_counts = selected_multi["selected_counts"]
-                selected_votes = [
-                    replace(
-                        item["vote"],
-                        instance_count_hint=selected_counts[
-                            int(item["vote"].class_id)
-                        ],
-                        freezer_exit_path_votes=int(item["freezer_exit_path_votes"]),
-                        hand_path_valid=bool(
-                            (item.get("interaction") or {}).get("handPathValid")
-                        ),
-                        hand_path_valid_upper_roi=bool(
-                            (item.get("interaction") or {}).get(
-                                "handPathValidUpperRoi"
-                            )
-                        ),
-                        hand_path_passed=bool(
-                            (item.get("interaction") or {}).get("handPathPassed")
-                        ),
-                        hand_path_blocked=bool(
-                            (item.get("interaction") or {}).get("handPathBlocked")
-                        ),
-                        hand_interaction_passed=bool(
-                            (item.get("interaction") or {}).get(
-                                "handInteractionPassed"
-                            )
-                        ),
-                        hand_near_frame_count=int(
-                            (item.get("interaction") or {}).get(
-                                "handNearFrameCount",
-                                0,
-                            )
-                            or 0
-                        ),
-                        hand_near_vote_ratio=float(
-                            (item.get("interaction") or {}).get(
-                                "handNearVoteRatio",
-                                0.0,
-                            )
-                            or 0.0
-                        ),
-                        min_hand_distance_px=(item.get("interaction") or {}).get(
-                            "minHandDistancePx"
-                        ),
-                    )
-                    for item in selected_items
-                ]
-                multi_reason = (
-                    "multi_item_trace_multi_weight_fit"
-                    if has_multi_item_trace_evidence
-                    else "freezer_multi_kind_weight_fit"
-                )
-                diagnostics = {
-                    **cls._freezer_candidate_filter_config_payload(
-                        delta_weight=delta_weight,
-                        raw_candidate_count=len(votes),
-                        handled_candidate_count=len(selected_votes),
-                    ),
-                    "accepted": False,
-                    "reason": multi_reason,
-                    "stage_only_candidate_count": len(stage_only_votes),
-                    "minFreezerExitPathVotes": min_exit_path_votes,
-                    "multiMinConfidence": round(multi_min_confidence, 4),
-                    "multiItemTraceEvidence": has_multi_item_trace_evidence,
-                    "expectedWeight": round(
-                        float(selected_multi["expected_weight"]),
-                        1,
-                    ),
-                    "weightResidual": round(float(selected_multi["residual"]), 1),
-                    "allowedResidual": round(allowed_residual, 1),
-                    "selectedClassIds": [
-                        int(item["vote"].class_id) for item in selected_items
-                    ],
-                    "selected": [
-                        {
-                            **considered_entry(item),
-                            "instance_count_hint": selected_counts[
-                                int(item["vote"].class_id)
-                            ],
-                        }
-                        for item in selected_items
-                    ],
-                    "considered": [considered_entry(item) for item in scored],
-                    "rejectedInteractionCandidates": [
-                        considered_entry(item)
-                        for item in interaction_rejected_items
-                    ],
-                }
-                cls._record_freezer_candidate_filter_diagnostics(
-                    trace_context,
-                    diagnostics,
-                )
-                logger.info(
-                    "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=%s "
-                    "reason=%s residual=%.1fg",
-                    log_prefix,
-                    len(votes),
-                    len(selected_votes),
-                    multi_reason,
-                    float(selected_multi["residual"]),
-                )
-                return selected_votes
-
-        handled_pool = [item for item in selectable_scored if int(item["tier"]) < 2]
-        repeat_candidates = [
-            item
-            for item in selectable_scored
-            if item.get("same_product_repeat") is not None
-        ]
-        if (
-            has_multi_item_trace_evidence
-            and not handled_pool
-            and not repeat_candidates
-        ):
-            diagnostics = {
-                **cls._freezer_candidate_filter_config_payload(
-                    delta_weight=delta_weight,
-                    raw_candidate_count=len(votes),
-                    handled_candidate_count=len(votes),
-                ),
-                "accepted": False,
-                "reason": "multi_item_trace_evidence_passthrough_unresolved",
-                "stage_only_candidate_count": len(stage_only_votes),
-                "multiItemTraceEvidence": True,
-                "minFreezerExitPathVotes": min_exit_path_votes,
-                "multiMinConfidence": round(multi_min_confidence, 4),
-                "considered": [considered_entry(item) for item in scored],
-                "rejectedInteractionCandidates": [
-                    considered_entry(item)
-                    for item in interaction_rejected_items
-                ],
-            }
-            if rejected_multi_diagnostics is not None:
-                diagnostics["rejectedMultiCandidate"] = rejected_multi_diagnostics
-            cls._record_freezer_candidate_filter_diagnostics(
-                trace_context,
-                diagnostics,
-            )
-            logger.info(
-                "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=%s "
-                "reason=multi_item_trace_evidence_passthrough_unresolved",
-                log_prefix,
-                len(votes),
-                len(votes),
-            )
-            return votes
-        if handled_pool:
-            selected_item = min(
-                handled_pool,
-                key=lambda item: (
-                    int(item["tier"]) + int(item.get("interaction_penalty", False)),
-                    int(item.get("interaction_penalty", False)),
-                    int(not item["identity_supported"]),
-                    int(item["source_priority"]),
-                    float(item["residual"]),
-                    int(not bool(item["dual_camera_exit_path"])),
-                    -int(item["freezer_exit_path_votes"]),
-                    -float(item["confidence"]),
-                    int(item["index"]),
-                ),
-            )
-            reason = str(selected_item["reason"])
-        else:
-            selectable_best_confidence = max(
-                float(item["confidence"]) for item in selectable_scored
-            )
-            tie_pool = [
+                item["entry"]["reason"] = "hand_path_blocked"
+                item["entry"]["interactionRejectedReason"] = "hand_path_blocked"
+            interaction_rejected_items = [item["entry"] for item in hand_blocked_items]
+            selectable_items = [
                 item
-                for item in selectable_scored
-                if float(item["confidence"])
-                >= selectable_best_confidence - confidence_band
+                for item in passthrough_items
+                if not bool((item.get("interaction") or {}).get("handPathHardReject"))
             ]
-            selected_item = min(
-                tie_pool,
-                key=lambda item: (
-                    int(item.get("interaction_penalty", False)),
-                    item["unit_weight"] is None,
-                    float(item["residual"]),
-                    int(item["index"]),
-                    -float(item["confidence"]),
+
+        handled_votes = [
+            replace(
+                item["vote"],
+                instance_count_hint=1,
+                freezer_exit_path_votes=int(item["freezer_exit_path_votes"]),
+                hand_path_valid=bool(
+                    (item.get("interaction") or {}).get("handPathValid")
+                ),
+                hand_path_valid_upper_roi=bool(
+                    (item.get("interaction") or {}).get("handPathValidUpperRoi")
+                ),
+                hand_path_passed=bool(
+                    (item.get("interaction") or {}).get("handPathPassed")
+                ),
+                hand_path_blocked=bool(
+                    (item.get("interaction") or {}).get("handPathBlocked")
+                ),
+                hand_interaction_passed=bool(
+                    (item.get("interaction") or {}).get("handInteractionPassed")
+                ),
+                hand_near_frame_count=int(
+                    (item.get("interaction") or {}).get("handNearFrameCount", 0)
+                    or 0
+                ),
+                hand_near_vote_ratio=float(
+                    (item.get("interaction") or {}).get("handNearVoteRatio", 0.0)
+                    or 0.0
+                ),
+                min_hand_distance_px=(item.get("interaction") or {}).get(
+                    "minHandDistancePx"
                 ),
             )
-            reason = "single_removal_weight_tiebreak"
-
-        rejected_repeat_selection: list[dict[str, Any]] = []
-        if repeat_candidates:
-            repeat_item = min(
-                repeat_candidates,
-                key=lambda item: (
-                    float(item["same_product_repeat"]["countWeightResidual"]),
-                    int(item["index"]),
-                    -float(item["confidence"]),
-                    -int(item["freezer_exit_path_votes"]),
-                ),
-            )
-            repeat_residual = float(
-                repeat_item["same_product_repeat"]["countWeightResidual"]
-            )
-            selected_single_residual = float(selected_item["residual"])
-            residual_grace = float(config.weight.same_product_count_tolerance_grams)
-            if bool(selected_item["dual_camera_exit_path"]):
-                rejected_repeat_selection.append(
-                    {
-                        **considered_entry(repeat_item),
-                        "reason": "dual_camera_single_preferred",
-                    }
-                )
-            elif bool(repeat_item.get("interaction_penalty")) and not bool(
-                selected_item.get("interaction_penalty")
-            ):
-                rejected_repeat_selection.append(
-                    {
-                        **considered_entry(repeat_item),
-                        "reason": "interaction_supported_single_preferred",
-                    }
-                )
-            elif repeat_residual > selected_single_residual + residual_grace:
-                rejected_repeat_selection.append(
-                    {
-                        **considered_entry(repeat_item),
-                        "reason": "single_residual_gap_preferred",
-                    }
-                )
-            else:
-                selected_item = repeat_item
-                reason = "same_product_repeat_weight_gate"
-
-        selected_index = int(selected_item["index"])
-        selected_vote = selected_item["vote"]
-
-        selected_repeat = selected_item.get("same_product_repeat")
-        if reason == "same_product_repeat_weight_gate" and selected_repeat:
-            supported_count = int(selected_repeat["count"])
-        else:
-            supported_count = cls._freezer_supported_instance_count(
-                selected_vote,
-                target_weight=target_weight,
-                product_weights=product_weights,
-            )
-        selected = replace(
-            selected_vote,
-            instance_count_hint=supported_count,
-            freezer_exit_path_votes=int(selected_item["freezer_exit_path_votes"]),
-            hand_path_valid=bool(
-                (selected_item.get("interaction") or {}).get("handPathValid")
-            ),
-            hand_path_valid_upper_roi=bool(
-                (selected_item.get("interaction") or {}).get("handPathValidUpperRoi")
-            ),
-            hand_path_passed=bool(
-                (selected_item.get("interaction") or {}).get("handPathPassed")
-            ),
-            hand_path_blocked=bool(
-                (selected_item.get("interaction") or {}).get("handPathBlocked")
-            ),
-            hand_interaction_passed=bool(
-                (selected_item.get("interaction") or {}).get("handInteractionPassed")
-            ),
-            hand_near_frame_count=int(
-                (selected_item.get("interaction") or {}).get(
-                    "handNearFrameCount",
-                    0,
-                )
-                or 0
-            ),
-            hand_near_vote_ratio=float(
-                (selected_item.get("interaction") or {}).get(
-                    "handNearVoteRatio",
-                    0.0,
-                )
-                or 0.0
-            ),
-            min_hand_distance_px=(selected_item.get("interaction") or {}).get(
-                "minHandDistancePx"
-            ),
-        )
-
-        unit_weight = cls._freezer_candidate_unit_weight(selected_vote, product_weights)
-        residual = (
-            abs(target_weight - (unit_weight * supported_count))
-            if unit_weight is not None
-            else target_weight
-        )
-        ambiguous_candidates = [
-            {
-                **considered_entry(item),
-                "spatialClusterWithSelected": cls._freezer_spatially_clustered(
-                    item,
-                    selected_item,
-                ),
-            }
-            for item in scored
-            if int(item["vote"].class_id) in cls._FREEZER_AMBIGUOUS_PRODUCT_CLASSES
-            and float(item["residual"]) <= near_residual_limit
-            and int(item["freezer_exit_path_votes"]) >= min_exit_path_votes
+            for item in selectable_items
         ]
-        diagnostic_reason = (
-            "multi_item_trace_single_narrowed"
-            if has_multi_item_trace_evidence
-            else reason
-        )
         diagnostics = {
             **cls._freezer_candidate_filter_config_payload(
                 delta_weight=delta_weight,
                 raw_candidate_count=len(votes),
-                handled_candidate_count=1,
+                handled_candidate_count=len(handled_votes),
             ),
             "accepted": True,
-            "reason": diagnostic_reason,
-            "selectionReason": reason,
-            "stage_only_candidate_count": len(stage_only_votes),
-            "confidence_band": round(confidence_band, 4),
-            "minFreezerExitPathVotes": min_exit_path_votes,
-            "strictResidualLimit": round(strict_residual_limit, 1),
-            "nearResidualLimit": round(near_residual_limit, 1),
-            "multiItemTraceEvidence": has_multi_item_trace_evidence,
-            "selected": {
-                "rank": selected_index + 1,
-                "class_id": int(selected.class_id),
-                "name": selected.class_name,
-                "confidence": round(
-                    float(getattr(selected, "weighted_confidence", 0.0) or 0.0),
-                    4,
-                ),
-                "source": getattr(selected, "source", "vision"),
-                "stageOnly": bool(selected_item["stage_only"]),
-                "identitySupported": bool(selected_item["identity_supported"]),
-                "unit_weight": round(unit_weight, 1) if unit_weight is not None else None,
-                "weight_residual": round(residual, 1),
-                "count": int(supported_count),
-                "expectedWeight": round(float(unit_weight or 0.0) * supported_count, 1),
-                "countWeightResidual": round(residual, 1),
-                "instance_count_hint": supported_count,
-                "freezerExitPathVotes": int(selected.freezer_exit_path_votes),
-                "cameraExitCounts": dict(selected_item["camera_exit_counts"]),
-                "dualCameraExitPath": bool(selected_item["dual_camera_exit_path"]),
-                "pathDisplacementPx": (
-                    selected_item.get("interaction") or {}
-                ).get("pathDisplacementPx"),
-                "maxDistancePx": (
-                    selected_item.get("interaction") or {}
-                ).get("maxDistancePx"),
-                "centerSpanX": (
-                    selected_item.get("interaction") or {}
-                ).get("centerSpanX"),
-                "centerSpanY": (
-                    selected_item.get("interaction") or {}
-                ).get("centerSpanY"),
-                "trajectoryExitPathPassed": bool(
-                    (selected_item.get("interaction") or {}).get(
-                        "trajectoryExitPathPassed"
-                    )
-                ),
-                "staticShelfLikely": bool(
-                    (selected_item.get("interaction") or {}).get("staticShelfLikely")
-                ),
-                "handPathValid": bool(
-                    (selected_item.get("interaction") or {}).get("handPathValid")
-                ),
-                "handPathValidUpperRoi": bool(
-                    (selected_item.get("interaction") or {}).get(
-                        "handPathValidUpperRoi"
-                    )
-                ),
-                "handPathPassed": bool(
-                    (selected_item.get("interaction") or {}).get("handPathPassed")
-                ),
-                "handPathBlocked": bool(
-                    (selected_item.get("interaction") or {}).get("handPathBlocked")
-                ),
-                "handInteractionPassed": bool(
-                    (selected_item.get("interaction") or {}).get(
-                        "handInteractionPassed"
-                    )
-                ),
-                "handNearFrameCount": (
-                    selected_item.get("interaction") or {}
-                ).get("handNearFrameCount"),
-                "handNearVoteRatio": (
-                    selected_item.get("interaction") or {}
-                ).get("handNearVoteRatio"),
-                "minHandDistancePx": (
-                    selected_item.get("interaction") or {}
-                ).get("minHandDistancePx"),
-                "interactionPenalty": bool(selected_item.get("interaction_penalty")),
-                "selectionTier": reason,
-                "sameProductRepeatCandidate": bool(selected_repeat),
-                "singleRegularVisionIdentity": bool(
-                    (selected_repeat or {}).get("singleRegularVisionIdentity")
-                ),
-                "repeatEvidenceMode": (selected_repeat or {}).get(
-                    "repeatEvidenceMode"
-                ),
-            },
-            "considered": [considered_entry(item) for item in scored],
-            "rejectedInteractionCandidates": [
-                considered_entry(item) for item in interaction_rejected_items
-            ],
-            "sameProductRepeatCandidates": [
-                considered_entry(item)
-                for item in scored
-                if item.get("same_product_repeat") is not None
-            ],
-            "rejectedSameProductRepeatCandidates": [
-                considered_entry(item)
-                for item in scored
-                if item.get("same_product_repeat_rejection") is not None
-            ]
-            + rejected_repeat_selection,
-            "ambiguousCandidates": ambiguous_candidates,
-            "hardNegativeCandidates": ambiguous_candidates,
+            "reason": "vision_identity_passthrough",
+            "targetWeight": round(target_weight, 1),
+            "stage_only_candidate_count": 0,
+            "multiItemTraceEvidence": cls._freezer_trace_has_multi_item_evidence(
+                trace_context
+            ),
+            "selectedClassIds": [int(vote.class_id) for vote in handled_votes],
+            "considered": considered_vision,
+            "rejectedInteractionCandidates": interaction_rejected_items,
+            "rejectedSourceCandidates": rejected_source_items,
         }
-        if rejected_multi_diagnostics is not None:
-            diagnostics["rejectedMultiCandidate"] = rejected_multi_diagnostics
         cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
         logger.info(
-            "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=1 selected=%s "
-            "target=%.1fg residual=%.1fg",
+            "[%s][FREEZER-CANDIDATE-FILTER] raw=%s handled=%s reason=%s",
             log_prefix,
             len(votes),
-            selected.class_name,
-            target_weight,
-            residual,
+            len(handled_votes),
+            "vision_identity_passthrough",
         )
-        return [selected]
+        return handled_votes
 
     @staticmethod
     def _record_freezer_candidate_filter_diagnostics(

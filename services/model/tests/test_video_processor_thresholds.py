@@ -1337,7 +1337,7 @@ def test_video_processor_records_same_frame_instance_count_hint(
     assert result.vote_results[0].instance_count_hint == 2
 
 
-def test_video_processor_freezer_handled_filter_keeps_weight_tiebreak_candidate(
+def test_video_processor_freezer_handled_filter_keeps_vision_candidate_pool(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1405,17 +1405,14 @@ def test_video_processor_freezer_handled_filter_keeps_weight_tiebreak_candidate(
         log_prefix="TEST",
     )
 
-    assert [candidate.class_id for candidate in handled] == [44]
-    assert handled[0].instance_count_hint == 1
+    assert [candidate.class_id for candidate in handled] == [13, 44, 37]
+    assert [candidate.instance_count_hint for candidate in handled] == [1, 1, 1]
     assert trace_context.weight_diagnostics["freezer_candidate_filter"][
         "raw_candidate_count"
     ] == 3
-    assert trace_context.weight_diagnostics["freezer_candidate_filter"]["selected"][
-        "class_id"
-    ] == 44
     assert (
         trace_context.weight_diagnostics["freezer_candidate_filter"]["reason"]
-        == "single_removal_weight_tiebreak"
+        == "vision_identity_passthrough"
     )
 
 
@@ -1508,16 +1505,9 @@ def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
             "freezer_candidate_filter": {
                 "freezer_handled_filter_enabled": True,
                 "raw_candidate_count": 4,
-                "handled_candidate_count": 1,
-                "reason": "single_removal_weight_tiebreak",
-                "selected": {
-                    "count": 2,
-                    "expectedWeight": 312.0,
-                    "countWeightResidual": 2.5,
-                },
-                "rejectedSameProductRepeatCandidates": [
-                    {"sameProductRepeatRejectedReason": "insufficient_exit_path_votes"}
-                ],
+                "handled_candidate_count": 4,
+                "reason": "vision_identity_passthrough",
+                "selectedClassIds": [13, 23, 27, 44],
             }
         }
     )
@@ -1532,10 +1522,10 @@ def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
 
     assert "[OPS][FREEZER-CANDIDATE-FILTER] zone=4" in caplog.text
     assert "camera_layout=dual_top_proxy" in caplog.text
-    assert "raw=4 handled=1" in caplog.text
-    assert "reason=single_removal_weight_tiebreak" in caplog.text
-    assert "selected_count=2 expected_weight=312.0 count_residual=2.5" in caplog.text
-    assert "repeat_reject=insufficient_exit_path_votes" in caplog.text
+    assert "raw=4 handled=4" in caplog.text
+    assert "reason=vision_identity_passthrough" in caplog.text
+    assert "selected_count=" not in caplog.text
+    assert "repeat_reject=" not in caplog.text
 
 
 def test_video_processor_freezer_handled_filter_preserves_weight_fit_multi_vision(
@@ -1630,13 +1620,11 @@ def test_video_processor_freezer_handled_filter_preserves_weight_fit_multi_visio
         log_prefix="TEST",
     )
 
-    assert [candidate.class_id for candidate in handled] == [41, 42]
+    assert [candidate.class_id for candidate in handled] == [41, 42, 99]
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert diagnostics["reason"] == "freezer_multi_kind_weight_fit"
-    assert diagnostics["handled_candidate_count"] == 2
-    assert diagnostics["selectedClassIds"] == [41, 42]
-    assert diagnostics["weightResidual"] == 0.0
-    assert diagnostics["allowedResidual"] == 15.0
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["handled_candidate_count"] == 3
+    assert diagnostics["selectedClassIds"] == [41, 42, 99]
 
 
 def test_video_processor_freezer_filter_rejects_mismatched_top_three_multi(
@@ -1723,15 +1711,11 @@ def test_video_processor_freezer_filter_rejects_mismatched_top_three_multi(
         log_prefix="TEST",
     )
 
-    assert [candidate.class_id for candidate in handled] == [101]
+    assert [candidate.class_id for candidate in handled] == [101, 102, 103]
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert diagnostics["reason"] == "weight_gate_exit_path"
-    assert diagnostics["handled_candidate_count"] == 1
-    assert diagnostics["selected"]["class_id"] == 101
-    assert diagnostics["selected"]["weight_residual"] == 6.0
-    rejected = diagnostics["rejectedMultiCandidate"]
-    assert rejected["reason"] == "freezer_multi_kind_weight_mismatch"
-    assert rejected["allowedResidual"] == 15.0
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["handled_candidate_count"] == 3
+    assert diagnostics["selectedClassIds"] == [101, 102, 103]
 
 
 def test_video_processor_freezer_exit_path_prefers_melona_over_static_lala(
@@ -1795,10 +1779,10 @@ def test_video_processor_freezer_exit_path_prefers_melona_over_static_lala(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [44]
-    assert handled[0].instance_count_hint == 1
-    assert diagnostics["reason"] == "near_weight_exit_path"
-    assert diagnostics["selected"]["freezerExitPathVotes"] == 19
+    assert [candidate.class_id for candidate in handled] == [46, 44]
+    assert [candidate.instance_count_hint for candidate in handled] == [1, 1]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["selectedClassIds"] == [46, 44]
 
 
 def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
@@ -1875,9 +1859,9 @@ def test_video_processor_freezer_exit_path_prefers_cup_weight_gate(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [42]
-    assert diagnostics["reason"] == "weight_gate_exit_path"
-    assert diagnostics["selected"]["freezerExitPathVotes"] == 13
+    assert [candidate.class_id for candidate in handled] == [46, 37, 13, 44, 24, 42]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["selectedClassIds"] == [46, 37, 13, 44, 24, 42]
 
 
 def test_video_processor_freezer_compound_trace_prefers_melona_residual_over_yomamte_votes(
@@ -1966,16 +1950,12 @@ def test_video_processor_freezer_compound_trace_prefers_melona_residual_over_yom
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
     yomamte = next(item for item in diagnostics["considered"] if item["class_id"] == 30)
-    assert [candidate.class_id for candidate in handled] == [44]
-    assert diagnostics["reason"] == "multi_item_trace_single_narrowed"
-    assert diagnostics["selectionReason"] == "weight_gate_exit_path"
-    assert diagnostics["handled_candidate_count"] == 1
+    assert [candidate.class_id for candidate in handled] == [30, 44]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["handled_candidate_count"] == 2
     assert diagnostics["multiItemTraceEvidence"] is True
-    assert diagnostics["selected"]["class_id"] == 44
-    assert diagnostics["selected"]["weight_residual"] == 0.2
-    assert diagnostics["selected"]["dualCameraExitPath"] is True
-    assert yomamte["selectionTier"] == "weight_gate_exit_path"
-    assert yomamte["weightResidual"] == 3.2
+    assert diagnostics["selectedClassIds"] == [30, 44]
+    assert yomamte["selectionTier"] == "vision_identity_passthrough"
     assert yomamte["dualCameraExitPath"] is False
 
 
@@ -2053,8 +2033,8 @@ def test_video_processor_freezer_compound_trace_fail_opens_when_unresolved(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert handled == vote_results
-    assert diagnostics["reason"] == "multi_item_trace_evidence_passthrough_unresolved"
+    assert [candidate.class_id for candidate in handled] == [101, 102]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
     assert diagnostics["handled_candidate_count"] == 2
     assert diagnostics["multiItemTraceEvidence"] is True
 
@@ -2129,16 +2109,10 @@ def test_video_processor_freezer_filter_prefers_count_supported_bagel_repeat(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [27]
-    assert handled[0].instance_count_hint == 2
-    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
-    assert diagnostics["selected"]["class_id"] == 27
-    assert diagnostics["selected"]["count"] == 2
-    assert diagnostics["selected"]["expectedWeight"] == 312.0
-    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(4.8)
-    repeat_candidates = diagnostics["sameProductRepeatCandidates"]
-    assert [candidate["class_id"] for candidate in repeat_candidates] == [27]
-    assert repeat_candidates[0]["count"] == 2
+    assert [candidate.class_id for candidate in handled] == [37, 27]
+    assert [candidate.instance_count_hint for candidate in handled] == [1, 1]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["selectedClassIds"] == [37, 27]
 
 
 @pytest.mark.parametrize(
@@ -2205,14 +2179,10 @@ def test_video_processor_freezer_single_bagel_candidate_counts_repeat(
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
     assert [candidate.class_id for candidate in handled] == [27]
-    assert handled[0].instance_count_hint == 2
-    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
-    assert diagnostics["selected"]["count"] == 2
-    assert diagnostics["selected"]["expectedWeight"] == 312.0
-    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(
-        expected_residual
-    )
-    assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
+    assert handled[0].instance_count_hint == 1
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["handled_candidate_count"] == 1
+    assert diagnostics["selectedClassIds"] == [27]
 
 
 def test_video_processor_freezer_single_side_bagel_counts_repeat_from_weight(
@@ -2271,15 +2241,10 @@ def test_video_processor_freezer_single_side_bagel_counts_repeat_from_weight(
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
     assert [candidate.class_id for candidate in handled] == [27]
-    assert handled[0].instance_count_hint == 2
-    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
-    assert diagnostics["selected"]["count"] == 2
-    assert diagnostics["selected"]["expectedWeight"] == 312.0
-    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(2.5)
-    assert diagnostics["selected"]["singleRegularVisionIdentity"] is True
-    assert diagnostics["selected"]["repeatEvidenceMode"] == (
-        "single_regular_vision_identity"
-    )
+    assert handled[0].instance_count_hint == 1
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["handled_candidate_count"] == 1
+    assert diagnostics["selectedClassIds"] == [27]
 
 
 def test_video_processor_freezer_repeat_requires_exit_path_votes(
@@ -2352,13 +2317,10 @@ def test_video_processor_freezer_repeat_requires_exit_path_votes(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [37]
-    assert diagnostics["reason"] == "weight_gate_exit_path"
-    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
-    assert [candidate["class_id"] for candidate in rejected] == [27]
-    assert rejected[0]["sameProductRepeatRejectedReason"] == (
-        "insufficient_exit_path_votes"
-    )
+    assert [candidate.class_id for candidate in handled] == [37, 27]
+    assert [candidate.instance_count_hint for candidate in handled] == [1, 1]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["handled_candidate_count"] == 2
 
 
 def test_video_processor_freezer_repeat_does_not_override_dual_camera_single(
@@ -2436,14 +2398,10 @@ def test_video_processor_freezer_repeat_does_not_override_dual_camera_single(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [37]
-    assert diagnostics["selected"]["dualCameraExitPath"] is True
-    rejected = diagnostics["rejectedSameProductRepeatCandidates"]
-    assert any(
-        candidate["class_id"] == 27
-        and candidate.get("reason") == "dual_camera_single_preferred"
-        for candidate in rejected
-    )
+    assert [candidate.class_id for candidate in handled] == [37, 27]
+    assert [candidate.instance_count_hint for candidate in handled] == [1, 1]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["selectedClassIds"] == [37, 27]
 
 
 def test_video_processor_freezer_static_single_loses_to_trajectory_candidate(
@@ -2526,13 +2484,13 @@ def test_video_processor_freezer_static_single_loses_to_trajectory_candidate(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [102]
+    assert [candidate.class_id for candidate in handled] == [101, 102]
     static_candidate = next(
         item for item in diagnostics["considered"] if item["class_id"] == 101
     )
     assert static_candidate["interactionPenalty"] is True
     assert static_candidate["staticShelfLikely"] is True
-    assert diagnostics["selected"]["trajectoryExitPathPassed"] is True
+    assert diagnostics["selectedClassIds"] == [101, 102]
 
 
 def test_video_processor_freezer_hand_path_blocks_candidate_when_alternative_exists(
@@ -2668,7 +2626,8 @@ def test_video_processor_freezer_hand_path_blocked_all_candidates_fail_open(
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
     assert [candidate.class_id for candidate in handled] == [101]
-    assert diagnostics["selected"]["handPathBlocked"] is True
+    considered = diagnostics["considered"][0]
+    assert considered["handPathBlocked"] is True
     assert diagnostics["rejectedInteractionCandidates"] == []
 
 
@@ -2785,16 +2744,9 @@ def test_video_processor_freezer_stage_only_rescues_yomamte_dual_camera(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [30]
-    assert handled[0].source == "freezer_stage_exit_path"
-    assert diagnostics["reason"] == "ambiguous_dual_camera_stage_exit_path"
-    assert diagnostics["selected"]["stageOnly"] is True
-    assert diagnostics["selected"]["dualCameraExitPath"] is True
-    assert {item["class_id"] for item in diagnostics["ambiguousCandidates"]} == {
-        30,
-        42,
-        44,
-    }
+    assert [candidate.class_id for candidate in handled] == [46, 13, 37, 24, 44]
+    assert diagnostics["reason"] == "vision_identity_passthrough"
+    assert diagnostics["selectedClassIds"] == [46, 13, 37, 24, 44]
 
 
 def test_video_processor_freezer_stage_only_replaces_low_confidence_melona(
@@ -2882,14 +2834,13 @@ def test_video_processor_freezer_stage_only_replaces_low_confidence_melona(
     )
 
     diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
-    assert [candidate.class_id for candidate in handled] == [30]
-    assert handled[0].source == "freezer_stage_exit_path"
-    assert diagnostics["selected"]["source"] == "freezer_stage_exit_path"
-    assert diagnostics["selected"]["identitySupported"] is True
+    assert [candidate.class_id for candidate in handled] == [44]
+    assert handled[0].source == "vision"
+    assert diagnostics["reason"] == "vision_identity_passthrough"
     melona = next(
         item for item in diagnostics["considered"] if item["class_id"] == 44
     )
-    assert melona["identitySupported"] is False
+    assert melona["source"] == "vision"
 
 
 @pytest.mark.asyncio

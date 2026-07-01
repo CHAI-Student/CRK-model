@@ -83,17 +83,13 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   Freezer tests cover dual-top upper-half ROI filtering, separation of
   `freezer_roi_passed` from rejected `freezer_roi_filtered` evidence, freezer
   rescue suppression, same-frame multi-bbox `instance_count_hint`,
-  disabled-layout warnings, `15g` weight-fit multi selection, top-three
-  mismatch narrowing, same-product repeat recovery for the zone5 bagel `x2`
-  collision, side-only single-candidate bagel repeat recovery at `309.5g`,
-  repeat rejection when freezer exit-path evidence is too weak,
-  compound-trace Melona/Yomamte same-tier residual ordering, unresolved
-  multi-segment fail-open passthrough,
-  dual-camera single preference over top-only repeats, static top-only ranking
-  demotion, upper-ROI hand proximity, top-side hand detections failing open
-  without filtering candidates, top-middle hand detections still filtering
-  candidates, hand-path hard reject with alternative candidates, hand-path
-  all-blocked fail-open behavior, and freezer filter OPS visibility.
+  disabled-layout warnings, vision-candidate-pool passthrough, count-hint
+  normalization to `1`, diagnostic-only stage/active/weight-nearest evidence,
+  upper-ROI hand proximity, top-side hand detections failing open without
+  filtering candidates, top-middle hand detections still filtering candidates,
+  hand-path hard reject with alternative candidates, hand-path all-blocked
+  fail-open behavior, and freezer filter OPS visibility with
+  `reason=vision_identity_passthrough`.
   Async failure tests cover model-service exception re-raise, unknown task
   wrapping, missing async extractor support, frame queue timeout, and zero-frame
   failure after retry.
@@ -138,22 +134,19 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   diagnostic detection evidence. Direct freezer coverage now keeps
   Melona/Yomamte residual ordering consistent with the video handled-filter
   path and prevents stage-only freezer rescue from resurrecting
-  handled-filter-rejected classes or preempting strict non-stage weight-gate
-  candidates. Full-delta regressions cover the
+  stage-only freezer identity creation. Full-delta regressions cover the
   Haluyache/Letsbe/Jagabee `-503g` segmented removal, rejection of
   `last_unpaired_negative_segment` as a standalone forced fallback target, and
   no-charge `UNCERTAIN` results when a successful branch does not explain the
   full stable removal delta. Freezer full-delta regressions now also verify
   that valid-weight `freezer_vision_first` `x1` mismatches become no-charge
-  `UNCERTAIN` when repeat confidence or residual checks fail.
-  Freezer decision tests cover confidence-first single selection outside the
-  normal weight tolerance, weight residual tie-breaks only inside the
-  confidence band, candidate-only identity, freezer `15g` weight-gated
-  multi-kind evidence, rejection of mismatched top-three freezer candidates,
-  same-class counts gated by `instance_count_hint`, and count-aware
-  same-product repeat inference for the zone5 bagel `x2` case. They also cover
-  direct freezer static/trajectory interaction ranking so the engine and video
-  handled-filter path stay aligned.
+  `UNCERTAIN` when no ordered candidate-pool combination fits.
+  Freezer decision tests cover rank-first ordered candidate-pool solving,
+  cheese burger over lower-rank dumpling at `183.7g`, same-candidate `x2`
+  inference, mixed combinations only after single-kind counts miss,
+  missing-weight diagnostics without charge, candidate-only identity, and
+  direct freezer hand-path rejection alignment with the video candidate-pool
+  path.
 - [test_session_store_lifecycle.py](../../../services/model/tests/test_session_store_lifecycle.py):
   normal `processing -> complete/waiting/error` session saves do not emit
   `Session overwritten`, while replacing an already completed session still
