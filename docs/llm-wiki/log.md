@@ -1,5 +1,26 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer hybrid close aggregate resolver
+
+- Added a freezer-only Hybrid CLOSE aggregate resolver for unstable door-open
+  sessions. Mixed-sign `return_weight_hints`, multiple meaningful negative
+  freezer triggers, or negative freezer triggers spanning zones now cause CLOSE
+  to solve one aggregate basket and attribute it to the latest participating
+  freezer trigger zone.
+- Kept simple single stable negative freezer triggers on the existing per-zone
+  path. Empty no-product negative triggers inside freezer tolerance do not
+  force aggregate eligibility, so small diagnostic/noise movements do not
+  reroute an otherwise stable basket.
+- Changed positive hint handling to Return If Matched. The resolver first
+  solves the raw negative removal target, then subtracts a positive hint only
+  when selected products match that weight and residual improves. Unmatched
+  positive hints are recorded as pressure/artifact diagnostics.
+- Added close-time `weightDelta` overrides and
+  `final_weight_validation.freezerCloseAggregate` diagnostics, plus
+  `[OPS][FREEZER-CLOSE-AGGREGATE]` logging and regressions for mixed-sign
+  reroute, unmatched positive hints, multi-zone aggregate solving, simple
+  freezer preservation, and refrigerated non-application.
+
 ## [2026-07-01] maintenance | freezer full-delta repeat repair
 
 - Closed the freezer `-309.5g` bagel failure mode end-to-end. A single regular

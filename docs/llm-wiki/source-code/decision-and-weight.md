@@ -6,7 +6,8 @@ Source: [engine/decision_engine.py](../../../services/model/model_service/engine
 [video/freezer_candidate_policy.py](../../../services/model/model_service/video/freezer_candidate_policy.py),
 [weight/count_calculator.py](../../../services/model/model_service/weight/count_calculator.py),
 [weight/strict_weight_matcher.py](../../../services/model/model_service/weight/strict_weight_matcher.py),
-[session/product_aggregator.py](../../../services/model/model_service/session/product_aggregator.py)
+[session/product_aggregator.py](../../../services/model/model_service/session/product_aggregator.py),
+[session/freezer_close_aggregate.py](../../../services/model/model_service/session/freezer_close_aggregate.py)
 
 Status: current decision/weight map
 
@@ -594,6 +595,21 @@ Important inputs:
   the detected `products`/`totalPrice` for Edge output and record
   `finalWeightValidation.outputPolicy=products_as_detected` plus
   `unresolvedProducts` diagnostics.
+- Freezer sessions add a close-only aggregate solver after deferred return
+  reconciliation and final-weight validation. This is a basket-level policy,
+  not a new trigger-time identity source. It applies only to freezer sessions
+  with mixed-sign return hints, multiple meaningful negative freezer triggers,
+  or negative freezer triggers across zones. It builds its candidate pool from
+  participating trigger vision snapshots and trigger products with valid
+  positive weights, solves the sum of participating negative deltas, and then
+  optionally removes matched positive-return hints from the selected basket
+  only when doing so improves residual inside freezer tolerance.
+- Accepted freezer aggregate results are attributed to the latest participating
+  freezer trigger zone. Other participating freezer zones are cleared and get a
+  close-time `weightDelta` override of `0.0`; the output zone receives the
+  final selected basket and a negative `weightDelta` equal to the final target.
+  This preserves public response schemas while changing CLOSE placement for
+  unstable freezer sessions.
 
 ## Related Wiki Pages
 

@@ -108,6 +108,43 @@ def _product(product_id, name, count, price=1200, confidence=0.7):
     )
 
 
+def _trigger_result(
+    *,
+    product_id,
+    name,
+    delta,
+    timestamp,
+    count=1,
+    weight=None,
+    price=1200,
+    return_weight_hints=None,
+    trigger_id=None,
+):
+    from model_service.session.door_session import TriggerResult
+
+    return TriggerResult(
+        trigger_id=trigger_id or f"trigger-{product_id}-{timestamp}",
+        session_id=f"session-{product_id}-{timestamp}",
+        timestamp=timestamp,
+        products=[_product(product_id, name, count, price=price)],
+        delta_weight=delta,
+        confidence=0.9,
+        video_paths={},
+        is_return=False,
+        return_weight_hints=list(return_weight_hints or []),
+        vision_candidates=[
+            _candidate_snapshot(
+                product_id,
+                name,
+                rank=1,
+                weight=weight if weight is not None else abs(delta),
+                price=price,
+                confidence=0.9,
+            )
+        ],
+    )
+
+
 def test_complete_close_response_includes_decision_summary(caplog):
     from model_service.api.routes.multi_zone import _handle_door_close
 
@@ -149,6 +186,272 @@ def test_complete_close_response_includes_decision_summary(caplog):
 
     assert "[MULTI-ZONE CLOSE][SUMMARY]" in caplog.text
     assert "zone=1 weight_delta=-10.0g" in caplog.text
+
+
+def test_freezer_close_aggregate_reroutes_mixed_sign_to_last_zone(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {70: 70.0, 150: 150.0}.get(
+            product_id,
+            0.0,
+        ),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=3,
+            result=_trigger_result(
+                product_id=70,
+                name="FREEZER_70G_ITEM",
+                delta=-70.0,
+                weight=70.0,
+                timestamp=100.0,
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=2,
+            result=_trigger_result(
+                product_id=150,
+                name="FREEZER_150G_ITEM",
+                delta=-150.0,
+                weight=150.0,
+                timestamp=110.0,
+                return_weight_hints=[
+                    {
+                        "weight": 70.0,
+                        "delta": 70.0,
+                        "segment_index": 0,
+                        "replay_position": "before_removal",
+                        "reason": "unpaired_return_segment",
+                    }
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        zone_3 = global_session.zone_sessions[3]
+        zone_2 = global_session.zone_sessions[2]
+        assert zone_3.get_active_products() == []
+        assert [(p.product_id, p.count) for p in zone_2.get_active_products()] == [
+            (150, 1)
+        ]
+        aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
+        assert aggregate["accepted"] is True
+        assert aggregate["outputZone"] == 2
+        assert aggregate["rawNegativeTotal"] == 220.0
+        assert aggregate["matchedReturnTotal"] == 70.0
+        assert aggregate["finalTargetWeight"] == 150.0
+        assert aggregate["selectedProducts"] == [
+            {"productId": 150, "name": "FREEZER_150G_ITEM", "count": 1}
+        ]
+
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_2_response = next(zone for zone in response["zones"] if zone["zone"] == 2)
+        zone_3_response = next(zone for zone in response["zones"] if zone["zone"] == 3)
+        assert zone_3_response["products"] == []
+        assert zone_3_response["weightDelta"] == 0.0
+        assert zone_2_response["products"][0]["name"] == "FREEZER_150G_ITEM"
+        assert zone_2_response["weightDelta"] == -150.0
+        assert response["decisionSummary"]["totalWeightDelta"] == -150.0
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_keeps_removal_when_positive_hint_unmatched(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {150: 150.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=2,
+            result=_trigger_result(
+                product_id=150,
+                name="FREEZER_150G_ITEM",
+                delta=-150.0,
+                weight=150.0,
+                timestamp=110.0,
+                return_weight_hints=[
+                    {
+                        "weight": 70.0,
+                        "delta": 70.0,
+                        "segment_index": 0,
+                        "replay_position": "before_removal",
+                        "reason": "unpaired_return_segment",
+                    }
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        zone_2 = global_session.zone_sessions[2]
+        assert [(p.product_id, p.count) for p in zone_2.get_active_products()] == [
+            (150, 1)
+        ]
+        aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
+        assert aggregate["accepted"] is True
+        assert aggregate["matchedReturnTotal"] == 0.0
+        assert aggregate["finalTargetWeight"] == 150.0
+        assert aggregate["unmatchedPositiveHints"][0]["weight"] == 70.0
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_combines_multiple_zones_to_last_trigger_zone(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {100: 100.0, 200: 200.0}.get(
+            product_id,
+            0.0,
+        ),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=1,
+            result=_trigger_result(
+                product_id=100,
+                name="FREEZER_100G_ITEM",
+                delta=-100.0,
+                weight=100.0,
+                timestamp=100.0,
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=4,
+            result=_trigger_result(
+                product_id=200,
+                name="FREEZER_200G_ITEM",
+                delta=-200.0,
+                weight=200.0,
+                timestamp=120.0,
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_1 = next(zone for zone in response["zones"] if zone["zone"] == 1)
+        zone_4 = next(zone for zone in response["zones"] if zone["zone"] == 4)
+        assert zone_1["products"] == []
+        assert zone_1["weightDelta"] == 0.0
+        assert [product["name"] for product in zone_4["products"]] == [
+            "FREEZER_100G_ITEM",
+            "FREEZER_200G_ITEM",
+        ]
+        assert zone_4["weightDelta"] == -300.0
+        assert response["decisionSummary"]["totalWeightDelta"] == -300.0
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_leaves_single_simple_trigger_per_zone(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {150: 150.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=2,
+            result=_trigger_result(
+                product_id=150,
+                name="FREEZER_150G_ITEM",
+                delta=-150.0,
+                weight=150.0,
+                timestamp=110.0,
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        zone_2 = global_session.zone_sessions[2]
+        assert [(p.product_id, p.count) for p in zone_2.get_active_products()] == [
+            (150, 1)
+        ]
+        assert "freezerCloseAggregate" not in zone_2.final_weight_validation
+    finally:
+        store.clear_all()
+
+
+def test_refrigerated_close_does_not_use_freezer_aggregate(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "refrigerated")
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {100: 100.0, 200: 200.0}.get(
+            product_id,
+            0.0,
+        ),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=1,
+            result=_trigger_result(
+                product_id=100,
+                name="FRIDGE_100G_ITEM",
+                delta=-100.0,
+                weight=100.0,
+                timestamp=100.0,
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=4,
+            result=_trigger_result(
+                product_id=200,
+                name="FRIDGE_200G_ITEM",
+                delta=-200.0,
+                weight=200.0,
+                timestamp=120.0,
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        assert [(p.product_id, p.count) for p in global_session.zone_sessions[1].get_active_products()] == [
+            (100, 1)
+        ]
+        assert [(p.product_id, p.count) for p in global_session.zone_sessions[4].get_active_products()] == [
+            (200, 1)
+        ]
+        assert "freezerCloseAggregate" not in global_session.zone_sessions[1].final_weight_validation
+        assert "freezerCloseAggregate" not in global_session.zone_sessions[4].final_weight_validation
+    finally:
+        store.clear_all()
 
 
 def test_close_final_weight_validation_prefers_repeated_candidate_over_mix(tmp_path):
@@ -553,7 +856,7 @@ def test_freezer_close_mismatch_preserves_detected_products_for_edge(
     assert "products=STICK_BINGGRAE_MELONA_75MLx1" in caplog.text
 
 
-def test_freezer_close_deferred_candidate_repairs_later_unused_weight_match(
+def test_freezer_close_aggregate_supersedes_deferred_candidate_repair(
     monkeypatch,
     tmp_path,
     caplog,
@@ -644,25 +947,35 @@ def test_freezer_close_deferred_candidate_repairs_later_unused_weight_match(
 
     zone3_session = global_session.zone_sessions[3]
     zone4_session = global_session.zone_sessions[4]
-    assert [(product.product_id, product.count) for product in zone3_session.get_active_products()] == [
-        (44, 1)
+    assert zone3_session.get_active_products() == []
+    zone4_products = [
+        (product.product_id, product.count)
+        for product in zone4_session.get_active_products()
     ]
-    assert [(product.product_id, product.count) for product in zone4_session.get_active_products()] == [
-        (30, 1)
+    assert zone4_products == [(30, 1), (44, 1)]
+    zone3_aggregate = zone3_session.final_weight_validation["freezerCloseAggregate"]
+    zone4_aggregate = zone4_session.final_weight_validation["freezerCloseAggregate"]
+    assert zone3_aggregate["role"] == "rerouted"
+    assert zone3_aggregate["weightDeltaOverride"] == 0.0
+    assert zone4_aggregate["accepted"] is True
+    assert zone4_aggregate["role"] == "output"
+    assert zone4_aggregate["outputZone"] == 4
+    assert zone4_aggregate["rawNegativeTotal"] == 300.0
+    assert zone4_aggregate["finalTargetWeight"] == 300.0
+    assert zone4_aggregate["selectedWeight"] == 303.0
+    assert zone4_aggregate["residual"] == 3.0
+    assert zone4_aggregate["selectedProducts"] == [
+        {
+            "productId": 30,
+            "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+            "count": 1,
+        },
+        {"productId": 44, "name": "STICK_BINGGRAE_MELONA_75ML", "count": 1},
     ]
-    validation = zone3_session.final_weight_validation
-    assert validation["accepted"] is True
-    assert validation["reason"] == "deferred_candidate_final_weight_correction"
-    assert validation["selectedProductId"] == 44
-    assert validation["sourceZone"] == 4
-    assert validation["candidateRank"] == 4
-    assert validation["deferredCandidateRepair"]["reason"] == (
-        "later_unused_candidate_weight_match"
-    )
     assert "[CLOSE][CANDIDATE_REPAIR] corrected zone=3" in caplog.text
 
 
-def test_freezer_close_deferred_candidate_does_not_borrow_consumed_match(
+def test_freezer_close_aggregate_solves_full_target_from_later_candidates(
     monkeypatch,
     tmp_path,
 ):
@@ -725,15 +1038,30 @@ def test_freezer_close_deferred_candidate_does_not_borrow_consumed_match(
     global_session = store.finalize_global_session()
 
     zone3_session = global_session.zone_sessions[3]
-    assert [(product.product_id, product.count) for product in zone3_session.get_active_products()] == [
-        (44, 1)
+    zone4_session = global_session.zone_sessions[4]
+    assert zone3_session.get_active_products() == []
+    zone4_products = [
+        (product.product_id, product.count)
+        for product in zone4_session.get_active_products()
     ]
-    validation = zone3_session.final_weight_validation
-    assert validation["reason"] == "unresolved_final_weight_mismatch"
-    repair = validation["deferredCandidateRepair"]
-    assert repair["applied"] is False
-    assert repair["reason"] == "no_later_unused_weight_match"
-    assert repair["rejectedCandidates"][0]["reason"] == "consumed_by_source_result"
+    assert zone4_products == [(30, 2)]
+    zone3_aggregate = zone3_session.final_weight_validation["freezerCloseAggregate"]
+    zone4_aggregate = zone4_session.final_weight_validation["freezerCloseAggregate"]
+    assert zone3_aggregate["role"] == "rerouted"
+    assert zone3_aggregate["weightDeltaOverride"] == 0.0
+    assert zone4_aggregate["accepted"] is True
+    assert zone4_aggregate["role"] == "output"
+    assert zone4_aggregate["outputZone"] == 4
+    assert zone4_aggregate["rawNegativeTotal"] == 448.2
+    assert zone4_aggregate["selectedWeight"] == 448.0
+    assert zone4_aggregate["residual"] == 0.2
+    assert zone4_aggregate["selectedProducts"] == [
+        {
+            "productId": 30,
+            "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+            "count": 2,
+        }
+    ]
 
 
 def test_freezer_close_deferred_candidate_rejects_residual_outside_tolerance(

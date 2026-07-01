@@ -64,6 +64,7 @@ from model_service.session import (
 )
 from model_service.session.active_product_store import ActiveProductStore
 from model_service.session.door_session import (
+    close_weight_delta_override,
     trigger_effective_delta_weight,
     unmatched_return_delta_weight,
 )
@@ -592,6 +593,9 @@ def _effective_zone_weight_delta(
     door_session: DoorSession,
 ) -> float:
     """Return basket-level delta after cross-zone return reconciliation."""
+    override = close_weight_delta_override(door_session)
+    if override is not None:
+        return override
     raw_delta = sum(trigger_effective_delta_weight(t) for t in door_session.triggers)
     unmatched_return_weight = unmatched_return_delta_weight(door_session)
     outgoing_cross_zone_weight = sum(

@@ -3,6 +3,7 @@
 Source: [session/session_store.py](../../../services/model/model_service/session/session_store.py),
 [session/door_session.py](../../../services/model/model_service/session/door_session.py),
 [session/door_session_store.py](../../../services/model/model_service/session/door_session_store.py),
+[session/freezer_close_aggregate.py](../../../services/model/model_service/session/freezer_close_aggregate.py),
 [session/global_door_session.py](../../../services/model/model_service/session/global_door_session.py),
 [session/product_aggregator.py](../../../services/model/model_service/session/product_aggregator.py),
 [session/active_product_store.py](../../../services/model/model_service/session/active_product_store.py),
@@ -65,10 +66,12 @@ while the door is open.
 - Negative triggers with `return_weight_hints` preserve those hints by segment
   position for CLOSE reconciliation. They are no longer replayed into the
   intermediate basket, because doing so can hide the actual final delta.
-- Same-zone returns, deferred CLOSE reconciliation, cross-zone repair, and
-  effective net-delta repair are separate recovery layers. The CLOSE order is
-  local aggregation, deferred return reconciliation, net-delta validation, then
-  final repeat correction.
+- Same-zone returns, deferred CLOSE reconciliation, cross-zone repair,
+  effective net-delta repair, final repeat correction, and freezer CLOSE
+  aggregate solving are separate recovery layers. The CLOSE order is local
+  aggregation, deferred return reconciliation, net-delta validation, final
+  repeat correction, then freezer aggregate solving when the freezer session is
+  eligible.
 - Cross-zone repair expands positive-count products from other active zones
   into bounded unit candidates, then matches unresolved return deltas against
   deterministic combinations at CLOSE. This covers one item, same-product
@@ -114,6 +117,36 @@ while the door is open.
   are rejected with `count_exceeds_close_repeat_cap`, which prevents final
   corrections such as HomeRunBall `64g x33` while preserving supported cases
   such as Sky Barley `x3`.
+- Freezer has a hybrid CLOSE aggregate resolver for unstable sessions. It runs
+  only when `MODEL__MACHINE__CABINET_TYPE=freezer` and only when there are
+  mixed-sign `return_weight_hints`, two or more meaningful negative freezer
+  triggers, or negative freezer triggers spanning multiple zones. A simple
+  single stable negative freezer trigger without mixed/return hints stays on
+  the existing per-zone path.
+- `FreezerCloseAggregateResolver` collects participating trigger candidate
+  snapshots and trigger products, sums participating negative deltas as the raw
+  removal target, and solves one vision-supported basket against that target.
+  It does not create unseen active-product-only identities; products without
+  usable positive weight are excluded from aggregate count correction and remain
+  diagnostic-only. Empty no-product negative triggers at or below freezer
+  tolerance do not force aggregate eligibility.
+- Positive return hints are "return if matched". The resolver first solves the
+  raw removal target, then applies a positive hint only when a subset of the
+  selected basket matches that positive weight and improves residual inside
+  freezer tolerance. Unmatched positive hints stay as
+  `unmatchedPositiveHints`, treating the movement as pressure/artifact
+  diagnostics instead of blindly subtracting it from the target.
+- Accepted freezer aggregate output is attributed to the latest participating
+  trigger zone, with insertion order as the tie-breaker for same-tick
+  timestamps. The output zone receives the full selected basket and a negative
+  close-time `weightDeltaOverride` equal to the final target; other
+  participating freezer zones are emptied and receive `weightDeltaOverride=0.0`.
+  Public response schemas stay unchanged: existing zone `products` and
+  `weightDelta` fields are redistributed at CLOSE.
+- `final_weight_validation.freezerCloseAggregate` records eligibility reason,
+  participating zones/triggers, raw negative total, positive hint total,
+  matched return total, final target, output zone, selected products, residual,
+  unmatched positive hints, role, and weight delta override.
 
 ## ActiveProductStore
 

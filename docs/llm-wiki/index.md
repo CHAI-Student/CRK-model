@@ -196,6 +196,21 @@ shape without rereading every long historical document.
   as `+70g` then `-150g` is judged as the `150g` removal, while the `70g`
   positive segment remains a `return_weight_hints` entry for CLOSE same-zone or
   cross-zone reconciliation.
+- Freezer now uses a Hybrid CLOSE aggregate policy for unstable door-open
+  sessions. Simple single stable negative freezer triggers without mixed/return
+  hints keep the existing per-zone path. If a freezer session has mixed-sign
+  return hints, two or more meaningful negative freezer triggers, or negative
+  freezer triggers across zones, CLOSE re-solves one vision-supported basket
+  from all participating candidates and attributes the final products to the
+  latest participating freezer trigger zone. Other participating freezer zones
+  are cleared and return `weightDelta=0.0`; the output zone returns the final
+  basket and the final negative `weightDelta` in the existing public zone
+  array schema.
+- Freezer aggregate positive handling is "return if matched". The resolver
+  first solves the raw negative removal total, then applies a positive hint
+  only when a selected product subset matches that positive weight and improves
+  residual. Unmatched positive hints remain diagnostics for pressure/artifact
+  movement and do not reduce the removal target.
 - Chargeable negative deltas use matched-only finalization. After regular
   matching fails, forced fallback can still return a low-confidence `PARTIAL`
   from active product weights, but only when the product weight sum explains

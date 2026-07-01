@@ -165,7 +165,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   trigger replay, relaxed same-zone single return tolerance, mixed
   return/removal hint replay, return-hint count reduction, close-time
   unresolved final-weight mismatch exclusion, freezer mixed-sign
-  return/removal close reconciliation, and complex scenarios.
+  return/removal close reconciliation, freezer aggregate matched/unmatched
+  positive-hint behavior, and complex scenarios.
 - [test_cross_zone_return.py](../../../services/model/tests/test_cross_zone_return.py):
   cross-zone return repair, combination recovery scenarios, effective
   net-delta order, and edge cases.
@@ -177,9 +178,12 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   from empty-basket CLOSE deltas, and non-chargeable pending trigger diagnostics
   for fast close finalization. Close final-weight validation also covers
   repeated-candidate correction followed by matched-only unresolved mismatch
-  exclusion when no bounded correction can explain the net removal, plus
-  freezer deferred repair from later unused candidate snapshots and rejection
-  of consumed or out-of-tolerance later candidates.
+  exclusion when no bounded correction can explain the net removal. Freezer
+  coverage includes hybrid CLOSE aggregate rerouting to the latest trigger
+  zone, whole-basket solving across zones, matched return-hint reduction,
+  unmatched positive-hint diagnostics, simple single-trigger per-zone
+  preservation, refrigerated non-application, and the superseded deferred
+  candidate-repair cases under aggregate output.
 
 ## Which Tests To Run
 
@@ -200,7 +204,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
 - Decision/weight change: `test_decision_engine.py`,
   `test_strict_weight_matcher.py`, `test_scenario_matrix_contract.py`.
 - Freezer policy change: `test_frame_trace.py`,
-  `test_video_processor_thresholds.py`, and `test_decision_engine.py`.
+  `test_video_processor_thresholds.py`, `test_decision_engine.py`,
+  `test_product_aggregator.py`, and `test_multi_zone_summary.py`.
 - Session/return change: `test_product_aggregator.py`,
   `test_cross_zone_return.py`, `test_multi_zone_summary.py`.
 - Jetson bootstrap change: `test_runtime_env.py`.

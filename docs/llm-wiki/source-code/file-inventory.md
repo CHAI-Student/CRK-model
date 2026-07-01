@@ -93,6 +93,9 @@ Status: current complete file map
   multi-zone global door-session container.
 - [session/door_session_store.py](../../../services/model/model_service/session/door_session_store.py):
   active door/global session lifecycle, close handling, recovery.
+- [session/freezer_close_aggregate.py](../../../services/model/model_service/session/freezer_close_aggregate.py):
+  freezer-only close-time aggregate basket resolver for unstable mixed-sign or
+  multi-trigger freezer sessions.
 - [session/product_aggregator.py](../../../services/model/model_service/session/product_aggregator.py):
   removal/return aggregation and net-delta repair support.
 - [session/yaml_persistence.py](../../../services/model/model_service/session/yaml_persistence.py):

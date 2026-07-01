@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from model_service.core.config import config
+from model_service.core.logging_config import get_ops_logger
 
 from .door_session import (
     AggregatedProduct,
@@ -80,11 +81,13 @@ from .door_session import (
     trigger_effective_delta_weight,
     unmatched_return_delta_weight,
 )
+from .freezer_close_aggregate import FreezerCloseAggregateResolver
 from .global_door_session import GlobalDoorSession, generate_global_session_id
 from .product_aggregator import ProductAggregator
 from .yaml_persistence import YamlPersistence
 
 logger = logging.getLogger(__name__)
+ops_logger = get_ops_logger()
 
 
 @dataclass
@@ -824,6 +827,7 @@ class DoorSessionStore:
                         net_delta=self._calculate_effective_net_delta(active_session),
                     )
                 self._apply_close_final_weight_validation()
+                self._apply_freezer_close_aggregate()
 
             # 모든 활성 zone 세션 finalize
             for zone in list(self._active_sessions.keys()):
@@ -856,6 +860,33 @@ class DoorSessionStore:
             self._save_yaml_background(session)
 
         return result
+
+    def _apply_freezer_close_aggregate(self) -> None:
+        resolver = FreezerCloseAggregateResolver(
+            get_product_weight=self._get_product_weight,
+        )
+        diagnostics = resolver.apply(self._active_sessions)
+        if not diagnostics:
+            return
+        products_text = ", ".join(
+            f"{product.get('name')}x{product.get('count')}"
+            for product in diagnostics.get("selectedProducts", []) or []
+            if isinstance(product, dict)
+        ) or "none"
+        ops_logger.info(
+            "[OPS][FREEZER-CLOSE-AGGREGATE] accepted=%s reason=%s "
+            "output_zone=%s raw_negative_total=%.1f matched_return_total=%.1f "
+            "final_target=%.1f selected_weight=%.1f residual=%.1f products=%s",
+            diagnostics.get("accepted", False),
+            diagnostics.get("reason", "unknown"),
+            diagnostics.get("outputZone", "n/a"),
+            float(diagnostics.get("rawNegativeTotal", 0.0) or 0.0),
+            float(diagnostics.get("matchedReturnTotal", 0.0) or 0.0),
+            float(diagnostics.get("finalTargetWeight", 0.0) or 0.0),
+            float(diagnostics.get("selectedWeight", 0.0) or 0.0),
+            float(diagnostics.get("residual", 0.0) or 0.0),
+            products_text,
+        )
 
     def handle_close_signal(
         self,

@@ -42,6 +42,10 @@ Important patterns include:
   `repeatEvidenceMode`, and first repeat rejection reason when available.
 - `[OPS][RESULT]`: final engine status, products, `product_count`, and total
   price.
+- `[OPS][FREEZER-CLOSE-AGGREGATE]`: freezer-only CLOSE aggregate resolver
+  outcome. It records whether aggregate solving was accepted, the eligibility
+  reason, output zone, raw negative total, matched return total, final target,
+  selected weight, residual, and selected product counts.
 - `[OPS][CLOSE]`: close summary across zones.
 - `[OPS][CLOSE_DIAGNOSTIC]`: no-charge skipped-trigger diagnostics by zone,
   such as `diagnostic=loadcell_payload_all_zero`, emitted without adding any
@@ -167,6 +171,15 @@ rotation policy.
   positive segment was masking a larger removal. Use `net_delta`,
   `return_total`, `removal_total`, and `selected_decision_delta` to confirm the
   service judged the removal total while preserving the return hint for CLOSE.
+- In freezer mode, inspect
+  `final_weight_validation.freezerCloseAggregate` and
+  `[OPS][FREEZER-CLOSE-AGGREGATE]` for unstable door sessions. `outputZone`
+  identifies the zone that will receive the whole final basket, `role=rerouted`
+  zones should have `weightDeltaOverride=0.0`, and the output zone should have
+  a negative override matching `finalTargetWeight`. `matchedPositiveHints`
+  means a return hint matched selected products and improved residual;
+  `unmatchedPositiveHints` means the positive movement was treated as
+  pressure/artifact diagnostics and did not reduce the removal target.
 - In freezer mode, a log sequence with `[OPS][CANDIDATES] ... count_hint=1`
   followed by `[OPS][RESULT] ... product_count=2` is expected for accepted
   same-product repeat correction. For the bagel field shape

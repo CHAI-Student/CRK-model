@@ -290,6 +290,20 @@ def unmatched_return_delta_weight(session: object) -> float:
     return total
 
 
+def close_weight_delta_override(session: object) -> Optional[float]:
+    """Return a close-time response weight override when one was recorded."""
+    validation = getattr(session, "final_weight_validation", {}) or {}
+    if not isinstance(validation, dict):
+        return None
+    aggregate = validation.get("freezerCloseAggregate")
+    if not isinstance(aggregate, dict) or "weightDeltaOverride" not in aggregate:
+        return None
+    try:
+        return float(aggregate["weightDeltaOverride"])
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class UnmatchedReturn:
     """

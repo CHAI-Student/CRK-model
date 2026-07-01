@@ -68,7 +68,11 @@ so queue wait is a real latency dimension.
   same-payload return from masking a larger freezer removal, for example
   `+70g` followed by `-150g` becoming `decision_delta=-150g` instead of
   `-80g`. The positive segment is still attached as `return_weight_hints` for
-  CLOSE reconciliation.
+  CLOSE reconciliation. At CLOSE, freezer aggregate solving treats this
+  positive segment as a matched-return hint only if it matches a product inside
+  the selected final basket and improves residual; otherwise it remains
+  unmatched pressure/artifact diagnostics and does not reduce the removal
+  target.
 - Stable-tail diagnostics include `stable_delta_source`,
   `baseline_stable_avg`, `final_stable_avg`,
   `trailing_unstable_sample_count`, `raw_simple_delta`, and
@@ -184,6 +188,13 @@ queued work can be skipped if a later return balances it before video starts.
   trigger like `+216.7g` then `-16.5g` is judged as the `-16.5g` removal, while
   the hidden return is attached to the internal DoorSession `TriggerResult` as
   `return_weight_hints` for CLOSE deferred reconciliation and delta accounting.
+- For freezer sessions, trigger-time `return_weight_hints` do not by
+  themselves make a final basket. If the door-open session has mixed-sign hints
+  or multiple meaningful freezer negative triggers, chargeable output can be
+  re-solved at CLOSE by the freezer aggregate resolver and assigned to the
+  latest participating freezer trigger zone. This keeps the trigger schema
+  unchanged while avoiding shared dual-top camera overlap from locking in a
+  per-zone basket too early.
 - Freezer CLOSE final-weight validation can now repair a no-product or
   final-weight-mismatch partial result by borrowing a later unused candidate
   snapshot from the same global door session. The repair is single-removal
