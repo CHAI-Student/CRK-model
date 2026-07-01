@@ -54,9 +54,10 @@ vision-supported product identity.
   pass the freezer motion floor, and pass freezer vote thresholds. Threshold
   rescue and ROI rescue are disabled so weak/static evidence does not enter
   freezer candidates.
-- Regular top/side confidence thresholds are now `0.25`, matching the Jetson
-  live preview baseline used to verify Pepsi detection with
-  `models/0204_morning.engine`.
+- Current freezer product confidence thresholds are `0.70` for both Top and
+  Side, matching the smaller freezer product-set deployment. Hand tracking uses
+  a separate `0.40` floor for class `0`, so weaker hand detections can still
+  support interaction evidence without lowering product vote confidence.
 - Motion filtering defaults to a 10px bbox-center movement floor and no longer
   fails open when all regular candidates are static; low-confidence moving
   evidence is still available through threshold rescue.
@@ -155,6 +156,10 @@ vision-supported product identity.
 - Segment-first matching ranks weak stage traces as unsupported evidence. This
   prevents low-confidence small-product repeats from beating active large-bottle
   explanations or being reported as `COMPLETE`.
+- In freezer mode, product stage/diagnostic/rescue evidence below the `0.70`
+  product floor is also unsupported for identity creation. Trace/debug records
+  can still show the rejected observation, but it cannot become a final
+  product fallback.
 - Stage-count evidence that passed the weight gate can be promoted to a
   synthetic `stage_weight_gate` candidate when active stock/weight are valid,
   votes meet the detected-single minimum, and confidence is at least `0.08`.

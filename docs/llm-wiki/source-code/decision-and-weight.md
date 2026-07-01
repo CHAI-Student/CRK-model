@@ -122,6 +122,10 @@ Important inputs:
   freezer weight-gate fit, ambiguous dual-camera stage-only evidence is
   demoted into normal single ranking instead of taking the special priority
   tier.
+- Freezer product identity creation also respects the freezer product
+  confidence floor. Stage-count, diagnostic, threshold-rescue, ROI-rescue, and
+  weight-gated rescue evidence below the current `0.70` product threshold can
+  remain visible in diagnostics, but it cannot create a final product fallback.
 - Multi-kind freezer results require segment/compound or combined-candidate
   weight support inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS`.
   Strong dual-camera exit-path evidence alone no longer selects multiple
@@ -200,20 +204,21 @@ Important inputs:
   be `regular_single_candidate_priority`,
   `stage_weight_gate_candidate_priority`, or `ranked_single_candidate_priority`
   for ranked rescue/stage-aware single-item ordering.
-- Before strict and segment matching, stage-count detections can be promoted to
-  synthetic `source=stage_weight_gate` candidates when they passed the weight
-  gate, have an in-stock positive-weight active product, meet
+- Before strict and segment matching, non-freezer/legacy stage-count detections
+  can be promoted to synthetic `source=stage_weight_gate` candidates when they
+  passed the weight gate, have an in-stock positive-weight active product, meet
   `MODEL__WEIGHT__DETECTED_SINGLE_FALLBACK_MIN_VOTES`, and reach confidence
-  `>=0.08`. This keeps high-vote Pepsi-style evidence that sits just below the
-  regular `0.25` vision threshold in the same candidate-priority path as final
-  candidates. If the same class already exists in `vision_candidates` as a
-  non-regular rescue/stage candidate, weight-gated stage evidence can upgrade
-  that entry to `source=stage_weight_gate`; regular `source=vision` final
-  candidates are never overwritten by stage evidence. Diagnostics are recorded in
-  `weight_diagnostics.stage_weight_gate_candidates`. Stage evidence is a
-  recovery path when final candidates cannot explain the strict single match;
-  it does not let a lower-rank stage-weight candidate override a higher-rank
-  final/rescue candidate that is already inside strict tolerance.
+  `>=0.08`. In current freezer mode, this same recovery path is additionally
+  gated by the product confidence floor, so sub-`0.70` stage evidence cannot
+  create freezer product identity. If the same class already exists in
+  `vision_candidates` as a non-regular rescue/stage candidate, weight-gated
+  stage evidence can upgrade that entry to `source=stage_weight_gate`; regular
+  `source=vision` final candidates are never overwritten by stage evidence.
+  Diagnostics are recorded in `weight_diagnostics.stage_weight_gate_candidates`.
+  Stage evidence is a recovery path when final candidates cannot explain the
+  strict single match; it does not let a lower-rank stage-weight candidate
+  override a higher-rank final/rescue candidate that is already inside strict
+  tolerance.
 - Before aggregate strict matching, the engine checks
   `loadcell.removal_segment_targets`. When two or more unpaired removal
   segments exist, each segment is matched independently against all in-stock

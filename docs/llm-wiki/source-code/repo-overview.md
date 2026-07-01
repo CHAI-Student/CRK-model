@@ -57,8 +57,9 @@ credentials as placeholders. Important groups:
 Important groups:
 
 - API: `MODEL__API__HOST`, `MODEL__API__PORT`, `MODEL__API__LOG_LEVEL`.
-- Vision: model path, Top/Side thresholds, crop policies, motion thresholds,
-  rescue settings, voting weights.
+- Vision: model path, freezer product Top/Side confidence floors, separate
+  hand confidence floor, crop policies, motion thresholds, rescue settings,
+  voting weights.
 - Catalog: node-first product snapshots, engine-backed class-name matching
   with official `product_eng_name` plus migration-compatible `name` and legacy
   `product_name`, and optional legacy static validation.

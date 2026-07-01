@@ -2,6 +2,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -59,6 +60,7 @@ def _process_side_detections(
     *,
     class_id: int = 42,
     confidence: float = 0.75,
+    side_confidence_threshold: float | None = None,
 ):
     import model_service.video.video_processor as video_processor_module
     from model_service.video import VideoProcessor
@@ -101,6 +103,7 @@ def _process_side_detections(
         motion_filter_enabled=False,
         hand_path_filter_enabled=False,
         min_vote_count=1,
+        side_confidence_threshold=side_confidence_threshold,
     )
 
     return processor.process_videos(
@@ -131,6 +134,126 @@ def test_video_processor_shared_threshold_remains_backward_compatible():
     assert processor._threshold_for_camera("top") == 0.4
     assert processor._threshold_for_camera("side") == 0.4
     assert processor.confidence_threshold == 0.4
+
+
+def test_video_processor_default_product_floor_blocks_below_point_seven(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    result = _process_side_detections(
+        monkeypatch,
+        [250.0],
+        class_id=42,
+        confidence=0.69,
+    )
+
+    assert result.vote_results == []
+    assert result.threshold_rescue_candidates == []
+    assert result.roi_rescue_candidates == []
+
+
+def test_video_processor_default_product_floor_allows_point_seven_vote(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    result = _process_side_detections(
+        monkeypatch,
+        [250.0],
+        class_id=42,
+        confidence=0.70,
+    )
+
+    assert [candidate.class_id for candidate in result.vote_results] == [42]
+
+
+def test_video_processor_filters_hands_below_hand_confidence_floor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from model_service.core.config import config
+    from model_service.video.video_processor import VideoProcessor
+
+    monkeypatch.setattr(config.vision, "hand_class_id", 0, raising=False)
+    monkeypatch.setattr(config.vision, "hand_confidence_threshold", 0.40, raising=False)
+
+    detections = [
+        YOLODetection(
+            xyxy=(0.0, 0.0, 20.0, 20.0),
+            cls=0,
+            conf=0.39,
+            name="hand",
+        ),
+        YOLODetection(
+            xyxy=(30.0, 30.0, 50.0, 50.0),
+            cls=42,
+            conf=0.99,
+            name="PRODUCT",
+        ),
+    ]
+
+    filtered = VideoProcessor._filter_hand_detections_by_confidence(detections)
+
+    assert [detection.cls for detection in filtered] == [42]
+
+
+def test_video_processor_keeps_hands_at_hand_confidence_floor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from model_service.core.config import config
+    from model_service.video.video_processor import VideoProcessor
+
+    monkeypatch.setattr(config.vision, "hand_class_id", 0, raising=False)
+    monkeypatch.setattr(config.vision, "hand_confidence_threshold", 0.40, raising=False)
+
+    detections = [
+        YOLODetection(
+            xyxy=(0.0, 0.0, 20.0, 20.0),
+            cls=0,
+            conf=0.40,
+            name="hand",
+        )
+    ]
+
+    filtered = VideoProcessor._filter_hand_detections_by_confidence(detections)
+
+    assert [detection.cls for detection in filtered] == [0]
+
+
+def test_weight_gated_rescue_rejects_product_below_confidence_floor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from model_service.core.config import config
+    from model_service.video.video_processor import ThresholdRescueCandidate, VideoProcessor
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer", raising=False)
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy", raising=False)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70, raising=False)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70, raising=False)
+
+    candidate = ThresholdRescueCandidate(
+        class_id=42,
+        class_name="LOW_CONF_PRODUCT",
+        vote_count=10,
+        max_confidence=0.69,
+        avg_confidence=0.69,
+        side_detected=True,
+        side_vote_count=10,
+        side_max_confidence=0.69,
+        side_motion_passed=True,
+    )
+    active_product = SimpleNamespace(
+        yolo_class_id=42,
+        product_weight=100.0,
+        stock_qty=1,
+    )
+    diagnostics = {}
+
+    rescue_votes = VideoProcessor.build_weight_gated_rescue_votes(
+        [candidate],
+        [active_product],
+        delta_weight=-100.0,
+        diagnostics=diagnostics,
+    )
+
+    assert rescue_votes == []
+    assert diagnostics["rejections"]["confidence_below_product_floor"] == 1
 
 
 def test_video_processor_operational_roi_defaults_are_480_left_crop_aligned():
@@ -167,6 +290,7 @@ def test_video_processor_soft_side_roi_promotes_pepsi_boundary_trace_shape(monke
         [402.1, 403.8, 404.0],
         class_id=75,
         confidence=0.646,
+        side_confidence_threshold=0.25,
     )
 
     assert [candidate.class_id for candidate in result.vote_results] == [75]
@@ -220,6 +344,7 @@ def test_video_processor_side_threshold_promotes_letsbe_trace_confidence(monkeyp
         [220.0, 225.0],
         class_id=12,
         confidence=0.2926,
+        side_confidence_threshold=0.25,
     )
 
     assert [candidate.class_id for candidate in result.vote_results] == [12]

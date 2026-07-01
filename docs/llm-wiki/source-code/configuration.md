@@ -37,6 +37,10 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__VISION__YOLO_INTERNAL_CONF_THRESHOLD=0.01` keeps raw YOLO
   collection broad; service-side regular candidate thresholds do the main
   filtering.
+- `MODEL__VISION__HAND_CLASS_ID=0` identifies hand detections, and
+  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` is the separate hand-tracking
+  confidence floor. This is intentionally lower than the current freezer
+  product vote floor because hand recall is weaker.
 - `MODEL__VISION__LOG_ENGINE_CLASSES=off` by default. Set it to `on`/`true`/`1`
   to print every loaded YOLO engine class id/name at startup for field
   debugging.
@@ -157,9 +161,11 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both
   keep the lower region.
-- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.25` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.25` align service regular
-  candidates with the Jetson live preview command used for Pepsi/Trevi checks.
+- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70` are the current freezer field
+  product vote floors. In freezer mode, product detections below the relevant
+  camera floor cannot become regular votes, threshold/ROI rescue, weight-gated
+  rescue, stage-count fallback, or diagnostic fallback identity evidence.
 - `MODEL__VISION__TOP_WEIGHT=0.60`,
   `MODEL__VISION__SIDE_WEIGHT=0.65`,
   `MODEL__VISION__TOP_ONLY_WEIGHT=0.55`, and

@@ -3810,10 +3810,13 @@ class ProductDecisionEngine:
             )
         )
 
+        product_confidence_floor = self._product_identity_confidence_floor()
         stage_added: list[dict[str, Any]] = []
         for summary, entry in stage_entries:
             if len(merged) >= limit:
                 break
+            if summary.confidence < product_confidence_floor:
+                continue
             class_id = int(entry.get("class_id"))
             candidate = EnsembleResult(
                 class_id=class_id,
@@ -3875,6 +3878,8 @@ class ProductDecisionEngine:
                 )
                 if votes <= 0 and confidence <= 0:
                     continue
+                if confidence < product_confidence_floor:
+                    continue
                 candidate = EnsembleResult(
                     class_id=class_id,
                     class_name=str(raw_candidate.get("name") or ""),
@@ -3920,6 +3925,8 @@ class ProductDecisionEngine:
             if len(merged) >= limit:
                 break
             if evidence.class_id in seen_class_ids:
+                continue
+            if evidence.confidence < product_confidence_floor:
                 continue
             if not evidence.strong and evidence.votes < min_votes:
                 continue
@@ -6753,6 +6760,7 @@ class ProductDecisionEngine:
         trace_context: Optional[object],
     ) -> dict[int, _DetectedSingleEvidence]:
         evidence_by_class: dict[int, _DetectedSingleEvidence] = {}
+        product_confidence_floor = self._product_identity_confidence_floor()
 
         def add_evidence(evidence: _DetectedSingleEvidence) -> None:
             existing = evidence_by_class.get(evidence.class_id)
@@ -6814,6 +6822,10 @@ class ProductDecisionEngine:
         for rank, candidate in enumerate(vision_candidates, start=1):
             raw_votes = int(candidate.raw_vote_count or 0)
             votes = max(raw_votes, int(candidate.vote_count or 0))
+            candidate_source = str(getattr(candidate, "source", "vision") or "vision")
+            candidate_confidence = float(candidate.combined_confidence)
+            if candidate_source != "vision" and candidate_confidence < product_confidence_floor:
+                continue
             motion_gate_passed = bool(
                 candidate.motion_gate_passed
                 or candidate.top_motion_passed
@@ -6824,8 +6836,8 @@ class ProductDecisionEngine:
                     class_id=int(candidate.class_id),
                     name=candidate.class_name,
                     votes=votes,
-                    confidence=float(candidate.combined_confidence),
-                    source=getattr(candidate, "source", "vision"),
+                    confidence=candidate_confidence,
+                    source=candidate_source,
                     trusted=True,
                     motion_gate_passed=motion_gate_passed,
                     weight_gate_passed=candidate.weight_gate_passed,
@@ -6849,6 +6861,8 @@ class ProductDecisionEngine:
             summary = self._stage_evidence_summary(entry)
             votes = summary.votes
             confidence = summary.confidence
+            if confidence < product_confidence_floor:
+                continue
             motion_gate_passed = bool(
                 summary.motion_gate_passed
                 or entry.get("motion_gate_passed", True)
@@ -6917,6 +6931,8 @@ class ProductDecisionEngine:
         for rank, (class_id_int, entry) in enumerate(diagnostic_entries, start=1):
             votes = int(entry["votes"])
             confidence = float(entry["confidence"])
+            if confidence < product_confidence_floor:
+                continue
             add_evidence(
                 _DetectedSingleEvidence(
                     class_id=class_id_int,
@@ -8195,6 +8211,15 @@ class ProductDecisionEngine:
                 continue
         return active_map
 
+    @staticmethod
+    def _product_identity_confidence_floor() -> float:
+        if (
+            str(config.machine.cabinet_type).lower() == "freezer"
+            and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+        ):
+            return max(0.0, float(config.vision.top_confidence_threshold))
+        return 0.0
+
     def _candidate_has_vision_identity_evidence(
         self,
         candidate: EnsembleResult,
@@ -8204,16 +8229,25 @@ class ProductDecisionEngine:
         if source == "vision":
             return confidence >= max(0.0, float(self.confidence_threshold))
         if source in {"threshold_rescue", "roi_rescue"}:
-            return bool(getattr(candidate, "weight_gate_passed", False))
+            return bool(getattr(candidate, "weight_gate_passed", False)) and (
+                confidence >= self._product_identity_confidence_floor()
+            )
         if source == "freezer_stage_exit_path":
             return (
                 self._is_freezer_mode()
                 and int(getattr(candidate, "freezer_exit_path_votes", 0) or 0)
                 >= max(0, int(getattr(config.vision, "freezer_min_exit_path_votes", 3)))
-                and confidence >= float(config.weight.multi_kind_min_confidence)
+                and confidence
+                >= max(
+                    float(config.weight.multi_kind_min_confidence),
+                    self._product_identity_confidence_floor(),
+                )
             )
         if source == "stage_weight_gate":
-            return confidence >= float(config.weight.multi_kind_min_confidence)
+            return confidence >= max(
+                float(config.weight.multi_kind_min_confidence),
+                self._product_identity_confidence_floor(),
+            )
         return False
 
     @staticmethod

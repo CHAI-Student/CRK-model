@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 from model_service.core.config import WeightModel, config
@@ -27,6 +28,54 @@ def reset_weight_identity_policy(monkeypatch):
         True,
     )
     monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+
+
+def test_low_confidence_trace_evidence_does_not_create_fallback_identity(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+
+    trace_context = SimpleNamespace(
+        stage_counts_by_class={
+            "42": {
+                "class_id": 42,
+                "name": "LOW_STAGE_PRODUCT",
+                "raw": 25,
+                "raw_max_confidence": 0.69,
+                "motion_gate_passed": True,
+            }
+        },
+        diagnostic_detections=[
+            {
+                "class_id": 43,
+                "name": "LOW_DIAGNOSTIC_PRODUCT",
+                "confidence": 0.69,
+            }
+            for _ in range(6)
+        ],
+    )
+    rescue_candidate = EnsembleResult(
+        class_id=44,
+        class_name="LOW_RESCUE_PRODUCT",
+        top_confidence=0.0,
+        side_confidence=0.69,
+        combined_confidence=0.69,
+        vote_count=10,
+        source="threshold_rescue",
+        raw_vote_count=10,
+        weight_gate_passed=True,
+        side_motion_passed=True,
+    )
+
+    evidence = ProductDecisionEngine(strict_mode=True)._collect_detected_single_evidence(
+        [rescue_candidate],
+        trace_context,
+    )
+
+    assert evidence == {}
 
 
 def use_weight_aware_identity(monkeypatch):

@@ -95,6 +95,10 @@ class VisionModel(BaseModel):
         default=0,
         description="Hand class ID in YOLO model",
     )
+    hand_confidence_threshold: float = Field(
+        default=0.40,
+        description="Minimum confidence for hand detections used by hand tracking",
+    )
     max_distance_px: float = Field(
         default=150.0,
         description="Max distance in pixels for hand-product proximity",
@@ -104,11 +108,11 @@ class VisionModel(BaseModel):
         description="Top-K candidates to extract",
     )
     top_confidence_threshold: float = Field(
-        default=0.25,
+        default=0.70,
         description="Minimum confidence for top camera detections",
     )
     side_confidence_threshold: float = Field(
-        default=0.25,
+        default=0.70,
         description="Minimum confidence for side camera detections",
     )
     camera_layout: str = Field(
@@ -301,6 +305,19 @@ class VisionModel(BaseModel):
         if normalized not in valid:
             raise ValueError(f"Invalid freezer ROI vertical region: {value}")
         return normalized
+
+    @field_validator(
+        "yolo_internal_conf_threshold",
+        "hand_confidence_threshold",
+        "top_confidence_threshold",
+        "side_confidence_threshold",
+        "threshold_rescue_confidence_cap",
+        mode="after",
+    )
+    def validate_confidence_threshold(cls, value: float) -> float:
+        if value < 0.0 or value > 1.0:
+            raise ValueError("Confidence threshold must be between 0.0 and 1.0")
+        return value
 
     @field_validator(
         "crop_width",

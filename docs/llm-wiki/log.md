@@ -1,5 +1,18 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer product and hand confidence floors
+
+- Raised current freezer product vote defaults to `0.70` for Top and Side, and
+  added the separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` hand
+  tracking floor while keeping hand class id `0`.
+- Documented that product inference allowlists expand to include hand class
+  `0` only when active product classes exist. Final product filtering, rescue
+  filtering, and product outputs remain product-only and the empty allowlist
+  path stays fail-closed.
+- Recorded freezer-only identity guards: product evidence below the product
+  confidence floor cannot create regular votes, rescue candidates,
+  stage-count fallback, or diagnostic fallback identity evidence.
+
 ## [2026-06-30] maintenance | freezer stage-only rescue guard
 
 - Documented that freezer stage-only rescue is candidate-miss recovery, not an

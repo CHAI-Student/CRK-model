@@ -686,15 +686,55 @@ class VideoProcessor:
                 f"diagnostic_all_class_trace={config.vision.diagnostic_all_class_trace}"
             )
 
+    @staticmethod
+    def _configured_threshold_for_camera(camera_type: str) -> float:
+        camera = (camera_type or "top").lower()
+        if (
+            str(config.machine.cabinet_type).lower() == "freezer"
+            and str(config.vision.camera_layout).lower() == "dual_top_proxy"
+            and camera in {"top", "side"}
+        ):
+            return float(config.vision.top_confidence_threshold)
+        if camera == "side":
+            return float(config.vision.side_confidence_threshold)
+        return float(config.vision.top_confidence_threshold)
+
     def _threshold_for_camera(self, camera_type: str) -> float:
         if self._uses_freezer_dual_top_profile(camera_type):
-            return self.top_confidence_threshold
+            return float(self.top_confidence_threshold)
         if camera_type == "side":
-            return self.side_confidence_threshold
-        return self.top_confidence_threshold
+            return float(self.side_confidence_threshold)
+        return float(self.top_confidence_threshold)
+
+    @staticmethod
+    def _is_hand_detection(detection: YOLODetection) -> bool:
+        try:
+            class_id = int(getattr(detection, "cls"))
+        except (TypeError, ValueError):
+            return bool(getattr(detection, "is_hand", False))
+        return class_id == int(config.vision.hand_class_id) or bool(
+            getattr(detection, "is_hand", False)
+        )
+
+    @classmethod
+    def _filter_hand_detections_by_confidence(
+        cls,
+        detections: List[YOLODetection],
+    ) -> List[YOLODetection]:
+        floor = max(0.0, float(config.vision.hand_confidence_threshold))
+        return [
+            detection
+            for detection in detections
+            if not cls._is_hand_detection(detection)
+            or float(getattr(detection, "conf", 0.0) or 0.0) >= floor
+        ]
 
     @staticmethod
     def _is_freezer_mode() -> bool:
+        return str(config.machine.cabinet_type).lower() == "freezer"
+
+    @staticmethod
+    def _product_confidence_floor_enabled() -> bool:
         return str(config.machine.cabinet_type).lower() == "freezer"
 
     def _uses_freezer_dual_top_profile(self, camera_type: str) -> bool:
@@ -2040,6 +2080,7 @@ class VideoProcessor:
                 "minHandDistancePx"
             ),
         )
+
         unit_weight = cls._freezer_candidate_unit_weight(selected_vote, product_weights)
         residual = (
             abs(target_weight - (unit_weight * supported_count))
@@ -2315,7 +2356,7 @@ class VideoProcessor:
         camera_type: str,
     ):
         try:
-            return self.yolo.detect(
+            detections = self.yolo.detect(
                 frame,
                 allowed_class_ids=allowed_class_ids,
                 camera_type=camera_type,
@@ -2323,7 +2364,8 @@ class VideoProcessor:
         except TypeError as exc:
             if "camera_type" not in str(exc):
                 raise
-            return self.yolo.detect(frame, allowed_class_ids=allowed_class_ids)
+            detections = self.yolo.detect(frame, allowed_class_ids=allowed_class_ids)
+        return self._filter_hand_detections_by_confidence(detections)
 
     @staticmethod
     def _candidate_source_rank(vote: VoteResult) -> int:
@@ -2393,6 +2435,24 @@ class VideoProcessor:
                 return "roi_rescue_too_far_right"
 
         return None
+
+    @staticmethod
+    def _rescue_candidate_confidence_floor(
+        candidate: ThresholdRescueCandidate,
+    ) -> float:
+        floors: List[float] = []
+        if candidate.top_detected:
+            floors.append(VideoProcessor._configured_threshold_for_camera("top"))
+        if candidate.side_detected:
+            floors.append(VideoProcessor._configured_threshold_for_camera("side"))
+        if not floors:
+            floors.extend(
+                [
+                    float(config.vision.top_confidence_threshold),
+                    float(config.vision.side_confidence_threshold),
+                ]
+            )
+        return min(floors)
 
     @staticmethod
     def _record_stage(
@@ -2507,6 +2567,11 @@ class VideoProcessor:
     ) -> None:
         if not config.vision.threshold_rescue_enabled or not roi_eligible:
             return
+        if (
+            VideoProcessor._product_confidence_floor_enabled()
+            and confidence < VideoProcessor._configured_threshold_for_camera(camera)
+        ):
+            return
         stats = low_confidence_stats.setdefault(
             class_id,
             _LowConfidenceClassStats(class_id=class_id, class_name=class_name),
@@ -2526,6 +2591,11 @@ class VideoProcessor:
         roi_x_limit: float,
     ) -> None:
         if not config.vision.threshold_rescue_enabled:
+            return
+        if (
+            VideoProcessor._product_confidence_floor_enabled()
+            and confidence < VideoProcessor._configured_threshold_for_camera("side")
+        ):
             return
         stats = roi_filtered_stats.setdefault(
             class_id,
@@ -2560,6 +2630,12 @@ class VideoProcessor:
                 no_motion_min_votes=config.vision.weight_rescue_no_motion_min_raw_votes,
             )
             if candidate is not None:
+                if (
+                    self._product_confidence_floor_enabled()
+                    and candidate.max_confidence
+                    < self._rescue_candidate_confidence_floor(candidate)
+                ):
+                    continue
                 self._mark_threshold_rescue_roi_conflict(
                     candidate,
                     roi_filtered_stats.get(class_id),
@@ -2631,6 +2707,12 @@ class VideoProcessor:
                 continue
             candidate = stats.to_rescue_candidate(self.min_motion_displacement)
             if candidate is None:
+                continue
+            if (
+                self._product_confidence_floor_enabled()
+                and candidate.max_confidence
+                < self._rescue_candidate_confidence_floor(candidate)
+            ):
                 continue
             reason = self._roi_rescue_rejection_reason(candidate)
             if reason is not None:
@@ -2707,6 +2789,7 @@ class VideoProcessor:
             "roi_rescue_missing_roi": 0,
             "roi_rescue_too_far_right": 0,
             "threshold_rescue_roi_conflict": 0,
+            "confidence_below_product_floor": 0,
         }
         diagnostic_candidates: List[dict] = []
 
@@ -2725,6 +2808,13 @@ class VideoProcessor:
             product = active_map.get(candidate.class_id)
             if candidate.class_id in existing_class_ids:
                 reason = "duplicate_vision_candidate"
+            if (
+                reason is None
+                and VideoProcessor._product_confidence_floor_enabled()
+                and candidate.max_confidence
+                < VideoProcessor._rescue_candidate_confidence_floor(candidate)
+            ):
+                reason = "confidence_below_product_floor"
             if reason is None and candidate.source == "roi_rescue":
                 reason = VideoProcessor._roi_rescue_rejection_reason(candidate)
             if reason is None and product is None:
@@ -2941,7 +3031,7 @@ class VideoProcessor:
         if frame_index >= max(0, int(config.vision.diagnostic_trace_max_frames)):
             return
         for det in self._detect_frame(frame, None, camera_type):
-            if det.is_hand:
+            if self._is_hand_detection(det):
                 continue
             trace_context.record_diagnostic_detection(
                 camera=camera_type,
@@ -2991,15 +3081,15 @@ class VideoProcessor:
                 f"votes={result.vote_count}"
             )
 
-    def _inference_allowed_class_ids(
+    def _product_allowed_class_ids(
         self,
         allowed_class_ids: Optional[List[int]],
         log_prefix: str,
-    ) -> Optional[List[int]]:
+    ) -> List[int]:
         if allowed_class_ids is None:
             logger.warning(
                 f"[{log_prefix}] active_products snapshot missing; "
-                "inference_classes=none fail_closed=true"
+                "product_classes=none fail_closed=true"
             )
             return []
 
@@ -3007,14 +3097,32 @@ class VideoProcessor:
         if normalized_ids:
             logger.info(
                 f"[{log_prefix}] strict_active_products allowed_classes={len(normalized_ids)} "
-                "inference_classes=allowed"
+                "product_classes=allowed"
             )
         else:
             logger.warning(
                 f"[{log_prefix}] active_products has no stock-positive classes; "
-                "inference_classes=none fail_closed=true"
+                "product_classes=none fail_closed=true"
             )
         return normalized_ids
+
+    def _inference_allowed_class_ids(
+        self,
+        product_allowed_class_ids: List[int],
+        log_prefix: str,
+    ) -> List[int]:
+        if not product_allowed_class_ids:
+            return []
+
+        hand_class_id = int(config.vision.hand_class_id)
+        inference_ids = list(
+            dict.fromkeys([*product_allowed_class_ids, hand_class_id])
+        )
+        logger.info(
+            f"[{log_prefix}] inference_classes=products_plus_hand "
+            f"product_classes={len(product_allowed_class_ids)} hand_class_id={hand_class_id}"
+        )
+        return inference_ids
 
     @staticmethod
     def _filter_results_by_allowed_class_ids(
@@ -3188,8 +3296,12 @@ class VideoProcessor:
             f"[VIDEO] thresholds: top={self.top_confidence_threshold:.2f}, "
             f"side={self.side_confidence_threshold:.2f}"
         )
-        inference_allowed_class_ids = self._inference_allowed_class_ids(
+        product_allowed_class_ids = self._product_allowed_class_ids(
             allowed_class_ids,
+            "VIDEO",
+        )
+        inference_allowed_class_ids = self._inference_allowed_class_ids(
+            product_allowed_class_ids,
             "VIDEO",
         )
 
@@ -3284,7 +3396,7 @@ class VideoProcessor:
         )
         combined_results = self._filter_results_by_allowed_class_ids(
             combined_results,
-            inference_allowed_class_ids,
+            product_allowed_class_ids,
             "VIDEO",
         )
 
@@ -3372,12 +3484,12 @@ class VideoProcessor:
         threshold_rescue_candidates = self._build_threshold_rescue_candidates(
             low_confidence_stats,
             roi_filtered_stats,
-            inference_allowed_class_ids,
+            product_allowed_class_ids,
             "VIDEO",
         )
         roi_rescue_candidates = self._build_roi_rescue_candidates(
             roi_filtered_stats,
-            inference_allowed_class_ids,
+            product_allowed_class_ids,
             "VIDEO",
         )
         if trace_context is not None:
@@ -3466,8 +3578,12 @@ class VideoProcessor:
             f"[VIDEO-ASYNC] thresholds: top={self.top_confidence_threshold:.2f}, "
             f"side={self.side_confidence_threshold:.2f}"
         )
-        inference_allowed_class_ids = self._inference_allowed_class_ids(
+        product_allowed_class_ids = self._product_allowed_class_ids(
             allowed_class_ids,
+            "VIDEO-ASYNC",
+        )
+        inference_allowed_class_ids = self._inference_allowed_class_ids(
+            product_allowed_class_ids,
             "VIDEO-ASYNC",
         )
         frame_stride = 2
@@ -3657,7 +3773,7 @@ class VideoProcessor:
                         top_hand_tracker.update_frame(detections, frame_idx)
 
                     for det in detections:
-                        if det.is_hand:
+                        if self._is_hand_detection(det):
                             continue
                         top_raw_detection_count += 1
                         self._record_stage(
@@ -3774,7 +3890,7 @@ class VideoProcessor:
 
                 else:  # side
                     for det in detections:
-                        if det.is_hand:
+                        if self._is_hand_detection(det):
                             continue
                         side_raw_detection_count += 1
                         self._record_stage(
@@ -4080,7 +4196,7 @@ class VideoProcessor:
         )
         combined_results = self._filter_results_by_allowed_class_ids(
             combined_results,
-            inference_allowed_class_ids,
+            product_allowed_class_ids,
             "VIDEO-ASYNC",
         )
 
@@ -4165,12 +4281,12 @@ class VideoProcessor:
         threshold_rescue_candidates = self._build_threshold_rescue_candidates(
             low_confidence_stats,
             roi_filtered_stats,
-            inference_allowed_class_ids,
+            product_allowed_class_ids,
             "VIDEO-ASYNC",
         )
         roi_rescue_candidates = self._build_roi_rescue_candidates(
             roi_filtered_stats,
-            inference_allowed_class_ids,
+            product_allowed_class_ids,
             "VIDEO-ASYNC",
         )
         if trace_context is not None:
@@ -4428,7 +4544,7 @@ class VideoProcessor:
             # Process detections
             for det in detections:
                 # Filter out hands and low confidence
-                if det.is_hand:
+                if self._is_hand_detection(det):
                     continue
                 raw_detection_count += 1
                 self._record_stage(

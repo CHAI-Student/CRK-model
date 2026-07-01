@@ -1073,6 +1073,8 @@ class TriggerTraceContext:
             ),
             "top_confidence_threshold": config.vision.top_confidence_threshold,
             "side_confidence_threshold": config.vision.side_confidence_threshold,
+            "hand_confidence_threshold": config.vision.hand_confidence_threshold,
+            "hand_class_id": config.vision.hand_class_id,
             "top_k": config.vision.top_k,
             "freezer_min_vote_ratio": config.vision.freezer_min_vote_ratio,
             "freezer_min_vote_count": config.vision.freezer_min_vote_count,

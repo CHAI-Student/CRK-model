@@ -1,6 +1,6 @@
 # CRK-model LLM Wiki
 
-Last updated: 2026-06-30
+Last updated: 2026-07-01
 
 This wiki is the LLM-facing map of the CRK model service. The original
 documents under `docs/` remain the raw sources. Pages here summarize and
@@ -104,10 +104,13 @@ shape without rereading every long historical document.
   `dual_top_proxy`, Camera still sends `videos.top/side`, but `videos.top` is
   recorded as physical `top_middle` and `videos.side` is recorded as
   `top_side` using the logical Top processing profile.
-- Python service inference defaults to `models/0204_morning.engine`, with
-  regular Top/Side candidate thresholds at `0.25` to match the Jetson live
-  preview baseline. The copyable `.env.example` overrides the engine path to
-  the freezer field profile `models/set7_v8best.engine`.
+- Python service code defaults still point at `models/0204_morning.engine`, but
+  the current copyable `.env.example` is freezer-field oriented and overrides
+  the engine path to `models/set7_v8best.engine`. Current freezer product vote
+  floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70`; hand tracking uses the
+  separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` with hand class id
+  `0`.
 - Top-camera ROI now uses the lower region for both removals and returns:
   non-zero deltas keep `center_y >= 240`, while zero or missing delta skips
   the top ROI.
@@ -116,8 +119,10 @@ shape without rereading every long historical document.
   template uses the upper half
   (`MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper`,
   `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT`, default `240`). It applies
-  stronger motion/vote floors and disables threshold/ROI rescue for freezer
-  candidates. `freezer_roi_passed` increments exit-path votes; rejected
+  stronger motion/vote floors and a `0.70` product confidence floor, while
+  hand detections are filtered independently at `0.40`. Threshold/ROI/stage/
+  diagnostic fallback evidence below the product floor cannot create freezer
+  product identity. `freezer_roi_passed` increments exit-path votes; rejected
   `freezer_roi_filtered` evidence remains diagnostic only.
 - Freezer handled candidates are narrower than raw vision top-K. Raw top-K
   candidates stay in trace diagnostics, while OPS candidates, engine input, and

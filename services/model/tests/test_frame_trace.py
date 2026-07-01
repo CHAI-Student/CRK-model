@@ -341,7 +341,7 @@ def test_video_processor_passes_allowed_ids_to_yolo(monkeypatch):
     processor.process_videos(top_path="/tmp/top.avi", allowed_class_ids=[1, 7, 9])
 
     assert fake_yolo.detect.call_count == 1
-    assert fake_yolo.detect.call_args.kwargs["allowed_class_ids"] == [1, 7, 9]
+    assert fake_yolo.detect.call_args.kwargs["allowed_class_ids"] == [1, 7, 9, 0]
 
 
 def test_video_processor_empty_allowed_ids_fail_closed(monkeypatch):
@@ -2286,8 +2286,10 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
         raising=False,
     )
     monkeypatch.setattr(config.vision, "yolo_internal_conf_threshold", 0.01, raising=False)
-    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.25, raising=False)
-    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.25, raising=False)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70, raising=False)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70, raising=False)
+    monkeypatch.setattr(config.vision, "hand_class_id", 0, raising=False)
+    monkeypatch.setattr(config.vision, "hand_confidence_threshold", 0.40, raising=False)
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer", raising=False)
     monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy", raising=False)
     monkeypatch.setattr(config.vision, "top_k", 7, raising=False)
@@ -2350,9 +2352,11 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
     assert vision_config["freezer_confidence_tie_band"] == 0.08
     assert vision_config["freezer_multi_min_confidence"] == 0.45
     assert vision_config["freezer_vision_multi_without_weight_enabled"] is True
-    assert vision_config["top_confidence_threshold"] == 0.25
-    assert vision_config["side_confidence_threshold"] == 0.25
-    assert vision_config["regular_threshold"] == {"top": 0.25, "side": 0.25}
+    assert vision_config["top_confidence_threshold"] == 0.70
+    assert vision_config["side_confidence_threshold"] == 0.70
+    assert vision_config["hand_class_id"] == 0
+    assert vision_config["hand_confidence_threshold"] == 0.40
+    assert vision_config["regular_threshold"] == {"top": 0.70, "side": 0.70}
     assert vision_config["side_roi_x_max"] == 400.0
     assert vision_config["side_roi_soft_margin_px"] == 5.0
     assert vision_config["side_roi_soft_x_max"] == 405.0

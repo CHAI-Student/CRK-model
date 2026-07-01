@@ -36,6 +36,9 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
         "MODEL__MACHINE__CABINET_TYPE",
         "MODEL__VISION__CAMERA_LAYOUT",
         "MODEL__VISION__YOLO_MODEL_PATH",
+        "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD",
+        "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD",
+        "MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD",
         "MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -45,6 +48,10 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.machine.cabinet_type == "freezer"
     assert settings.vision.camera_layout == "dual_top_proxy"
     assert settings.vision.yolo_model_path == "models/set7_v8best.engine"
+    assert settings.vision.hand_class_id == 0
+    assert settings.vision.hand_confidence_threshold == 0.40
+    assert settings.vision.top_confidence_threshold == 0.70
+    assert settings.vision.side_confidence_threshold == 0.70
     assert settings.vision.freezer_min_vote_ratio == 0.08
     assert settings.vision.freezer_min_vote_count == 3
     assert settings.vision.freezer_motion_min_displacement_px == 12.0
@@ -53,6 +60,31 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.weight.freezer_weight_tolerance_grams == 15.0
     assert settings.weight.freezer_vision_multi_without_weight_enabled is False
     assert settings.trace.sample_export_enabled is False
+
+
+def test_vision_confidence_defaults_and_env_overrides(monkeypatch):
+    for key in (
+        "MODEL__VISION__HAND_CONFIDENCE_THRESHOLD",
+        "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD",
+        "MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.vision.hand_confidence_threshold == 0.40
+    assert settings.vision.top_confidence_threshold == 0.70
+    assert settings.vision.side_confidence_threshold == 0.70
+
+    monkeypatch.setenv("MODEL__VISION__HAND_CONFIDENCE_THRESHOLD", "0.45")
+    monkeypatch.setenv("MODEL__VISION__TOP_CONFIDENCE_THRESHOLD", "0.72")
+    monkeypatch.setenv("MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD", "0.73")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.vision.hand_confidence_threshold == 0.45
+    assert settings.vision.top_confidence_threshold == 0.72
+    assert settings.vision.side_confidence_threshold == 0.73
 
 
 def test_setup_shell_scripts_parse_with_bash():

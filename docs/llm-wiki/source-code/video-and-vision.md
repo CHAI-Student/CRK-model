@@ -55,9 +55,13 @@ selected frames, accumulates per-camera evidence, and returns ranked
   weight-gated matching.
 - Diagnostic all-class trace can collect limited evidence outside normal
   active-class filtering.
-- YOLO inference normally receives `allowed_class_ids` from the active product
-  snapshot. Under the default Node-first catalog policy, those ids come only
-  from Edge class-name keys matched against the current YOLO engine class
+- YOLO inference receives product class ids from the active product snapshot
+  plus the configured hand class id `0` when products exist. Final result
+  filtering, rescue filtering, and product outputs still use product ids only,
+  so the hand class never becomes product identity evidence. If the active
+  product allowlist is missing or empty, inference receives `[]` and remains
+  fail-closed. Under the default Node-first catalog policy, product ids come
+  only from Edge class-name keys matched against the current YOLO engine class
   names. Official input is `product_eng_name` and successful matches are
   tagged as `product_eng_name_engine`; during Edge migration,
   engine-matching `name` is tagged `name_engine_compat` and legacy
@@ -97,6 +101,16 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` is only a deprecated split
   fallback. Threshold rescue and ROI rescue are disabled for freezer
   candidates so only strong in-ROI evidence reaches the decision engine.
+- Current freezer product vote floors are `0.70` for both Top and Side through
+  `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD`. Product detections below that
+  floor may still appear in traces as rejected observations, but they cannot
+  create regular votes, rescue candidates, stage-count fallback, or diagnostic
+  fallback identity evidence in freezer mode.
+- Hand tracking has a separate floor:
+  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40`. Hand detections below this
+  value are removed before `HandPathTracker` sees them; hand class id remains
+  `MODEL__VISION__HAND_CLASS_ID=0`.
 - `MODEL__MACHINE__CABINET_TYPE=freezer` alone is not enough to enable freezer
   strict candidate narrowing. Dual-top freezer deployments must also set
   `MODEL__VISION__CAMERA_LAYOUT=dual_top_proxy`; otherwise the freezer handled
@@ -179,6 +193,9 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - Geometry handling defaults to left 480 crop and still supports explicit
   policies including `letterbox`.
 - Class `0` is hand; product classes are positive ids.
+- Product inference allowlists are expanded to include hand class `0` only
+  when at least one active product class exists. Product result allowlists stay
+  product-only.
 - If `allowed_class_ids` is an empty list, detection is skipped fail-closed.
   That now indicates missing/invalid active class ids, not merely zero product
   weight.
