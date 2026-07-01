@@ -1351,6 +1351,14 @@ def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
                 "raw_candidate_count": 4,
                 "handled_candidate_count": 1,
                 "reason": "single_removal_weight_tiebreak",
+                "selected": {
+                    "count": 2,
+                    "expectedWeight": 312.0,
+                    "countWeightResidual": 2.5,
+                },
+                "rejectedSameProductRepeatCandidates": [
+                    {"sameProductRepeatRejectedReason": "insufficient_exit_path_votes"}
+                ],
             }
         }
     )
@@ -1367,6 +1375,8 @@ def test_freezer_candidate_filter_ops_logs_layout_counts_and_reason(
     assert "camera_layout=dual_top_proxy" in caplog.text
     assert "raw=4 handled=1" in caplog.text
     assert "reason=single_removal_weight_tiebreak" in caplog.text
+    assert "selected_count=2 expected_weight=312.0 count_residual=2.5" in caplog.text
+    assert "repeat_reject=insufficient_exit_path_votes" in caplog.text
 
 
 def test_video_processor_freezer_handled_filter_preserves_weight_fit_multi_vision(
@@ -2044,6 +2054,73 @@ def test_video_processor_freezer_single_bagel_candidate_counts_repeat(
         expected_residual
     )
     assert diagnostics["sameProductRepeatCandidates"][0]["class_id"] == 27
+
+
+def test_video_processor_freezer_single_side_bagel_counts_repeat_from_weight(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-bagel-side-only-repeat",
+        zone=1,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "27": {
+            "class_id": 27,
+            "name": "BAG_NULLDAM_BAGEL_140G",
+            "freezerExitPathVotes": 0,
+            "freezer_roi_filtered": 0,
+            "cameras": {"side": {"freezerExitPathVotes": 0}},
+        }
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                class_id=27,
+                class_name="BAG_NULLDAM_BAGEL_140G",
+                vote_count=1,
+                raw_vote_count=1,
+                max_confidence=0.528,
+                avg_confidence=0.528,
+                weighted_confidence=0.528,
+                top_detected=False,
+                side_detected=True,
+                side_vote_count=1,
+                side_max_confidence=0.528,
+                instance_count_hint=1,
+            )
+        ],
+        delta_weight=-309.5,
+        product_weights={27: 156.0},
+        product_stocks={27: 10},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [27]
+    assert handled[0].instance_count_hint == 2
+    assert diagnostics["reason"] == "same_product_repeat_weight_gate"
+    assert diagnostics["selected"]["count"] == 2
+    assert diagnostics["selected"]["expectedWeight"] == 312.0
+    assert diagnostics["selected"]["countWeightResidual"] == pytest.approx(2.5)
+    assert diagnostics["selected"]["singleRegularVisionIdentity"] is True
+    assert diagnostics["selected"]["repeatEvidenceMode"] == (
+        "single_regular_vision_identity"
+    )
 
 
 def test_video_processor_freezer_repeat_requires_exit_path_votes(

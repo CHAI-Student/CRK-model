@@ -1,5 +1,19 @@
 # LLM Wiki Log
 
+## [2026-07-01] maintenance | freezer single-candidate bagel repeat gate
+
+- Fixed the remaining bagel `x2` field miss where `BAG_NULLDAM_BAGEL_140G`
+  appeared as the only regular vision candidate at `-309.5g`, but stayed `x1`
+  because repeat inference required freezer exit-path and frame-vote gates
+  before checking the tight `156g x2 = 312g` fit.
+- Added a freezer-only `single_regular_vision_identity` repeat path: when the
+  only candidate identity is a regular vision product, confidence is above the
+  freezer floor, stock/count caps allow it, and the repeated count is within
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS` while closer than `x1`, the
+  count can promote to `x2+` even with weak exit-path evidence.
+- Extended freezer candidate-filter OPS diagnostics with selected count,
+  expected weight, count residual, and first repeat rejection reason.
+
 ## [2026-07-01] maintenance | freezer bagel repeat count fix
 
 - Fixed freezer same-product repeat counting for cases such as

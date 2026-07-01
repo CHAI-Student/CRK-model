@@ -109,12 +109,15 @@ vision-supported product identity.
   back to one handled freezer product.
 - Freezer same-product repeats are allowed as a conservative candidate-filter
   and vision-first engine override. The repeat count is inferred from
-  `target_weight / unit_weight`, then checked against freezer exit-path votes,
-  vote count, confidence, stock/count caps, and both freezer and count-scaled
-  residual tolerances. A top-only repeat can beat a top-only single only within
-  the configured repeat residual gap; a dual-camera exit-path single remains
-  preferred. Frame-level vote evidence is carried into the engine through
-  `raw_vote_count`, while `vote_count` keeps its consensus meaning.
+  `target_weight / unit_weight`, then checked against confidence,
+  stock/count caps, and freezer residual tolerance. Multi-candidate repeats
+  still need freezer exit-path votes and vote count, but a single regular
+  `vision` identity can use the tighter weight fit directly when `x2+` is
+  inside tolerance and closer than `x1`. A top-only repeat can beat a top-only
+  single only within the configured repeat residual gap; a dual-camera
+  exit-path single remains preferred. Frame-level vote evidence is carried into
+  the engine through `raw_vote_count`, while `vote_count` keeps its consensus
+  meaning.
 - Freezer interaction evidence now sits between raw vision and weight
   selection. The trace records actual path displacement, max movement, center
   span, trajectory support, static-shelf likelihood, upper-ROI hand validity,

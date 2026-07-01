@@ -134,18 +134,21 @@ Important inputs:
   freezer selection path.
 - Same-product freezer repeats can be inferred from weight even when
   `instance_count_hint=1`. The candidate must still be a final vision
-  candidate with freezer exit-path votes, enough vote evidence, confidence
-  above the freezer multi floor, positive stock, and a count bounded by stock,
-  `max_items_per_segment`, `same_product_max_count`, and
-  `max_count_per_item`. The repeat residual must fit both
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS` and the normal
-  `tolerance_grams + count * same_product_count_tolerance_grams` window. Trace
-  diagnostics expose `sameProductRepeatCandidates`,
-  `rejectedSameProductRepeatCandidates`, `count`, `expectedWeight`, and
+  candidate with confidence above the freezer multi floor, positive stock, and
+  a count bounded by stock, `max_items_per_segment`,
+  `same_product_max_count`, and `max_count_per_item`. Multi-candidate repeat
+  competition still requires freezer exit-path votes and enough vote evidence.
+  If the only candidate identity is a regular `vision` product, the count may
+  instead promote from weight alone when the repeated residual is inside
+  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS` and is closer than `x1`;
+  this covers side-only bagel cases such as `156g x2` against a `309.5g`
+  removal. Trace diagnostics expose `sameProductRepeatCandidates`,
+  `rejectedSameProductRepeatCandidates`, `singleRegularVisionIdentity`,
+  `repeatEvidenceMode`, `count`, `expectedWeight`, and
   `countWeightResidual`. The trigger conversion layer preserves frame-level
   votes as `EnsembleResult.raw_vote_count`; `EnsembleResult.vote_count` remains
   the Top/Side consensus scale, so repeat gates must read raw frame evidence
-  from `raw_vote_count`.
+  from `raw_vote_count` whenever they use the multi-candidate evidence path.
 - Direct `freezer_vision_first` selection reads the same interaction evidence
   as the video handled-filter path. `staticShelfLikely` top-only candidates are
   softly demoted unless trajectory or hand-path support exists. The hand

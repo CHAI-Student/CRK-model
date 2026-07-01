@@ -80,7 +80,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   rescue suppression, same-frame multi-bbox `instance_count_hint`,
   disabled-layout warnings, `15g` weight-fit multi selection, top-three
   mismatch narrowing, same-product repeat recovery for the zone5 bagel `x2`
-  collision, repeat rejection when freezer exit-path evidence is too weak,
+  collision, side-only single-candidate bagel repeat recovery at `309.5g`,
+  repeat rejection when freezer exit-path evidence is too weak,
   compound-trace Melona/Yomamte same-tier residual ordering, unresolved
   multi-segment fail-open passthrough,
   dual-camera single preference over top-only repeats, static top-only ranking

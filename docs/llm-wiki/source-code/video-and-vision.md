@@ -132,12 +132,15 @@ selected frames, accumulates per-camera evidence, and returns ranked
   beating a tighter supported single.
 - The freezer handled filter is count-aware for same-product repeats. A final
   vision candidate can become a `same_product_repeat_weight_gate` selection
-  when `target_weight / unit_weight` supports `x2+`, freezer exit-path votes,
-  vote count, confidence, stock, `max_items_per_segment`,
-  `same_product_max_count`, and `max_count_per_item` all allow it. This can
-  override a tighter top-only single candidate only inside the
-  `same_product_count_tolerance` residual gap; dual-camera exit-path singles
-  remain preferred.
+  when `target_weight / unit_weight` supports `x2+`, confidence, stock,
+  `max_items_per_segment`, `same_product_max_count`, and
+  `max_count_per_item` all allow it. Multi-candidate repeats still require
+  freezer exit-path votes and vote count. A single regular `vision` identity
+  can use `single_regular_vision_identity` evidence instead, so a side-only
+  bagel candidate at `309.5g` can become `156g x2` when the repeat residual is
+  inside freezer tolerance and closer than `x1`. This can override a tighter
+  top-only single candidate only inside the `same_product_count_tolerance`
+  residual gap; dual-camera exit-path singles remain preferred.
 - Freezer ROI stage names are split by meaning: `freezer_roi_passed` is the
   only stage that increments `freezerExitPathVotes`; `freezer_roi_filtered`
   records rejected ROI evidence and `freezerRoiFilteredVotes` only.
@@ -160,6 +163,8 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `multi_item_trace_single_narrowed`,
   `multi_item_trace_multi_weight_fit`,
   `multi_item_trace_evidence_passthrough_unresolved`, or true handled output.
+  The OPS line also includes selected count, expected weight, count residual,
+  and the first same-product repeat rejection reason when available.
 - Side ROI filtering protects against side-camera noise outside the useful
   left-side region with hard `center_x <= side_roi_x_max`.
 - The side ROI default is hard `center_x <= 400` plus a conditional

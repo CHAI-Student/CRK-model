@@ -927,6 +927,7 @@ class VideoProcessor:
         exit_path_votes: int,
         source: str,
         product_stocks: Optional[Dict[int, int]],
+        single_regular_vision_identity: bool = False,
     ) -> Optional[dict[str, Any]]:
         if unit_weight is None or unit_weight <= 0.0:
             return None
@@ -982,23 +983,30 @@ class VideoProcessor:
             "confidence": round(float(confidence), 4),
             "freezerExitPathVotes": int(exit_path_votes),
             "voteCount": int(vote_count),
+            "minRepeatVotes": int(min_votes),
+            "singleRegularVisionIdentity": bool(single_regular_vision_identity),
             "accepted": False,
         }
         if str(source) != "vision":
             diagnostic["reason"] = "not_regular_vision_candidate"
         elif confidence < float(config.weight.freezer_multi_min_confidence):
             diagnostic["reason"] = "confidence_below_repeat_floor"
-        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
-            diagnostic["reason"] = "insufficient_exit_path_votes"
-        elif vote_count < min_votes:
-            diagnostic["reason"] = "insufficient_repeat_votes"
         elif repeat_residual > allowed_residual:
             diagnostic["reason"] = "repeat_residual_exceeds_tolerance"
         elif repeat_residual >= float(single_residual):
             diagnostic["reason"] = "single_residual_not_worse"
+        elif bool(single_regular_vision_identity) and vote_count > 0:
+            diagnostic["accepted"] = True
+            diagnostic["reason"] = "same_product_repeat_weight_gate"
+            diagnostic["repeatEvidenceMode"] = "single_regular_vision_identity"
+        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
+            diagnostic["reason"] = "insufficient_exit_path_votes"
+        elif vote_count < min_votes:
+            diagnostic["reason"] = "insufficient_repeat_votes"
         else:
             diagnostic["accepted"] = True
             diagnostic["reason"] = "same_product_repeat_weight_gate"
+            diagnostic["repeatEvidenceMode"] = "exit_path_votes"
         return diagnostic
 
     @staticmethod
@@ -1532,9 +1540,19 @@ class VideoProcessor:
             product_weights=product_weights,
             trace_context=trace_context,
         )
+        candidate_pool = [*ranked_votes, *stage_only_votes]
+        candidate_class_ids = {int(vote.class_id) for vote in candidate_pool}
+        regular_vision_class_ids = {
+            int(vote.class_id)
+            for vote in candidate_pool
+            if str(getattr(vote, "source", "vision") or "vision") == "vision"
+        }
+        single_regular_vision_identity = (
+            len(candidate_class_ids) == 1 and len(regular_vision_class_ids) == 1
+        )
 
         scored: list[dict[str, Any]] = []
-        for index, vote in enumerate([*ranked_votes, *stage_only_votes]):
+        for index, vote in enumerate(candidate_pool):
             unit_weight = cls._freezer_candidate_unit_weight(vote, product_weights)
             residual = (
                 abs(target_weight - unit_weight)
@@ -1564,6 +1582,9 @@ class VideoProcessor:
                 exit_path_votes=exit_path_votes,
                 source=source,
                 product_stocks=product_stocks,
+                single_regular_vision_identity=(
+                    single_regular_vision_identity and source == "vision"
+                ),
             )
             if (
                 stage_only
@@ -1701,6 +1722,10 @@ class VideoProcessor:
                         "countAllowedResidual": round(
                             float(repeat["countAllowedResidual"]), 1
                         ),
+                        "singleRegularVisionIdentity": bool(
+                            repeat.get("singleRegularVisionIdentity")
+                        ),
+                        "repeatEvidenceMode": repeat.get("repeatEvidenceMode"),
                     }
                 )
             rejection = item.get("same_product_repeat_rejection")
@@ -1709,6 +1734,11 @@ class VideoProcessor:
                     rejection.get("reason", "rejected")
                 )
                 entry["nearestRepeatCount"] = int(rejection.get("count", 0) or 0)
+                entry["singleRegularVisionIdentity"] = bool(
+                    rejection.get("singleRegularVisionIdentity")
+                )
+                if rejection.get("repeatEvidenceMode"):
+                    entry["repeatEvidenceMode"] = rejection.get("repeatEvidenceMode")
             return entry
 
         selectable_scored = list(scored)
@@ -2187,6 +2217,13 @@ class VideoProcessor:
                 ).get("minHandDistancePx"),
                 "interactionPenalty": bool(selected_item.get("interaction_penalty")),
                 "selectionTier": reason,
+                "sameProductRepeatCandidate": bool(selected_repeat),
+                "singleRegularVisionIdentity": bool(
+                    (selected_repeat or {}).get("singleRegularVisionIdentity")
+                ),
+                "repeatEvidenceMode": (selected_repeat or {}).get(
+                    "repeatEvidenceMode"
+                ),
             },
             "considered": [considered_entry(item) for item in scored],
             "rejectedInteractionCandidates": [

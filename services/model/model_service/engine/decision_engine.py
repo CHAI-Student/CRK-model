@@ -598,6 +598,15 @@ class ProductDecisionEngine:
                 == "freezer_stage_exit_path"
             ],
         ]
+        candidate_class_ids = {int(candidate.class_id) for candidate in candidate_pool}
+        regular_vision_class_ids = {
+            int(candidate.class_id)
+            for candidate in candidate_pool
+            if str(getattr(candidate, "source", "vision") or "vision") == "vision"
+        }
+        single_regular_vision_identity = (
+            len(candidate_class_ids) == 1 and len(regular_vision_class_ids) == 1
+        )
 
         for rank, candidate in enumerate(candidate_pool, start=1):
             class_id = int(candidate.class_id)
@@ -718,6 +727,9 @@ class ProductDecisionEngine:
                 confidence=confidence,
                 exit_path_votes=int(diag["freezerExitPathVotes"]),
                 source=source,
+                single_regular_vision_identity=(
+                    single_regular_vision_identity and source == "vision"
+                ),
             )
             diag.update(
                 {
@@ -750,6 +762,12 @@ class ProductDecisionEngine:
                             "repeatAllowedResidual": round(
                                 float(repeat_diagnostic["countAllowedResidual"]), 1
                             ),
+                            "singleRegularVisionIdentity": bool(
+                                repeat_diagnostic.get("singleRegularVisionIdentity")
+                            ),
+                            "repeatEvidenceMode": repeat_diagnostic.get(
+                                "repeatEvidenceMode"
+                            ),
                         }
                     )
                 else:
@@ -759,6 +777,13 @@ class ProductDecisionEngine:
                     diag["nearestRepeatCount"] = int(
                         repeat_diagnostic.get("count", 0) or 0
                     )
+                    diag["singleRegularVisionIdentity"] = bool(
+                        repeat_diagnostic.get("singleRegularVisionIdentity")
+                    )
+                    if repeat_diagnostic.get("repeatEvidenceMode"):
+                        diag["repeatEvidenceMode"] = repeat_diagnostic.get(
+                            "repeatEvidenceMode"
+                        )
             option = {
                 "rank": rank,
                 "candidate": candidate,
@@ -1599,6 +1624,7 @@ class ProductDecisionEngine:
         confidence: float,
         exit_path_votes: int,
         source: str,
+        single_regular_vision_identity: bool = False,
     ) -> Optional[dict[str, Any]]:
         if unit_weight <= 0.0:
             return None
@@ -1651,23 +1677,30 @@ class ProductDecisionEngine:
             "confidence": round(float(confidence), 4),
             "freezerExitPathVotes": int(exit_path_votes),
             "voteCount": int(vote_count),
+            "minRepeatVotes": int(min_votes),
+            "singleRegularVisionIdentity": bool(single_regular_vision_identity),
             "accepted": False,
         }
         if str(source) != "vision":
             diagnostic["reason"] = "not_regular_vision_candidate"
         elif confidence < float(config.weight.freezer_multi_min_confidence):
             diagnostic["reason"] = "confidence_below_repeat_floor"
-        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
-            diagnostic["reason"] = "insufficient_exit_path_votes"
-        elif vote_count < min_votes:
-            diagnostic["reason"] = "insufficient_repeat_votes"
         elif repeat_residual > allowed_residual:
             diagnostic["reason"] = "repeat_residual_exceeds_tolerance"
         elif repeat_residual >= float(single_residual):
             diagnostic["reason"] = "single_residual_not_worse"
+        elif bool(single_regular_vision_identity) and vote_count > 0:
+            diagnostic["accepted"] = True
+            diagnostic["reason"] = "same_product_repeat_weight_gate"
+            diagnostic["repeatEvidenceMode"] = "single_regular_vision_identity"
+        elif exit_path_votes < int(config.vision.freezer_min_exit_path_votes):
+            diagnostic["reason"] = "insufficient_exit_path_votes"
+        elif vote_count < min_votes:
+            diagnostic["reason"] = "insufficient_repeat_votes"
         else:
             diagnostic["accepted"] = True
             diagnostic["reason"] = "same_product_repeat_weight_gate"
+            diagnostic["repeatEvidenceMode"] = "exit_path_votes"
         return diagnostic
 
     @staticmethod
