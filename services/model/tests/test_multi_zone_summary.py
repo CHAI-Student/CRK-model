@@ -1013,7 +1013,7 @@ def test_freezer_close_aggregate_suppresses_returned_yomamte_candidate(
         aggregate = global_session.zone_sessions[1].final_weight_validation[
             "freezerCloseAggregate"
         ]
-        assert aggregate["reason"] == "freezer_close_candidate_rebuild_disabled"
+        assert aggregate["reason"] == "freezer_close_aggregate_deferred_return_preserved"
         assert aggregate["freezerCloseAggregateMode"] == "preserve_only"
         assert aggregate["selectedProducts"] == [
             {"productId": 77, "name": "BAG_BIBIGO_DUMPLING_224G", "count": 1}
@@ -1668,6 +1668,257 @@ def test_freezer_close_return_reconciliation_uses_channel_side(
         ]
         assert reconciliation["sameZoneApplied"][0]["matchTier"] == (
             "same_zone_same_position"
+        )
+    finally:
+        store.clear_all()
+
+
+def test_freezer_same_position_return_clears_melona_before_close(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+    weights = {23: 176.0, 44: 79.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=4,
+            result=TriggerResult(
+                trigger_id="zone4-melona-return",
+                session_id="zone4-melona-return-session",
+                timestamp=120.0,
+                products=[],
+                delta_weight=75.3,
+                confidence=0.0,
+                video_paths={},
+                is_return=True,
+                loadcell_diagnostics={
+                    "channel_movement_targets": [
+                        {
+                            "channel_side": "right",
+                            "channel_index": 1,
+                            "channel_position": 0,
+                            "delta": 79.0,
+                            "weight": 79.0,
+                            "direction": "return",
+                        }
+                    ]
+                },
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=4,
+            result=TriggerResult(
+                trigger_id="zone4-melona-removal",
+                session_id="zone4-melona-removal-session",
+                timestamp=100.0,
+                products=[
+                    _product(
+                        44,
+                        "STICK_BINGGRAE_MELONA_75ML",
+                        1,
+                        price=800,
+                        confidence=0.885,
+                    )
+                ],
+                delta_weight=-80.9,
+                confidence=0.885,
+                video_paths={},
+                loadcell_diagnostics={
+                    "channel_removal_segment_targets": [
+                        {
+                            "channel_side": "right",
+                            "channel_index": 1,
+                            "channel_position": 0,
+                            "delta": -81.0,
+                            "weight": 81.0,
+                            "direction": "removal",
+                        }
+                    ]
+                },
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=5,
+            result=TriggerResult(
+                trigger_id="zone5-hamburger-removal",
+                session_id="zone5-hamburger-removal-session",
+                timestamp=110.0,
+                products=[
+                    _product(
+                        23,
+                        "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                        1,
+                        price=2700,
+                        confidence=0.889,
+                        placement_units=[
+                            {
+                                "zone": 5,
+                                "channelSide": "right",
+                                "channelIndex": 1,
+                                "channelPosition": 0,
+                                "source": "channel_target",
+                            }
+                        ],
+                    )
+                ],
+                delta_weight=-175.6,
+                confidence=0.889,
+                video_paths={},
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_4 = next(zone for zone in response["zones"] if zone["zone"] == 4)
+        zone_5 = next(zone for zone in response["zones"] if zone["zone"] == 5)
+
+        assert zone_4["products"] == []
+        assert zone_4["weightDelta"] == 0.0
+        assert [(product["name"], product["count"]) for product in zone_5["products"]] == [
+            ("BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G", 1)
+        ]
+        assert response["decisionSummary"]["totalPrice"] == 2700
+        assert response["decisionSummary"]["totalWeightDelta"] == -175.6
+        reconciliation = global_session.zone_sessions[4].final_weight_validation[
+            "deferredReturnReconciliation"
+        ]
+        assert reconciliation["samePositionReturnApplied"] is True
+        assert reconciliation["samePositionReturnMatchedProduct"]["name"] == (
+            "STICK_BINGGRAE_MELONA_75ML"
+        )
+        assert reconciliation["returnEffectiveWeightDeltaOverride"] == 0.0
+        aggregate = global_session.zone_sessions[4].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["reason"] == "freezer_close_aggregate_deferred_return_preserved"
+        assert aggregate["weightDeltaOverride"] == 0.0
+        assert aggregate["selectedProducts"] == [
+            {
+                "productId": 23,
+                "name": "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                "count": 1,
+            }
+        ]
+    finally:
+        store.clear_all()
+
+
+def test_freezer_same_position_return_keeps_later_re_removal(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: {44: 79.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        for timestamp, session_id in ((100.0, "first"), (130.0, "second")):
+            store.add_trigger_with_global(
+                zone=4,
+                result=TriggerResult(
+                    trigger_id=f"zone4-melona-{session_id}-removal",
+                    session_id=f"zone4-melona-{session_id}-removal-session",
+                    timestamp=timestamp,
+                    products=[
+                        _product(
+                            44,
+                            "STICK_BINGGRAE_MELONA_75ML",
+                            1,
+                            price=800,
+                            confidence=0.9,
+                            placement_units=[
+                                {
+                                    "zone": 4,
+                                    "channelSide": "right",
+                                    "channelIndex": 1,
+                                    "channelPosition": 0,
+                                    "source": "channel_target",
+                                }
+                            ],
+                        )
+                    ],
+                    delta_weight=-79.0,
+                    confidence=0.9,
+                    video_paths={},
+                    loadcell_diagnostics={
+                        "channel_removal_segment_targets": [
+                            {
+                                "channel_side": "right",
+                                "channel_index": 1,
+                                "channel_position": 0,
+                                "delta": -79.0,
+                                "weight": 79.0,
+                                "direction": "removal",
+                            }
+                        ]
+                    },
+                ),
+            )
+            if timestamp == 100.0:
+                store.add_trigger_with_global(
+                    zone=4,
+                    result=TriggerResult(
+                        trigger_id="zone4-melona-return",
+                        session_id="zone4-melona-return-session",
+                        timestamp=120.0,
+                        products=[],
+                        delta_weight=79.0,
+                        confidence=0.0,
+                        video_paths={},
+                        is_return=True,
+                        loadcell_diagnostics={
+                            "channel_movement_targets": [
+                                {
+                                    "channel_side": "right",
+                                    "channel_index": 1,
+                                    "channel_position": 0,
+                                    "delta": 79.0,
+                                    "weight": 79.0,
+                                    "direction": "return",
+                                }
+                            ]
+                        },
+                    ),
+                )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_4 = next(zone for zone in response["zones"] if zone["zone"] == 4)
+
+        assert [(product["name"], product["count"]) for product in zone_4["products"]] == [
+            ("STICK_BINGGRAE_MELONA_75ML", 1)
+        ]
+        reconciliation = global_session.zone_sessions[4].final_weight_validation[
+            "deferredReturnReconciliation"
+        ]
+        assert reconciliation["samePositionReturnApplied"] is True
+        remaining_units = global_session.zone_sessions[4].aggregated_products[
+            44
+        ].placement_units
+        assert len(remaining_units) == 1
+        assert remaining_units[0]["sourceSessionId"] == (
+            "zone4-melona-second-removal-session"
         )
     finally:
         store.clear_all()

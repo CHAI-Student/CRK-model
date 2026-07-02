@@ -315,12 +315,25 @@ def close_weight_delta_override(session: object) -> Optional[float]:
     if not isinstance(validation, dict):
         return None
     aggregate = validation.get("freezerCloseAggregate")
-    if not isinstance(aggregate, dict) or "weightDeltaOverride" not in aggregate:
-        return None
-    try:
-        return float(aggregate["weightDeltaOverride"])
-    except (TypeError, ValueError):
-        return None
+    if isinstance(aggregate, dict) and "weightDeltaOverride" in aggregate:
+        try:
+            return float(aggregate["weightDeltaOverride"])
+        except (TypeError, ValueError):
+            return None
+
+    for key in ("returnEffectiveWeightDeltaOverride",):
+        if key in validation:
+            try:
+                return float(validation[key])
+            except (TypeError, ValueError):
+                return None
+    deferred = validation.get("deferredReturnReconciliation")
+    if isinstance(deferred, dict) and "returnEffectiveWeightDeltaOverride" in deferred:
+        try:
+            return float(deferred["returnEffectiveWeightDeltaOverride"])
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 @dataclass

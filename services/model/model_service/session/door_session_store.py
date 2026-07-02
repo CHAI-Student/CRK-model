@@ -1801,6 +1801,22 @@ class DoorSessionStore:
     ) -> bool:
         current_weight = self._session_active_weight(session)
         current_residual = abs(target_weight - current_weight)
+        position_match = self._find_same_zone_deferred_return_match(
+            session,
+            deferred,
+            same_position=True,
+        )
+        if position_match is not None:
+            return self._apply_deferred_return_product_match(
+                session,
+                deferred,
+                position_match,
+                current_residual,
+                target_weight,
+                diagnostics,
+                force_apply=True,
+            )
+
         if current_residual <= self._weight_tolerance:
             diagnostics.setdefault("notNeeded", []).append(
                 {
@@ -1816,14 +1832,8 @@ class DoorSessionStore:
         position_match = self._find_same_zone_deferred_return_match(
             session,
             deferred,
-            same_position=True,
+            same_position=False,
         )
-        if position_match is None:
-            position_match = self._find_same_zone_deferred_return_match(
-                session,
-                deferred,
-                same_position=False,
-            )
         if position_match is not None:
             return self._apply_deferred_return_product_match(
                 session,
@@ -1918,6 +1928,7 @@ class DoorSessionStore:
                 unit
                 for unit in product.placement_units
                 if isinstance(unit, dict)
+                and self._unit_precedes_deferred_return(unit, deferred)
                 and self._deferred_unit_matches(
                     unit,
                     deferred,
@@ -2004,6 +2015,8 @@ class DoorSessionStore:
         current_residual: float,
         target_weight: float,
         diagnostics: Dict[str, object],
+        *,
+        force_apply: bool = False,
     ) -> bool:
         product = match["product"]
         if not isinstance(product, AggregatedProduct):
@@ -2014,7 +2027,7 @@ class DoorSessionStore:
         combo_weight = float(match["expected"])
         new_weight = self._session_active_weight(session) - combo_weight
         new_residual = abs(target_weight - new_weight)
-        if new_residual >= current_residual:
+        if not force_apply and new_residual >= current_residual:
             return False
 
         selected_units = [
@@ -2031,6 +2044,38 @@ class DoorSessionStore:
         self._remove_selected_placement_units(product, selected_units, count)
 
         diagnostics["deferredReturnAppliedAtClose"] = True
+        match_tier = str(match.get("tier"))
+        matched_product = {
+            "productId": int(product.product_id),
+            "productIdx": product.product_idx,
+            "name": product.name,
+            "count": count,
+            "unitWeight": round(float(product.weight), 1),
+            "channelSide": deferred.channel_side,
+            "channelIndex": deferred.channel_index,
+            "channelPosition": deferred.channel_position,
+            "triggerId": deferred.trigger_id,
+            "deltaWeight": round(float(deferred.delta_weight), 1),
+            "matchedWeight": round(combo_weight, 1),
+            "matchTier": match_tier,
+        }
+        if match_tier == "same_zone_same_position":
+            diagnostics["samePositionReturnApplied"] = True
+            diagnostics["samePositionReturnMatchedProduct"] = matched_product
+            diagnostics.setdefault("samePositionReturnSuppressedProducts", []).append(
+                matched_product
+            )
+            if not session.get_active_products():
+                diagnostics["returnEffectiveWeightDeltaOverride"] = 0.0
+            ops_logger.info(
+                "[OPS][FREEZER-RETURN-RECONCILE] zone=%s side=%s target=%.1fg "
+                "product=%sx%s applied=True",
+                session.zone,
+                deferred.channel_side or "unknown",
+                abs(float(deferred.delta_weight)),
+                product.name,
+                count,
+            )
         diagnostics.setdefault("sameZoneApplied", []).append(
             {
                 "triggerId": deferred.trigger_id,
@@ -2038,12 +2083,25 @@ class DoorSessionStore:
                 "matchedWeight": round(combo_weight, 1),
                 "matchedUnits": count,
                 "products": [f"{product.name}x{count}"],
-                "matchTier": str(match.get("tier")),
+                "matchTier": match_tier,
                 "residualBefore": round(current_residual, 1),
                 "residualAfter": round(new_residual, 1),
             }
         )
         return True
+
+    @staticmethod
+    def _unit_precedes_deferred_return(
+        unit: Dict[str, object],
+        deferred: DeferredReturn,
+    ) -> bool:
+        try:
+            source_timestamp = float(unit.get("sourceTimestamp", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            source_timestamp = 0.0
+        if source_timestamp <= 0.0:
+            return True
+        return source_timestamp <= float(deferred.timestamp)
 
     @staticmethod
     def _remove_selected_placement_units(
@@ -2148,6 +2206,15 @@ class DoorSessionStore:
                     diagnostics["deferredReturnReconciliation"] = (
                         existing_deferred_diagnostics
                     )
+                    if isinstance(existing_deferred_diagnostics, dict) and (
+                        "returnEffectiveWeightDeltaOverride"
+                        in existing_deferred_diagnostics
+                    ):
+                        diagnostics["returnEffectiveWeightDeltaOverride"] = (
+                            existing_deferred_diagnostics[
+                                "returnEffectiveWeightDeltaOverride"
+                            ]
+                        )
                 existing_location_diagnostics = (
                     session.final_weight_validation.get(
                         "freezerLocationReturnReconciliation"

@@ -502,7 +502,106 @@ class ProductAggregator:
             unit.setdefault("sourceSessionId", trigger.session_id)
             unit.setdefault("sourceTimestamp", trigger.timestamp)
             unit.setdefault("channelSide", "unknown")
+        self._apply_single_channel_removal_fallback(
+            units,
+            product,
+            trigger,
+            unit_weight=unit_weight,
+        )
         return units
+
+    def _apply_single_channel_removal_fallback(
+        self,
+        units: List[dict[str, object]],
+        product: ProductResult,
+        trigger: TriggerResult,
+        *,
+        unit_weight: float,
+    ) -> None:
+        if str(config.machine.cabinet_type).strip().lower() != "freezer":
+            return
+        if len(units) != 1 or int(product.count) != 1:
+            return
+        trigger_unit_count = sum(
+            max(0, int(getattr(item, "count", 0) or 0))
+            for item in getattr(trigger, "products", []) or []
+        )
+        if trigger_unit_count != 1:
+            return
+
+        unit = units[0]
+        if self._unit_has_position(unit):
+            return
+        target = self._single_channel_removal_target(trigger)
+        if target is None:
+            return
+        target_weight = abs(float(target.get("weight", 0.0) or 0.0))
+        tolerance = max(
+            float(self._weight_tolerance),
+            float(config.weight.freezer_weight_tolerance_grams),
+        )
+        if unit_weight <= 0 or abs(float(unit_weight) - target_weight) > tolerance:
+            return
+
+        unit["channelSide"] = (
+            target.get("channel_side")
+            or target.get("channelSide")
+            or unit.get("channelSide")
+            or "unknown"
+        )
+        if target.get("channel_index") is not None:
+            unit["channelIndex"] = target.get("channel_index")
+        elif target.get("channelIndex") is not None:
+            unit["channelIndex"] = target.get("channelIndex")
+        if target.get("channel_position") is not None:
+            unit["channelPosition"] = target.get("channel_position")
+        elif target.get("channelPosition") is not None:
+            unit["channelPosition"] = target.get("channelPosition")
+        unit["targetWeight"] = round(target_weight, 1)
+        unit["source"] = "single_channel_removal_fallback"
+        unit["channelProductGroupPolicy"] = "single_channel_removal_fallback"
+
+    @staticmethod
+    def _unit_has_position(unit: dict[str, object]) -> bool:
+        side = unit.get("channelSide", unit.get("channel_side"))
+        side_text = str(side).strip().lower() if side is not None else ""
+        if side_text and side_text not in {"unknown", "none", "null"}:
+            return True
+        return (
+            unit.get("channelIndex", unit.get("channel_index")) is not None
+            or unit.get("channelPosition", unit.get("channel_position")) is not None
+        )
+
+    @staticmethod
+    def _single_channel_removal_target(
+        trigger: TriggerResult,
+    ) -> Optional[dict[str, object]]:
+        diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+        if not isinstance(diagnostics, dict):
+            return None
+        raw_targets = list(diagnostics.get("channel_removal_segment_targets") or [])
+        if not raw_targets:
+            raw_targets = list(diagnostics.get("channel_movement_targets") or [])
+
+        targets: List[dict[str, object]] = []
+        for entry in raw_targets:
+            if not isinstance(entry, dict):
+                continue
+            direction = str(entry.get("direction", "")).lower()
+            try:
+                delta = float(entry.get("delta", 0.0) or 0.0)
+                weight = abs(float(entry.get("weight", delta) or delta))
+            except (TypeError, ValueError):
+                continue
+            if weight <= 0:
+                continue
+            if direction == "removal" or delta < 0:
+                target = dict(entry)
+                target["weight"] = round(weight, 1)
+                targets.append(target)
+        if len(targets) != 1:
+            return None
+        return targets[0]
 
     @staticmethod
     def _remove_product_units(

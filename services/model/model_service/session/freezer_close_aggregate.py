@@ -197,6 +197,29 @@ class FreezerCloseAggregateResolver:
             diagnostics["triggerProductsPreserveBlockedByReturnedPosition"] = True
         if current_allowed:
             diagnostics["samePositionReturnedProductAllowed"] = current_allowed
+        if deferred_return_applied:
+            active_weight = self._active_session_weight(participants)
+            active_residual = abs(target_weight - active_weight)
+            diagnostics.update(
+                {
+                    "accepted": active_residual <= self._tolerance,
+                    "reason": "freezer_close_aggregate_deferred_return_preserved",
+                    "selectedWeight": round(float(active_weight), 1),
+                    "residual": round(float(active_residual), 1),
+                    "allowedResidual": round(float(self._tolerance), 1),
+                    "selectedProducts": self._active_session_product_diagnostics(
+                        participants
+                    ),
+                    "freezerCloseAggregateMode": "preserve_only",
+                }
+            )
+            self._apply_preserve_existing_output(
+                participants,
+                output_zone=output_zone,
+                diagnostics=diagnostics,
+            )
+            return diagnostics
+
         channel_solved_products_preserved = (
             self._has_channel_solved_trigger_products(participants)
             and not current_suppressed
@@ -459,6 +482,8 @@ class FreezerCloseAggregateResolver:
             if hint_key is None:
                 continue
             for item in evidence_participants:
+                if float(item.trigger.timestamp) <= float(hint.timestamp):
+                    continue
                 if hint_key in self._removal_position_keys(item.trigger, item.zone):
                     return {
                         "allowed": {
@@ -860,6 +885,11 @@ class FreezerCloseAggregateResolver:
             zone_diagnostics["selectedProductsByZone"] = selected_products_by_zone
             if item.zone == output_zone:
                 zone_diagnostics["outputZoneRole"] = "latest_trigger_zone"
+            override = FreezerCloseAggregateResolver._return_delta_override(
+                item.session
+            )
+            if override is not None:
+                zone_diagnostics["weightDeltaOverride"] = override
             item.session.final_weight_validation = dict(
                 item.session.final_weight_validation or {}
             )
@@ -882,6 +912,11 @@ class FreezerCloseAggregateResolver:
             zone_diagnostics["role"] = "preserved"
             if item.zone == output_zone:
                 zone_diagnostics["outputZoneRole"] = "latest_trigger_zone"
+            override = FreezerCloseAggregateResolver._return_delta_override(
+                item.session
+            )
+            if override is not None:
+                zone_diagnostics["weightDeltaOverride"] = override
             item.session.final_weight_validation = dict(
                 item.session.final_weight_validation or {}
             )
@@ -990,6 +1025,28 @@ class FreezerCloseAggregateResolver:
                 else:
                     existing.count += int(product.count)
         return FreezerCloseAggregateResolver._aggregated_product_diagnostics(products)
+
+    @staticmethod
+    def _return_delta_override(session: DoorSession) -> Optional[float]:
+        validation = session.final_weight_validation or {}
+        if not isinstance(validation, dict):
+            return None
+        direct_value = validation.get("returnEffectiveWeightDeltaOverride")
+        if direct_value is not None:
+            try:
+                return float(direct_value)
+            except (TypeError, ValueError):
+                return None
+        diagnostics = validation.get("deferredReturnReconciliation")
+        if not isinstance(diagnostics, dict):
+            return None
+        value = diagnostics.get("returnEffectiveWeightDeltaOverride")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _has_channel_solved_trigger_products(
