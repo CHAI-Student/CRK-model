@@ -431,13 +431,14 @@ def test_video_processor_defaults_use_configurable_filter_settings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_async_video_processor_frame_stride_skips_frames_and_records_stats(
+async def test_async_video_processor_default_frame_stride_processes_all_frames(
     monkeypatch,
     tmp_path,
 ):
     import json
 
     import model_service.video.video_processor as video_processor_module
+    from model_service.core.config import config
     from model_service.video import VideoProcessor
     from model_service.video.frame_trace import TriggerTraceContext
     from model_service.vision.yolo_wrapper import YOLODetection
@@ -469,6 +470,8 @@ async def test_async_video_processor_frame_stride_skips_frames_and_records_stats
                     name="PRODUCT_STRIDE",
                 )
             ]
+
+    monkeypatch.setattr(config.async_streaming, "frame_stride", 1, raising=False)
 
     def extractor_factory(path, *args, **kwargs):
         camera_type = kwargs["camera_type"]
@@ -507,32 +510,38 @@ async def test_async_video_processor_frame_stride_skips_frames_and_records_stats
 
     assert [(camera, frame) for camera, frame in yolo.calls] == [
         ("top", 0),
+        ("top", 1),
         ("top", 2),
+        ("top", 3),
         ("top", 4),
+        ("top", 5),
         ("side", 100),
+        ("side", 101),
         ("side", 102),
+        ("side", 103),
         ("side", 104),
+        ("side", 105),
     ]
-    assert result.stats.frame_stride == 2
+    assert result.stats.frame_stride == 1
     assert result.stats.original_frames == 12
-    assert result.stats.processed_frames == 6
-    assert result.stats.skipped_frames == 6
-    assert result.stats.yolo_inference_count == 6
+    assert result.stats.processed_frames == 12
+    assert result.stats.skipped_frames == 0
+    assert result.stats.yolo_inference_count == 12
 
     detail_file = next((tmp_path / "logs" / "triggers").glob("*/*.json"))
     detail = json.loads(detail_file.read_text(encoding="utf-8"))
     assert detail["cameras"]["top"]["total_frames"] == 6
-    assert detail["cameras"]["top"]["processed_frames"] == 3
+    assert detail["cameras"]["top"]["processed_frames"] == 6
     assert detail["cameras"]["side"]["total_frames"] == 6
-    assert detail["cameras"]["side"]["processed_frames"] == 3
-    assert detail["video_stats"]["frame_stride"] == 2
+    assert detail["cameras"]["side"]["processed_frames"] == 6
+    assert detail["video_stats"]["frame_stride"] == 1
     assert detail["video_stats"]["original_frames"] == 12
-    assert detail["video_stats"]["processed_frames"] == 6
-    assert detail["video_stats"]["skipped_frames"] == 6
+    assert detail["video_stats"]["processed_frames"] == 12
+    assert detail["video_stats"]["skipped_frames"] == 0
 
 
 @pytest.mark.asyncio
-async def test_async_video_processor_ignores_non_two_stride_override(
+async def test_async_video_processor_stride_two_skips_frames_and_records_stats(
     monkeypatch,
 ):
     import model_service.video.video_processor as video_processor_module
@@ -565,7 +574,7 @@ async def test_async_video_processor_ignores_non_two_stride_override(
                 )
             ]
 
-    monkeypatch.setattr(config.async_streaming, "frame_stride", 1, raising=False)
+    monkeypatch.setattr(config.async_streaming, "frame_stride", 2, raising=False)
     monkeypatch.setattr(
         video_processor_module,
         "create_frame_extractor",
@@ -589,15 +598,17 @@ async def test_async_video_processor_ignores_non_two_stride_override(
     assert result.stats.skipped_frames == 1
 
 
-def test_async_streaming_frame_stride_is_fixed_to_two():
+def test_async_streaming_frame_stride_allows_one_and_two_only():
     from model_service.core.config import AsyncStreamingModel
 
-    assert AsyncStreamingModel().frame_stride == 2
+    assert AsyncStreamingModel().frame_stride == 1
+    assert AsyncStreamingModel(frame_stride=1).frame_stride == 1
+    assert AsyncStreamingModel(frame_stride=2).frame_stride == 2
 
-    with pytest.raises(ValueError, match="frame_stride is fixed at 2"):
-        AsyncStreamingModel(frame_stride=1)
+    with pytest.raises(ValueError, match="frame_stride must be 1 or 2"):
+        AsyncStreamingModel(frame_stride=0)
 
-    with pytest.raises(ValueError, match="frame_stride is fixed at 2"):
+    with pytest.raises(ValueError, match="frame_stride must be 1 or 2"):
         AsyncStreamingModel(frame_stride=3)
 
 

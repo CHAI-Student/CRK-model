@@ -15,9 +15,10 @@ Generated: 2026-05-29T08:28:03.842273+00:00
 ## Trace Latency Evidence
 
 - Trace files with video stats: 12
-- Stride-2 trace files: 4
-- Max stride-2 video processing time: 11075.6 ms
-- Stride-2 traces over 20s video budget: 0
+- Expected frame stride: 1
+- Matching-stride trace files: 0
+- Max matching-stride video processing time: 0.0 ms
+- Matching-stride traces over 20s video budget: 0
 
 Trace JSON files do not include queue wait or total trigger-loop fields. Use
 `[TRIGGER-WORKER][LATENCY]` logs for full Jetson loop acceptance.

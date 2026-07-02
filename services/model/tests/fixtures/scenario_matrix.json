@@ -32777,7 +32777,7 @@
       "B 1\uac1c": 36,
       "\uc5c6\uc74c": 36
     },
-    "frame_stride": 2,
+    "frame_stride": 1,
     "generated_at": "2026-05-29T02:11:21.502204+00:00",
     "latency_budget_ms": 20000,
     "product_catalog": {

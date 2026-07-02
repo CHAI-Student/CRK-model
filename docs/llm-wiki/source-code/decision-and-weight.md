@@ -157,7 +157,7 @@ Important inputs:
   positive-weight product and a tight single-unit residual.
 - Freezer product identity creation also respects the freezer product
   confidence floor. Stage-count, diagnostic, threshold-rescue, ROI-weight
-  rescue, and weight-gated rescue evidence below the current `0.70` raw/max
+  rescue, and weight-gated rescue evidence below the current `0.50` raw/max
   product threshold can remain visible in diagnostics, but it cannot create a
   final product fallback. Weighted/combined confidence is diagnostic only for
   this gate; at least one detected camera's raw/max product confidence must
@@ -250,7 +250,7 @@ Important inputs:
   passed the weight gate, have an in-stock positive-weight active product, meet
   `MODEL__WEIGHT__DETECTED_SINGLE_FALLBACK_MIN_VOTES`, and reach confidence
   `>=0.08`. In current freezer mode, this same recovery path is additionally
-  gated by the product confidence floor, so sub-`0.70` raw stage evidence cannot
+  gated by the product confidence floor, so sub-`0.50` raw stage evidence cannot
   create freezer product identity. If the same class already exists in
   `vision_candidates` as a non-regular rescue/stage candidate, weight-gated
   stage evidence can upgrade that entry to `source=stage_weight_gate`; regular

@@ -19,7 +19,7 @@ Use this for current runtime defaults, configuration rules, and repo layout.
   `MODEL__DOOR_SESSION__CLOSE_SUBSEQUENT_WAIT_SECONDS=1.0`,
   `MODEL__VIDEO__READY_MAX_WAIT_SECONDS=2.0`,
   `MODEL__VIDEO__READY_POLL_INTERVAL_SECONDS=0.2`,
-  `MODEL__ASYNC_STREAMING__FRAME_STRIDE=2`,
+  `MODEL__ASYNC_STREAMING__FRAME_STRIDE=1`,
   `MODEL__WEIGHT__STRICT_MODE=true`, and
   `MODEL__WEIGHT__STRICT_MODE_FALLBACK=true`.
 - `Settings` auto-loads `.env`.

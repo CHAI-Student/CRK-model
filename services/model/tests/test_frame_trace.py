@@ -2862,7 +2862,7 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
     monkeypatch.setattr(config.vision, "ffmpeg_top_contrast", 1.2, raising=False)
     monkeypatch.setattr(config.vision, "ffmpeg_side_gamma", 1.0, raising=False)
     monkeypatch.setattr(config.vision, "ffmpeg_side_contrast", 1.0, raising=False)
-    monkeypatch.setattr(config.async_streaming, "frame_stride", 2, raising=False)
+    monkeypatch.setattr(config.async_streaming, "frame_stride", 1, raising=False)
 
     trace_context = TriggerTraceContext(
         session_id="vision-config",
@@ -2907,7 +2907,7 @@ def test_trigger_trace_records_runtime_vision_config(monkeypatch, tmp_path):
     assert vision_config["ffmpeg_top_contrast"] == 1.2
     assert vision_config["ffmpeg_side_gamma"] == 1.0
     assert vision_config["ffmpeg_side_contrast"] == 1.0
-    assert vision_config["async_frame_stride"] == 2
+    assert vision_config["async_frame_stride"] == 1
 
 
 def test_trigger_trace_records_side_roi_soft_passed_stage(tmp_path):

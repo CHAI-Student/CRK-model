@@ -194,7 +194,7 @@ class VideoProcessingStats:
     side_frames: int = 0
     top_original_frames: int = 0
     side_original_frames: int = 0
-    frame_stride: int = 2
+    frame_stride: int = 1
     top_raw_detections: int = 0
     side_raw_detections: int = 0
     top_threshold_filtered: int = 0
@@ -3161,7 +3161,7 @@ class VideoProcessor:
             "side",
             "VIDEO-ASYNC",
         )
-        frame_stride = 2
+        frame_stride = config.async_streaming.frame_stride
 
         top_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)
         side_ensemble = VotingEnsemble(min_vote_ratio=self.min_vote_ratio)

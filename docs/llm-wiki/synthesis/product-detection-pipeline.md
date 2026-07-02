@@ -56,8 +56,8 @@ vision-supported product identity.
   enter freezer handled candidates. The decision engine may still recover
   strong `freezer_roi_filtered` evidence through strict single-item ROI-weight
   rescue.
-- Current freezer product confidence thresholds are `0.70` raw/max confidence
-  for both Top and Side, matching the stricter freezer field setting. Hand tracking uses
+- Current freezer product confidence thresholds are `0.50` raw/max confidence
+  for both Top and Side, matching the freezer field setting. Hand tracking uses
   a separate `0.40` floor for class `0`, but freezer `dual_top_proxy` only
   enables hand class `0` and hand-path filtering on physical `top_middle`.
   Physical `top_side` remains product-only and cannot filter candidates through
@@ -170,7 +170,7 @@ vision-supported product identity.
 - Segment-first matching ranks weak stage traces as unsupported evidence. This
   prevents low-confidence small-product repeats from beating active large-bottle
   explanations or being reported as `COMPLETE`.
-- In freezer mode, product stage/diagnostic/rescue evidence below the `0.70`
+- In freezer mode, product stage/diagnostic/rescue evidence below the `0.50`
   raw/max product floor is also unsupported for identity creation. Trace/debug
   records can still show the rejected observation, but it cannot become a final
   product fallback.

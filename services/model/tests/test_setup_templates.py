@@ -53,8 +53,8 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.vision.yolo_model_path == "models/set9_imbalance_16.engine"
     assert settings.vision.hand_class_id == 0
     assert settings.vision.hand_confidence_threshold == 0.40
-    assert settings.vision.top_confidence_threshold == 0.70
-    assert settings.vision.side_confidence_threshold == 0.70
+    assert settings.vision.top_confidence_threshold == 0.50
+    assert settings.vision.side_confidence_threshold == 0.50
     assert settings.vision.top_weight == 0.60
     assert settings.vision.side_weight == 0.40
     assert settings.vision.top_only_weight == 0.60

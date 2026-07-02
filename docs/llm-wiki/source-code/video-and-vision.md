@@ -50,8 +50,10 @@ selected frames, accumulates per-camera evidence, and returns ranked
   unchanged.
 - Trigger code passes `delta_weight` into both sync and async video processing
   so top-camera ROI can distinguish removal from return.
-- Fixed `frame_stride=2` runs YOLO on decoded frame indices divisible by `2`;
-  other stride values are rejected by settings validation.
+- Default `frame_stride=1` runs YOLO on every decoded frame. Setting
+  `frame_stride=2` is the latency rollback and runs YOLO only on decoded frame
+  indices divisible by `2`; other stride values are rejected by settings
+  validation.
 - Threshold rescue and ROI rescue can preserve low-confidence evidence for
   weight-gated matching.
 - Diagnostic all-class trace can collect limited evidence outside normal
@@ -106,7 +108,7 @@ selected frames, accumulates per-camera evidence, and returns ranked
   candidates so weak evidence does not enter the normal candidate pool; the
   decision engine has a separate strict single-item ROI-weight rescue for
   strong `freezer_roi_filtered` evidence.
-- Current freezer product vote floors are `0.70` for both Top and Side through
+- Current freezer product vote floors are `0.50` for both Top and Side through
   `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` and
   `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD`. Product detections below the
   relevant raw/max camera floor may still appear in traces as rejected

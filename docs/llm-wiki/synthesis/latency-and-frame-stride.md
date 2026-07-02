@@ -34,22 +34,22 @@ paths can fall back to a fresh last-valid snapshot and mark
 - `MODEL__DOOR_SESSION__CLOSE_SUBSEQUENT_WAIT_SECONDS=1.0`
 - `MODEL__VIDEO__READY_MAX_WAIT_SECONDS=2.0`
 - `MODEL__VIDEO__READY_POLL_INTERVAL_SECONDS=0.2`
-- `MODEL__ASYNC_STREAMING__FRAME_STRIDE=2`
+- `MODEL__ASYNC_STREAMING__FRAME_STRIDE=1`
 
-The scenario readiness fixture also records `frame_stride=2`. As of
-2026-06-02 this is the only accepted async streaming stride; settings
-validation rejects `1` or `3`.
+The scenario readiness fixture also records `frame_stride=1`. As of
+2026-07-02 async streaming accepts `1` and `2`; settings validation rejects
+other values.
 
 ## Frame Stride Semantics
 
-`MODEL__ASYNC_STREAMING__FRAME_STRIDE=2` means the async video processor still
-walks the video stream, but only runs YOLO on frames whose original frame index
-is divisible by `2`. The runtime also pins the processor to `2` so accidental
-test monkeypatches or stale injected values cannot switch to another stride.
+`MODEL__ASYNC_STREAMING__FRAME_STRIDE=1` means the async video processor runs
+YOLO on every decoded frame. Setting it to `2` is the latency rollback path:
+the processor still walks the video stream, but only runs YOLO on frames whose
+original frame index is divisible by `2`.
 
-The stride optimization reduces YOLO inference work, not necessarily all decode
-work. If decode, IO, or queue wait dominates a trace, stride alone will not
-solve the whole latency problem.
+The stride-2 optimization reduces YOLO inference work, not necessarily all
+decode work. If decode, IO, or queue wait dominates a trace, stride alone will
+not solve the whole latency problem.
 
 ## Telemetry To Compare
 
@@ -78,10 +78,11 @@ Frame skipping can reduce evidence for:
 - low-confidence products rescued by accumulated votes,
 - cases where Top and Side cameras provide asymmetric evidence.
 
-Do not tune stride to fix recognition regressions. The fixed value is `2`;
-recall regressions should be handled in evidence filtering, candidate ranking,
-or weight/session logic. `docs/jetson-stride2.env.txt` remains a historical
-field-test template and matches the current fixed default.
+The accuracy-first default is `1`; use `2` only as a latency rollback. Recall
+regressions should still be checked against evidence filtering, candidate
+ranking, weight/session logic, and active-product context before attributing
+them only to frame stride. `docs/jetson-stride2.env.txt` remains a latency
+rollback field template, not the default operating template.
 
 Before blaming stride, verify trace `active_product_diagnostics`. If
 `allowed_class_ids_count=0` and

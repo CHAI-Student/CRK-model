@@ -83,7 +83,7 @@ def test_scenario_fixture_counts_and_contract_shape():
 
     assert fixture["metadata"]["expanded_case_count"] == 924
     assert fixture["metadata"]["checklist_row_count"] == 104
-    assert fixture["metadata"]["frame_stride"] == 2
+    assert fixture["metadata"]["frame_stride"] == 1
     assert fixture["metadata"]["latency_budget_ms"] == 20_000
     assert fixture["metadata"]["block_counts"] == {
         "S01": 12,
@@ -178,7 +178,7 @@ def test_scenario_matrix_exercises_required_combination_limits():
     assert "A 2개, B 2개" in expected_baskets
 
 
-def test_stride2_latency_contract_requires_complete_evidence_fields():
+def test_default_stride_latency_contract_requires_complete_evidence_fields():
     fixture = load_fixture()
     latency_evidence = {
         "queue_wait_ms": 25.0,
@@ -186,11 +186,11 @@ def test_stride2_latency_contract_requires_complete_evidence_fields():
         "video_stats_ms": 5_180.0,
         "frame_stride": fixture["metadata"]["frame_stride"],
         "original_frames": 360,
-        "processed_frames": 180,
-        "skipped_frames": 180,
+        "processed_frames": 360,
+        "skipped_frames": 0,
         "yolo_total_ms": 4_750.0,
-        "yolo_avg_ms": 26.4,
-        "yolo_count": 180,
+        "yolo_avg_ms": 13.2,
+        "yolo_count": 360,
         "engine_ms": 18.0,
         "door_session_ms": 12.0,
         "total_ms": 5_255.0,
@@ -212,7 +212,9 @@ def test_stride2_latency_contract_requires_complete_evidence_fields():
         "total_ms",
     }
     assert required_fields <= latency_evidence.keys()
-    assert latency_evidence["frame_stride"] == 2
+    assert latency_evidence["frame_stride"] == 1
+    assert latency_evidence["processed_frames"] == latency_evidence["original_frames"]
+    assert latency_evidence["skipped_frames"] == 0
     assert latency_evidence["processed_frames"] == latency_evidence["yolo_count"]
     assert latency_evidence["total_ms"] <= fixture["metadata"]["latency_budget_ms"]
 

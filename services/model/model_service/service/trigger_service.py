@@ -3705,7 +3705,7 @@ class TriggerService:
             f"zone={input_data.zone} queue_wait_ms={queue_wait_ms:.1f} "
             f"video_ms={video_elapsed_ms:.1f} "
             f"video_stats_ms={getattr(stats, 'processing_time_ms', 0.0):.1f} "
-            f"frame_stride={getattr(stats, 'frame_stride', 2)} "
+            f"frame_stride={getattr(stats, 'frame_stride', 1)} "
             f"original_frames={getattr(stats, 'original_frames', 0)} "
             f"processed_frames="
             f"{getattr(stats, 'processed_frames', getattr(stats, 'top_frames', 0) + getattr(stats, 'side_frames', 0))} "

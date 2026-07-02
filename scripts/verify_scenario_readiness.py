@@ -121,7 +121,11 @@ def verify_scenarios(fixture: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize_trace_latency(trace_paths: list[Path], budget_ms: int) -> dict[str, Any]:
+def summarize_trace_latency(
+    trace_paths: list[Path],
+    budget_ms: int,
+    expected_frame_stride: int,
+) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for path in trace_paths:
         try:
@@ -138,21 +142,32 @@ def summarize_trace_latency(trace_paths: list[Path], budget_ms: int) -> dict[str
                 "frame_stride": stats.get("frame_stride"),
                 "processing_time_ms": float(stats.get("processing_time_ms", 0.0)),
                 "original_frames": stats.get("original_frames"),
-                "processed_frames": stats.get("processed_frames", stats.get("total_frames")),
+                "processed_frames": stats.get(
+                    "processed_frames",
+                    stats.get("total_frames"),
+                ),
                 "skipped_frames": stats.get("skipped_frames"),
                 "yolo_count": stats.get("yolo_inference_count"),
             }
         )
 
-    stride2_rows = [row for row in rows if row["frame_stride"] == 2]
-    over_budget = [row for row in stride2_rows if row["processing_time_ms"] > budget_ms]
+    matching_stride_rows = [
+        row for row in rows if row["frame_stride"] == expected_frame_stride
+    ]
+    over_budget = [
+        row for row in matching_stride_rows if row["processing_time_ms"] > budget_ms
+    ]
     return {
         "trace_count": len(rows),
-        "stride2_trace_count": len(stride2_rows),
-        "stride2_max_video_ms": (
-            max((row["processing_time_ms"] for row in stride2_rows), default=0.0)
+        "expected_frame_stride": expected_frame_stride,
+        "matching_stride_trace_count": len(matching_stride_rows),
+        "matching_stride_max_video_ms": (
+            max(
+                (row["processing_time_ms"] for row in matching_stride_rows),
+                default=0.0,
+            )
         ),
-        "stride2_over_budget": over_budget,
+        "matching_stride_over_budget": over_budget,
         "rows": rows,
     }
 
@@ -183,9 +198,12 @@ def write_report(
         "## Trace Latency Evidence",
         "",
         f"- Trace files with video stats: {trace_result['trace_count']}",
-        f"- Stride-2 trace files: {trace_result['stride2_trace_count']}",
-        f"- Max stride-2 video processing time: {trace_result['stride2_max_video_ms']:.1f} ms",
-        f"- Stride-2 traces over 20s video budget: {len(trace_result['stride2_over_budget'])}",
+        f"- Expected frame stride: {trace_result['expected_frame_stride']}",
+        f"- Matching-stride trace files: {trace_result['matching_stride_trace_count']}",
+        f"- Max matching-stride video processing time: "
+        f"{trace_result['matching_stride_max_video_ms']:.1f} ms",
+        f"- Matching-stride traces over 20s video budget: "
+        f"{len(trace_result['matching_stride_over_budget'])}",
         "",
         "Trace JSON files do not include queue wait or total trigger-loop fields. Use",
         "`[TRIGGER-WORKER][LATENCY]` logs for full Jetson loop acceptance.",
@@ -216,6 +234,7 @@ def main() -> None:
     trace_result = summarize_trace_latency(
         list(ROOT.glob(args.trace_glob)),
         int(fixture["metadata"]["latency_budget_ms"]),
+        int(fixture["metadata"]["frame_stride"]),
     )
     write_report(
         fixture=fixture,
@@ -227,11 +246,11 @@ def main() -> None:
         f"verified={scenario_result['verified_cases']} "
         f"failures={len(scenario_result['failures'])} "
         f"elapsed_ms={scenario_result['elapsed_ms']} "
-        f"stride2_traces={trace_result['stride2_trace_count']}"
+        f"matching_stride_traces={trace_result['matching_stride_trace_count']}"
     )
     if scenario_result["failures"] or not scenario_result["within_latency_budget"]:
         raise SystemExit(1)
-    if trace_result["stride2_over_budget"]:
+    if trace_result["matching_stride_over_budget"]:
         raise SystemExit(1)
 
 

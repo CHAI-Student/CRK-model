@@ -1,5 +1,24 @@
 # LLM Wiki Log
 
+## [2026-07-02] maintenance | freezer template threshold 0.50
+
+- Lowered the copyable freezer `.env.example` product thresholds back to
+  `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50`.
+- Kept code defaults and explicit test monkeypatches separate from the
+  deployment template; the template parser now expects the `0.50/0.50`
+  freezer field profile.
+
+## [2026-07-02] maintenance | default frame stride 1
+
+- Updated async streaming policy: `MODEL__ASYNC_STREAMING__FRAME_STRIDE=1` is
+  the accuracy-first default and runs YOLO on every decoded frame.
+- Kept `frame_stride=2` as an env-only latency rollback; settings now reject
+  values outside `1` and `2`.
+- Recorded that trace and scenario latency evidence should be read against the
+  configured frame stride, with stride-1 Jetson traces required for production
+  timing proof under the new default.
+
 ## [2026-07-02] maintenance | freezer location-aware returns
 
 - Added freezer `channel_movement_targets` documentation. The stricter

@@ -598,8 +598,11 @@ class AsyncStreamingModel(BaseModel):
         description="프레임 큐 최대 크기 (Top/Side 인터리빙용)",
     )
     frame_stride: int = Field(
-        default=2,
-        description="Fixed async streaming frame stride. Only 2 is supported.",
+        default=1,
+        description=(
+            "Async streaming frame stride. Use 1 for all frames or 2 for "
+            "latency rollback."
+        ),
     )
     early_termination_enabled: bool = Field(
         default=False,
@@ -623,10 +626,11 @@ class AsyncStreamingModel(BaseModel):
         return value
 
     @field_validator("frame_stride", mode="after")
-    def validate_fixed_frame_stride(cls, value: int) -> int:
-        if int(value) != 2:
-            raise ValueError("frame_stride is fixed at 2")
-        return 2
+    def validate_frame_stride(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized not in (1, 2):
+            raise ValueError("frame_stride must be 1 or 2")
+        return normalized
 
 
 class TraceModel(BaseModel):

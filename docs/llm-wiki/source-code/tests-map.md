@@ -50,7 +50,7 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   freezer endpoint fallback trace metadata.
 - [test_scenario_matrix_contract.py](../../../services/model/tests/test_scenario_matrix_contract.py):
   Excel-derived scenario fixture counts, all 924 expanded model-contract
-  basket judgments, stride-2 latency evidence shape, and explicit 0g payload
+  basket judgments, frame-stride latency evidence shape, and explicit 0g payload
   diagnostic branches.
 - [test_trigger_pipeline_regressions.py](../../../services/model/tests/test_trigger_pipeline_regressions.py):
   async frame reads, zero-frame retry, ffprobe polling, loadcell channel

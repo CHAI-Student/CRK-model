@@ -173,8 +173,8 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__VISION__TOP_ROI_Y_SPLIT=240.0`; top-camera ROI uses bbox
   `center_y` with image top at `0`, and non-zero removal/return deltas both
   keep the lower region.
-- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70` are the current freezer field
+- `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50` are the current freezer field
   product vote floors. In freezer mode, product detections below the relevant
   raw/max camera floor cannot become regular votes, threshold/ROI rescue,
   weight-gated rescue, stage-count fallback, diagnostic fallback identity
@@ -198,10 +198,10 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
 - `MODEL__VISION__ROI_RESCUE_REQUIRE_MOTION=true` and
   `MODEL__VISION__ROI_RESCUE_MAX_OVER_LIMIT_PX=0.0` keep right-side/static
   ROI-filtered detections from re-entering as rescue candidates.
-- `MODEL__ASYNC_STREAMING__FRAME_STRIDE=2`; this is fixed and is the only
-  accepted async streaming stride.
-- `docs/jetson-stride2.env.txt` is now aligned with the fixed default and
-  remains as a copy-paste deployment template.
+- `MODEL__ASYNC_STREAMING__FRAME_STRIDE=1`; this accuracy-first default runs
+  YOLO on every decoded frame. Set `2` only as a latency rollback.
+- `docs/jetson-stride2.env.txt` remains a copy-paste rollback template for
+  latency-first field operation.
 
 ## Validators And Safety
 
@@ -211,7 +211,7 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   `letterbox`.
 - Camera layout must be `legacy_top_side` or `dual_top_proxy`.
 - Catalog source policy must be `node_first` or `static_mapping_compat`.
-- Frame queue size must be positive. Frame stride must be exactly `2`.
+- Frame queue size must be positive. Frame stride must be `1` or `2`.
 - Video readiness waits and door-session waits must be non-negative.
 - Trace sample count must be non-negative.
 

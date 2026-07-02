@@ -39,11 +39,12 @@ TensorRT runtime proof.
 
 ## Latency Contract
 
-- Scenario fixture metadata records `frame_stride=2` and a 20,000 ms latency
+- Scenario fixture metadata records `frame_stride=1` and a 20,000 ms latency
   budget.
 - `scenario_verification_report.md` currently records all 924 model-contract
-  cases passing in 60.75 ms of engine decision time, plus 4 available stride-2
-  trace JSONs with max video processing time 11,075.6 ms.
+  cases passing in 60.75 ms of engine decision time. Trace latency evidence is
+  grouped by the fixture's expected frame stride so old stride-2 traces do not
+  masquerade as stride-1 Jetson evidence.
 - Contract tests require latency evidence fields used by
   `[TRIGGER-WORKER][LATENCY]`: queue wait, video time, video stats time,
   frame stride, original/processed/skipped frames, YOLO total/average/count,

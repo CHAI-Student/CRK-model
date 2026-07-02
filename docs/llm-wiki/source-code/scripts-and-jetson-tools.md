@@ -40,7 +40,7 @@ developer PC can validate TensorRT runtime behavior.
   committed scenario JSON fixture, and refreshes the human fixture report.
 - [verify_scenario_readiness.py](../../../scripts/verify_scenario_readiness.py):
   local contract verifier for the committed scenario fixture plus optional
-  stride-2 trace latency evidence summary.
+  configured-stride trace latency evidence summary.
 
 ## Jetson Setup Flow
 

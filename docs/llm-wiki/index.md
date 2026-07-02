@@ -24,8 +24,8 @@ shape without rereading every long historical document.
 - [Latency and frame stride](synthesis/latency-and-frame-stride.md): current
   latency work, telemetry, and `frame_stride` tradeoffs.
 - [Scenario readiness and 0g diagnostics](synthesis/scenario-readiness-and-0g.md):
-  Excel scenario fixture coverage, strict combination limits, stride-2 latency
-  contract, and payment-path 0g diagnostics.
+  Excel scenario fixture coverage, strict combination limits, frame-stride
+  latency contract, and payment-path 0g diagnostics.
 
 ## Current Operating Rules
 
@@ -107,8 +107,8 @@ shape without rereading every long historical document.
 - Python service code defaults still point at `models/0204_morning.engine`, but
   the current copyable `.env.example` is freezer-field oriented and overrides
   the engine path to `models/set9_imbalance_16.engine`. Current freezer product
-  vote floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
-  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70`; hand tracking uses the
+  vote floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.50` and
+  `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.50`; hand tracking uses the
   separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` with hand class id
   `0`, but freezer `dual_top_proxy` only includes hand class `0` for the
   physical `top_middle` stream. The physical `top_side` stream remains
@@ -126,7 +126,7 @@ shape without rereading every long historical document.
   template uses the upper half
   (`MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper`,
   `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT`, default `240`). It applies
-  stronger motion/vote floors and a `0.70` raw product confidence floor, while
+  stronger motion/vote floors and a `0.50` raw product confidence floor, while
   hand detections are filtered independently at `0.40`. Threshold/stage/
   diagnostic fallback evidence below the product floor cannot create freezer
   product identity. `freezer_roi_passed` increments exit-path votes; rejected

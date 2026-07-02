@@ -190,7 +190,7 @@ def build_fixture(performance_xlsx: Path, scenario_xlsx: Path) -> dict[str, Any]
                 "performance": performance_xlsx.name,
                 "scenario_breakdown": scenario_xlsx.name,
             },
-            "frame_stride": 2,
+            "frame_stride": 1,
             "latency_budget_ms": 20_000,
             "expanded_case_count": len(scenario_cases),
             "checklist_row_count": len(checklist_rows),
