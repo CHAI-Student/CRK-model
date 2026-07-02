@@ -95,6 +95,58 @@ class TestCrossZoneReturn:
         assert zone2_session.cross_zone_returns[0].product_name == "치킨마요"
         assert zone2_session.cross_zone_returns[0].source_zone == 2
 
+    def test_freezer_cross_zone_return_prefers_same_channel_side(self, store):
+        """Freezer return target keeps side metadata across cross-zone repair."""
+        trigger1 = self._create_removal_trigger(
+            zone=1, delta=-365.0, product_id=26, name="移섑궓留덉슂", count=1
+        )
+        trigger1.products[0].placement_units = [
+            {
+                "zone": 1,
+                "channelSide": "left",
+                "channelIndex": 0,
+                "channelPosition": 0,
+                "sourceTriggerId": "trigger_001",
+                "sourceTimestamp": 10.0,
+            }
+        ]
+        trigger1.timestamp = 10.0
+        store.add_trigger(zone=1, result=trigger1)
+
+        trigger2 = self._create_return_trigger(zone=2, delta=365.0)
+        trigger2.timestamp = 20.0
+        trigger2.loadcell_diagnostics = {
+            "channel_movement_targets": [
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "return",
+                    "weight": 365.0,
+                    "delta": 365.0,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                }
+            ]
+        }
+        store.add_trigger(zone=2, result=trigger2)
+
+        zone1_session = store.get_session(zone=1)
+        zone2_session = store.get_session(zone=2)
+
+        assert zone1_session.aggregated_products[26].count == 0
+        assert zone1_session.aggregated_products[26].placement_units == []
+        assert zone2_session.unmatched_returns == []
+        assert len(zone2_session.cross_zone_returns) == 1
+        assert zone2_session.cross_zone_returns[0].target_zone == 1
+        diagnostics = zone2_session.final_weight_validation[
+            "freezerLocationReturnReconciliation"
+        ]
+        assert diagnostics["accepted"] is True
+        cross_zone_item = next(
+            item for item in diagnostics["items"] if "matchTier" in item
+        )
+        assert cross_zone_item["matchTier"] == "other_zone_same_side"
+
     def test_cross_zone_return_after_source_zone_removal_preserves_source_purchase(
         self, store
     ):

@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from model_service.core.config import config
 from model_service.weight.strict_weight_matcher import StrictWeightMatcher
 
 from .door_session import (
@@ -50,6 +51,7 @@ class AggregationResult:
     products: Dict[int, AggregatedProduct] = field(default_factory=dict)
     unmatched_returns: List[UnmatchedReturn] = field(default_factory=list)
     deferred_returns: List[DeferredReturn] = field(default_factory=list)
+    location_return_diagnostics: List[dict[str, object]] = field(default_factory=list)
 
 
 class ProductAggregator:
@@ -79,6 +81,8 @@ class ProductAggregator:
     def aggregate(
         self,
         triggers: List[TriggerResult],
+        *,
+        zone: Optional[int] = None,
     ) -> Dict[int, AggregatedProduct]:
         """
         여러 TriggerResult의 상품을 통합.
@@ -97,12 +101,14 @@ class ProductAggregator:
             하위 호환성을 위해 Dict만 반환합니다.
             unmatched_returns가 필요하면 aggregate_with_unmatched() 사용.
         """
-        result = self.aggregate_with_unmatched(triggers)
+        result = self.aggregate_with_unmatched(triggers, zone=zone)
         return result.products
 
     def aggregate_with_unmatched(
         self,
         triggers: List[TriggerResult],
+        *,
+        zone: Optional[int] = None,
     ) -> AggregationResult:
         """
         여러 TriggerResult의 상품을 통합 (unmatched_returns 포함, v4.2).
@@ -121,6 +127,7 @@ class ProductAggregator:
         aggregated: Dict[int, AggregatedProduct] = {}
         unmatched_returns: List[UnmatchedReturn] = []
         deferred_returns: List[DeferredReturn] = []
+        location_return_diagnostics: List[dict[str, object]] = []
 
         # Replay by event timestamp rather than completion order. Loadcell-only
         # returns can finish before video-backed removals that happened earlier.
@@ -134,7 +141,15 @@ class ProductAggregator:
         for trigger in ordered_triggers:
             if trigger.is_return:
                 # 반환 처리: 무게 매칭하여 차감
-                matched_id = self._handle_return(aggregated, trigger.delta_weight)
+                matched_id = self._handle_freezer_location_return(
+                    aggregated,
+                    unmatched_returns,
+                    trigger,
+                    source_zone=zone,
+                    diagnostics=location_return_diagnostics,
+                )
+                if matched_id is None:
+                    matched_id = self._handle_return(aggregated, trigger.delta_weight)
                 if matched_id is None:
                     # 매칭 실패 → 기록
                     self._record_deferred_return(
@@ -167,6 +182,7 @@ class ProductAggregator:
             products=aggregated,
             unmatched_returns=unmatched_returns,
             deferred_returns=deferred_returns,
+            location_return_diagnostics=location_return_diagnostics,
         )
 
     def _record_unmatched_return(
@@ -186,6 +202,10 @@ class ProductAggregator:
         unmatched_returns: List[UnmatchedReturn],
         trigger: TriggerResult,
         delta_weight: float,
+        *,
+        target: Optional[dict[str, object]] = None,
+        source_zone: Optional[int] = None,
+        source: str = "positive_return",
     ) -> None:
         """Persist an unmatched return delta tied to the source trigger."""
         unmatched_returns.append(
@@ -194,6 +214,23 @@ class ProductAggregator:
                 delta_weight=delta_weight,
                 timestamp=trigger.timestamp,
                 tolerance_used=self._weight_tolerance,
+                channel_side=(
+                    str(target.get("channel_side"))
+                    if isinstance(target, dict) and target.get("channel_side") is not None
+                    else None
+                ),
+                channel_index=(
+                    int(target["channel_index"])
+                    if isinstance(target, dict) and target.get("channel_index") is not None
+                    else None
+                ),
+                channel_position=(
+                    int(target["channel_position"])
+                    if isinstance(target, dict) and target.get("channel_position") is not None
+                    else None
+                ),
+                source_zone=source_zone,
+                source=source,
             )
         )
 
@@ -205,6 +242,8 @@ class ProductAggregator:
         source: str,
         replay_position: str,
         delta_weight: Optional[float] = None,
+        target: Optional[dict[str, object]] = None,
+        source_zone: Optional[int] = None,
     ) -> None:
         """Persist a return delta for CLOSE-only reconciliation."""
         deferred_returns.append(
@@ -217,6 +256,22 @@ class ProductAggregator:
                 source=source,
                 replay_position=replay_position,
                 tolerance_used=self._weight_tolerance,
+                channel_side=(
+                    str(target.get("channel_side"))
+                    if isinstance(target, dict) and target.get("channel_side") is not None
+                    else None
+                ),
+                channel_index=(
+                    int(target["channel_index"])
+                    if isinstance(target, dict) and target.get("channel_index") is not None
+                    else None
+                ),
+                channel_position=(
+                    int(target["channel_position"])
+                    if isinstance(target, dict) and target.get("channel_position") is not None
+                    else None
+                ),
+                source_zone=source_zone,
             )
         )
 
@@ -260,6 +315,69 @@ class ProductAggregator:
             return 1
         return estimated_count
 
+    def _placement_units_for_product(
+        self,
+        product: ProductResult,
+        trigger: TriggerResult,
+    ) -> List[dict[str, object]]:
+        count = max(0, int(product.count))
+        units = [
+            dict(unit)
+            for unit in getattr(product, "placement_units", []) or []
+            if isinstance(unit, dict)
+        ][:count]
+        unit_weight = self._get_weight_for_product(product)
+        while len(units) < count:
+            units.append(
+                {
+                    "product_id": int(product.product_id),
+                    "product_idx": product.product_idx,
+                    "name": product.name,
+                    "unitWeight": round(float(unit_weight), 1),
+                    "zone": None,
+                    "sourceTriggerId": trigger.trigger_id,
+                    "sourceSessionId": trigger.session_id,
+                    "sourceTimestamp": trigger.timestamp,
+                    "channelSide": "unknown",
+                    "source": "aggregator_synthesized",
+                }
+            )
+        for unit in units:
+            unit.setdefault("product_id", int(product.product_id))
+            unit.setdefault("product_idx", product.product_idx)
+            unit.setdefault("name", product.name)
+            unit.setdefault("unitWeight", round(float(unit_weight), 1))
+            unit.setdefault("sourceTriggerId", trigger.trigger_id)
+            unit.setdefault("sourceSessionId", trigger.session_id)
+            unit.setdefault("sourceTimestamp", trigger.timestamp)
+            unit.setdefault("channelSide", "unknown")
+        return units
+
+    @staticmethod
+    def _remove_product_units(
+        product: AggregatedProduct,
+        count: int,
+        *,
+        selected_units: Optional[List[dict[str, object]]] = None,
+    ) -> None:
+        if count <= 0:
+            return
+        if selected_units:
+            remaining = list(product.placement_units)
+            for selected in selected_units[:count]:
+                remove_index: Optional[int] = None
+                for index, unit in enumerate(remaining):
+                    if unit is selected or unit == selected:
+                        remove_index = index
+                        break
+                if remove_index is not None:
+                    remaining.pop(remove_index)
+                elif remaining:
+                    remaining.pop()
+            product.placement_units = remaining
+            return
+        product.placement_units = list(product.placement_units)[: max(0, product.count)]
+
     def _handle_removal(
         self,
         aggregated: Dict[int, AggregatedProduct],
@@ -277,6 +395,7 @@ class ProductAggregator:
                 continue
 
             product_id = product.product_id
+            placement_units = self._placement_units_for_product(product, trigger)
 
             if product_id in aggregated:
                 # 기존 상품에 합산
@@ -284,6 +403,7 @@ class ProductAggregator:
                 agg.count += product.count
                 agg.total_confidence += product.confidence * product.count
                 agg.detection_count += product.count
+                agg.placement_units.extend(placement_units)
             else:
                 # 새 상품 추가
                 aggregated[product_id] = AggregatedProduct(
@@ -295,12 +415,207 @@ class ProductAggregator:
                     weight=self._get_weight_for_product(product),
                     total_confidence=product.confidence * product.count,
                     detection_count=product.count,
+                    placement_units=placement_units,
                 )
 
             logger.debug(
                 f"Added product: {product.name} x{product.count} "
                 f"(id={product_id}, total={aggregated[product_id].count})"
             )
+
+    @staticmethod
+    def _unit_channel_side(unit: dict[str, object]) -> str:
+        return str(unit.get("channelSide") or unit.get("channel_side") or "unknown")
+
+    @staticmethod
+    def _unit_zone(unit: dict[str, object]) -> Optional[int]:
+        try:
+            raw_zone = unit.get("zone")
+            return int(raw_zone) if raw_zone is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _positive_channel_return_targets(
+        trigger: TriggerResult,
+    ) -> List[dict[str, object]]:
+        diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+        if not isinstance(diagnostics, dict):
+            return []
+        targets: List[dict[str, object]] = []
+        for entry in diagnostics.get("channel_movement_targets") or []:
+            if not isinstance(entry, dict):
+                continue
+            direction = str(entry.get("direction", "")).lower()
+            try:
+                delta = float(entry.get("delta", 0.0) or 0.0)
+                weight = abs(float(entry.get("weight", delta) or delta))
+            except (TypeError, ValueError):
+                continue
+            if weight <= 0:
+                continue
+            if direction == "return" or delta > 0:
+                target = dict(entry)
+                target["weight"] = round(weight, 1)
+                targets.append(target)
+        return targets
+
+    def _freezer_return_tolerance(self) -> float:
+        return max(
+            float(self._weight_tolerance),
+            float(config.weight.freezer_weight_tolerance_grams),
+        )
+
+    def _find_same_zone_location_return_match(
+        self,
+        aggregated: Dict[int, AggregatedProduct],
+        *,
+        target: dict[str, object],
+        source_zone: Optional[int],
+    ) -> Optional[dict[str, object]]:
+        target_weight = abs(float(target.get("weight", 0.0) or 0.0))
+        if target_weight <= 0:
+            return None
+        target_side = str(target.get("channel_side") or "unknown")
+        tolerance = self._freezer_return_tolerance()
+        tiers = [
+            ("same_zone_same_side", True),
+            ("same_zone_other_side", False),
+        ]
+        for tier_name, same_side in tiers:
+            matches: List[dict[str, object]] = []
+            for product_id, product in aggregated.items():
+                if product.count <= 0 or product.weight <= 0:
+                    continue
+                product_units = [
+                    unit
+                    for unit in product.placement_units
+                    if isinstance(unit, dict)
+                    and (
+                        source_zone is None
+                        or self._unit_zone(unit) in {None, int(source_zone)}
+                    )
+                    and (
+                        self._unit_channel_side(unit) == target_side
+                        if same_side
+                        else self._unit_channel_side(unit) != target_side
+                    )
+                ]
+                if not product_units:
+                    continue
+                product_units = sorted(
+                    product_units,
+                    key=lambda unit: float(unit.get("sourceTimestamp", 0.0) or 0.0),
+                    reverse=True,
+                )
+                max_count = min(product.count, len(product_units))
+                for count in range(1, max_count + 1):
+                    expected = float(product.weight) * count
+                    residual = abs(expected - target_weight)
+                    if residual > tolerance:
+                        continue
+                    latest_timestamp = max(
+                        float(unit.get("sourceTimestamp", 0.0) or 0.0)
+                        for unit in product_units[:count]
+                    )
+                    matches.append(
+                        {
+                            "product_id": int(product_id),
+                            "product": product,
+                            "count": int(count),
+                            "expected": expected,
+                            "residual": residual,
+                            "tier": tier_name,
+                            "units": product_units[:count],
+                            "latestTimestamp": latest_timestamp,
+                        }
+                    )
+            if matches:
+                return min(
+                    matches,
+                    key=lambda item: (
+                        int(item["count"]),
+                        float(item["residual"]),
+                        -float(item["latestTimestamp"]),
+                    ),
+                )
+        return None
+
+    def _handle_freezer_location_return(
+        self,
+        aggregated: Dict[int, AggregatedProduct],
+        unmatched_returns: List[UnmatchedReturn],
+        trigger: TriggerResult,
+        *,
+        source_zone: Optional[int],
+        diagnostics: List[dict[str, object]],
+    ) -> Optional[int]:
+        targets = self._positive_channel_return_targets(trigger)
+        if not targets:
+            return None
+
+        reconciliation = {
+            "triggerId": trigger.trigger_id,
+            "sourceZone": source_zone,
+            "policy": "freezer_location_return_same_zone_first",
+            "targets": [],
+        }
+        matched_product_ids: List[int] = []
+        for target in targets:
+            target_diag = {
+                "channelSide": target.get("channel_side"),
+                "channelIndex": target.get("channel_index"),
+                "channelPosition": target.get("channel_position"),
+                "targetWeight": round(float(target.get("weight", 0.0) or 0.0), 1),
+                "accepted": False,
+            }
+            match = self._find_same_zone_location_return_match(
+                aggregated,
+                target=target,
+                source_zone=source_zone,
+            )
+            if match is None:
+                self._record_unmatched_return_delta(
+                    unmatched_returns,
+                    trigger,
+                    float(target.get("weight", trigger.delta_weight) or trigger.delta_weight),
+                    target=target,
+                    source_zone=source_zone,
+                    source="freezer_location_return",
+                )
+                target_diag["reason"] = "no_same_zone_location_match"
+                reconciliation["targets"].append(target_diag)
+                continue
+
+            product = match["product"]
+            count = int(match["count"])
+            product.count = max(0, int(product.count) - count)
+            self._remove_product_units(
+                product,
+                count,
+                selected_units=match["units"],
+            )
+            matched_product_ids.append(int(match["product_id"]))
+            target_diag.update(
+                {
+                    "accepted": True,
+                    "matchTier": match["tier"],
+                    "matchedProductId": int(match["product_id"]),
+                    "matchedProductName": product.name,
+                    "matchedCount": count,
+                    "matchedWeight": round(float(match["expected"]), 1),
+                    "residual": round(float(match["residual"]), 1),
+                }
+            )
+            reconciliation["targets"].append(target_diag)
+
+        reconciliation["accepted"] = bool(matched_product_ids)
+        diagnostics.append(reconciliation)
+        trigger.loadcell_diagnostics.setdefault(
+            "freezerLocationReturnReconciliation",
+            [],
+        ).append(reconciliation)
+        return matched_product_ids[0] if matched_product_ids else -1
 
     def _handle_return(
         self,
@@ -348,6 +663,7 @@ class ProductAggregator:
                 # inventory than is currently aggregated.
                 estimated_count = 1
                 agg.count = max(0, agg.count - 1)
+                self._remove_product_units(agg, estimated_count)
                 logger.info(
                     f"Return processed: {agg.name} x{estimated_count} "
                     f"(delta={delta_weight:.1f}g, unit={agg.weight:.1f}g, "
@@ -461,6 +777,8 @@ class ProductAggregator:
         unmatched_returns: List[UnmatchedReturn],
         trigger: TriggerResult,
         deferred_returns: Optional[List[DeferredReturn]] = None,
+        *,
+        zone: Optional[int] = None,
     ) -> Tuple[Dict[int, AggregatedProduct], List[UnmatchedReturn]]:
         """
         단일 trigger를 증분 추가 (v4.2).
@@ -477,7 +795,15 @@ class ProductAggregator:
         """
         if trigger.is_return:
             # 반환 처리: 무게 매칭하여 차감
-            matched_id = self._handle_return(aggregated, trigger.delta_weight)
+            matched_id = self._handle_freezer_location_return(
+                aggregated,
+                unmatched_returns,
+                trigger,
+                source_zone=zone,
+                diagnostics=[],
+            )
+            if matched_id is None:
+                matched_id = self._handle_return(aggregated, trigger.delta_weight)
             if matched_id is None:
                 # 매칭 실패 → 기록
                 if deferred_returns is None:

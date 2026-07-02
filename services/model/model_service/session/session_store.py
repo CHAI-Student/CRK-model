@@ -37,6 +37,7 @@ class ProductResult:
     price: int
     confidence: float
     product_idx: Optional[str] = None  # IF11 product_idx (Node.js 응답용)
+    placement_units: List[dict] = field(default_factory=list)
 
 
 @dataclass

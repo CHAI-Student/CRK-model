@@ -113,14 +113,25 @@ Important inputs:
   The operating assumption is one product group per physical loadcell:
   left/right loadcells on one freezer shelf may hold different product groups,
   but one shelf trigger should produce at most two product groups. When
-  `loadcell.channel_removal_segment_targets` exists, `freezer_vision_first`
-  first locks any channel target that fits a visual candidate as `x1`, then
-  solves the remaining channel targets as same-product multiples from the
-  remaining visual candidates. For example, left `100g` and right `120g` with
-  visual candidates `50g` and `120g` selects right `120g x1` first and then
-  left `50g x2`. If both left/right channels fit the same product as `x1`,
-  the output products merge those selections into one product judgment such as
+  `loadcell.channel_removal_segment_targets` exists, or when freezer
+  `channel_movement_targets` expose one or two negative channel movements,
+  `freezer_vision_first` solves those channel targets before aggregate
+  candidate-pool solving. It first locks any channel target that fits a visual
+  candidate as `x1`, then solves remaining channel targets as same-product
+  multiples from the remaining visual candidates. For example, left `100g` and
+  right `120g` with visual candidates `50g` and `120g` selects right
+  `120g x1` first and then left `50g x2`; a single left `100g` target can
+  select `50g x2` without requiring a right-side movement. Distinct left/right
+  product groups are preferred. Reusing the same product on both sides is
+  fallback-only, recorded as `sameProductLeftRightFallback`, and public output
+  still merges same-product selections into one product judgment such as
   `Bagel x2`.
+- Freezer `ProductJudgment` can carry internal placement units for each
+  charged item. The public judgment schema does not expose them, but
+  `TriggerService` and DoorSession persistence preserve zone, channel side,
+  channel index/position, target weight, source trigger/session, product id,
+  product index, and unit weight so later returns can undo the correct physical
+  loadcell unit.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
   `weight_used_as=combination_validation` or `diagnostic`,
   `weight_reliable`, `weight_residual`, `selectionTier`,

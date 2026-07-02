@@ -38,6 +38,11 @@ while the door is open.
   return/removal loadcell triggers and compact `loadcell_diagnostics` for
   freezer signed-net CLOSE aggregate eligibility, without changing the HTTP
   response schema.
+- `ProductJudgment`, `ProductResult`, and `AggregatedProduct` can carry
+  internal freezer placement units. These units are persisted in DoorSession
+  YAML but not exposed in public `SessionData.to_dict()` product responses.
+  They record the charged item's zone, channel side/index/position, channel
+  target weight, product id/index, unit weight, and source trigger/session.
 - `TriggerResult.vision_candidates` stores a compact close-correction snapshot
   of ranked candidates joined with active product weight, price, stock, and
   top/side evidence. Old YAML without this field still restores with an empty
@@ -65,6 +70,14 @@ while the door is open.
   immediately. Same-product `x2+`, multi-product combinations, cross-zone
   candidates, and internal `return_weight_hints` are stored as
   `deferred_returns` instead of mutating the live basket.
+- Freezer positive-only returns first use placement units when
+  `channel_movement_targets` expose a positive left/right target. The matching
+  order is same zone + same side, same zone + other side, other zone + same
+  side, then other zone + any side. Within a tier, the matcher accepts only
+  product-unit counts whose weight fits freezer tolerance, preferring fewer
+  units, lower residual, and the latest removal unit. Matched returns decrement
+  both product counts and placement units; unmatched returns remain diagnostic
+  and do not create active-only products.
 - Negative triggers with `return_weight_hints` preserve those hints by segment
   position for CLOSE reconciliation. They are no longer replayed into the
   intermediate basket, because doing so can hide the actual final delta.
@@ -78,7 +91,9 @@ while the door is open.
   into bounded unit candidates, then matches unresolved return deltas against
   deterministic combinations at CLOSE. This covers one item, same-product
   multi-count, multi-product bundles, and bundles originally removed from
-  multiple zones without changing the intermediate same-zone basket.
+  multiple zones without changing the intermediate same-zone basket. When a
+  freezer unmatched return has channel-side metadata, cross-zone repair first
+  searches other zones with the same side before falling back to any side.
 - Cross-zone repair is all-or-nothing for each unmatched return trigger. If no
   complete combination is within tolerance, the return stays unmatched instead
   of partially hiding raw weight.
@@ -154,6 +169,9 @@ while the door is open.
   `globalNetDelta`, final target, output zone, trigger-selected weight,
   selected products, residual, no-charge reason when applicable, role, and
   weight delta override for no-charge/rerouted fallback cases.
+- `final_weight_validation.freezerLocationReturnReconciliation` records
+  freezer return targets, match tiers, matched products/counts, residuals, and
+  unmatched reasons for same-zone and cross-zone location-aware returns.
 
 ## ActiveProductStore
 

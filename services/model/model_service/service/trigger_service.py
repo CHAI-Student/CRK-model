@@ -694,6 +694,7 @@ class TriggerService:
                     "purchase_delta_candidates": [],
                     "removal_segment_targets": [],
                     "channel_removal_segment_targets": [],
+                    "channel_movement_targets": [],
                     "channel_delta_diagnostics": {},
                     "return_segment_targets": [],
                     "vision_required_segment_targets": [],
@@ -757,6 +758,9 @@ class TriggerService:
                 "removal_segment_targets": list(delta_analysis.removal_segment_targets),
                 "channel_removal_segment_targets": list(
                     delta_analysis.channel_removal_segment_targets
+                ),
+                "channel_movement_targets": list(
+                    delta_analysis.channel_movement_targets
                 ),
                 "channel_delta_diagnostics": dict(
                     delta_analysis.channel_delta_diagnostics
@@ -2884,17 +2888,25 @@ class TriggerService:
             confidence=result.confidence,
         )
         # 7. SessionStore에 결과 저장
-        products = [
-            ProductResult(
-                product_id=p.product_id,
-                product_idx=self._get_product_idx(p.product_id, active_products),
-                name=p.name,
-                count=p.count,
-                price=p.unit_price,
-                confidence=p.confidence,
+        products = []
+        for p in filtered_engine_products:
+            product_idx = self._get_product_idx(p.product_id, active_products)
+            products.append(
+                ProductResult(
+                    product_id=p.product_id,
+                    product_idx=product_idx,
+                    name=p.name,
+                    count=p.count,
+                    price=p.unit_price,
+                    confidence=p.confidence,
+                    placement_units=self._placement_units_for_product(
+                        p,
+                        zone=input_data.zone,
+                        session_id=session_id,
+                        product_idx=product_idx,
+                    ),
+                )
             )
-            for p in filtered_engine_products
-        ]
 
         final_total_price = sum(p.price * p.count for p in products)
         trace_context.record_storage_result(
@@ -3468,17 +3480,25 @@ class TriggerService:
             confidence=result.confidence,
         )
         # 8. SessionStore에 결과 저장
-        products = [
-            ProductResult(
-                product_id=p.product_id,
-                product_idx=self._get_product_idx(p.product_id, active_products),
-                name=p.name,
-                count=p.count,
-                price=p.unit_price,
-                confidence=p.confidence,
+        products = []
+        for p in filtered_engine_products:
+            product_idx = self._get_product_idx(p.product_id, active_products)
+            products.append(
+                ProductResult(
+                    product_id=p.product_id,
+                    product_idx=product_idx,
+                    name=p.name,
+                    count=p.count,
+                    price=p.unit_price,
+                    confidence=p.confidence,
+                    placement_units=self._placement_units_for_product(
+                        p,
+                        zone=input_data.zone,
+                        session_id=session_id,
+                        product_idx=product_idx,
+                    ),
+                )
             )
-            for p in filtered_engine_products
-        ]
 
         # v4.6: 필터링 후 총 가격 재계산
         final_total_price = sum(p.price * p.count for p in products)
@@ -3604,6 +3624,55 @@ class TriggerService:
         if not top_path and not side_path:
             return "At least one video path (top or side) is required"
         return None
+
+    @staticmethod
+    def _placement_units_for_product(
+        product: object,
+        *,
+        zone: int,
+        session_id: str,
+        product_idx: Optional[str],
+    ) -> List[dict[str, object]]:
+        try:
+            count = max(0, int(getattr(product, "count", 0)))
+        except (TypeError, ValueError):
+            count = 0
+        raw_units = getattr(product, "placement_units", []) or []
+        units = [
+            dict(unit)
+            for unit in raw_units
+            if isinstance(unit, dict)
+        ][:count]
+        for unit in units:
+            unit.setdefault("zone", int(zone))
+            unit.setdefault("sourceSessionId", session_id)
+            unit.setdefault("product_id", int(getattr(product, "product_id", 0)))
+            unit.setdefault("product_idx", product_idx)
+            unit.setdefault("name", str(getattr(product, "name", "")))
+            unit.setdefault(
+                "unitWeight",
+                round(float(getattr(product, "unit_weight", 0.0) or 0.0), 1),
+            )
+            unit.setdefault("channelSide", "unknown")
+            unit.setdefault("source", "engine_product_result")
+
+        while len(units) < count:
+            units.append(
+                {
+                    "zone": int(zone),
+                    "sourceSessionId": session_id,
+                    "product_id": int(getattr(product, "product_id", 0)),
+                    "product_idx": product_idx,
+                    "name": str(getattr(product, "name", "")),
+                    "unitWeight": round(
+                        float(getattr(product, "unit_weight", 0.0) or 0.0),
+                        1,
+                    ),
+                    "channelSide": "unknown",
+                    "source": "engine_product_result",
+                }
+            )
+        return units
 
     def _get_product_idx(
         self,

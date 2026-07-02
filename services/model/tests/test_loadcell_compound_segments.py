@@ -376,6 +376,52 @@ def test_history_rejects_channel_targets_when_only_one_channel_changes():
     assert analysis.channel_removal_segment_targets == []
     assert analysis.channel_delta_diagnostics["accepted"] is False
     assert analysis.channel_delta_diagnostics["reason"] == "insufficient_negative_channels"
+    assert analysis.channel_movement_targets == [
+        {
+            "source": "stable_channel_delta",
+            "direction": "removal",
+            "weight": 500.0,
+            "delta": -500.0,
+            "segment_index": 0,
+            "segment_indices": [0],
+            "channel_index": 0,
+            "channel_position": 0,
+            "channel_side": "left",
+            "reason": "channel_removal",
+            "start_timestamp": "2026-06-01T00:00:04+00:00",
+            "end_timestamp": "2026-06-01T00:00:05+00:00",
+            "duration_seconds": 0.0,
+        }
+    ]
+
+
+def test_history_exposes_positive_channel_return_target():
+    loadcells = (
+        _multi_channel_plateau(0, [1000.0, 2000.0])
+        + _multi_channel_plateau(5, [1000.0, 2120.0])
+    )
+
+    analysis = loadcell_stats.analyze_weight_delta(loadcells, window_size=2)
+
+    assert analysis.delta == 120.0
+    assert analysis.channel_removal_segment_targets == []
+    assert analysis.channel_movement_targets == [
+        {
+            "source": "stable_channel_delta",
+            "direction": "return",
+            "weight": 120.0,
+            "delta": 120.0,
+            "segment_index": 1,
+            "segment_indices": [1],
+            "channel_index": 1,
+            "channel_position": 1,
+            "channel_side": "right",
+            "reason": "channel_return",
+            "start_timestamp": "2026-06-01T00:00:04+00:00",
+            "end_timestamp": "2026-06-01T00:00:05+00:00",
+            "duration_seconds": 0.0,
+        }
+    ]
 
 
 def test_history_ignores_balanced_return_and_pressure_like_release():

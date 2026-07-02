@@ -83,7 +83,8 @@ start writing sample images during inference.
 - stable history and decision metadata:
   `stable_plateaus`, `purchase_delta_candidates`, `decision_delta_weight`,
   `net_delta_weight`, `removal_segment_targets`,
-  `channel_removal_segment_targets`, `channel_delta_diagnostics`,
+  `channel_removal_segment_targets`, `channel_movement_targets`,
+  `channel_delta_diagnostics`,
   `return_segment_targets`, `vision_required_segment_targets`,
   `paired_loadcell_movements`, `ignored_loadcell_movements`,
   `mixed_sign_net_masking_guard`, and `pressure_like_event`
@@ -292,6 +293,18 @@ rotation policy.
   non-freezer segment diagnostics, `target_source=channel_removal_segment_targets`
   with `reason=channel_supported_split_preferred` means the channel-supported
   basket beat an aggregate single rescue candidate.
+- In freezer mode, inspect `loadcell.channel_movement_targets` when only one
+  side moved or when a positive return should be tied back to a physical side.
+  Negative `direction=removal` entries can drive the freezer channel
+  product-group solver even when the stricter simultaneous
+  `channel_removal_segment_targets` list is empty. Positive
+  `direction=return` entries are used by DoorSession placement reconciliation.
+- If a freezer return was expected to undo an earlier removal, inspect
+  `final_weight_validation.freezerLocationReturnReconciliation`. The match
+  tier should show `same_zone_same_side`, `same_zone_other_side`,
+  `other_zone_same_side`, or `other_zone_any_side`, with matched products,
+  counts, residuals, and unmatched reasons. Placement units are internal YAML
+  metadata, so public API products still show only merged product/count lines.
 - Segment option diagnostics include evidence source, trusted/strong flags, and
   motion gate status when class evidence exists. They also include
   `stage_score`, `side_confidence`, `top_confidence`, `side_votes`,

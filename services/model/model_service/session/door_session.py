@@ -87,6 +87,7 @@ class TriggerResult:
                     "count": p.count,
                     "price": p.price,
                     "confidence": p.confidence,
+                    "placement_units": [dict(unit) for unit in p.placement_units],
                 }
                 for p in self.products
             ],
@@ -115,6 +116,11 @@ class TriggerResult:
                 count=p["count"],
                 price=p["price"],
                 confidence=p.get("confidence", 0.0),
+                placement_units=[
+                    dict(unit)
+                    for unit in p.get("placement_units", [])
+                    if isinstance(unit, dict)
+                ],
             )
             for p in data.get("products", [])
         ]
@@ -334,6 +340,11 @@ class UnmatchedReturn:
     delta_weight: float
     timestamp: float
     tolerance_used: float = 3.0
+    channel_side: Optional[str] = None
+    channel_index: Optional[int] = None
+    channel_position: Optional[int] = None
+    source_zone: Optional[int] = None
+    source: str = "positive_return"
 
     def to_dict(self) -> dict:
         """딕셔너리 변환."""
@@ -342,6 +353,11 @@ class UnmatchedReturn:
             "delta_weight": self.delta_weight,
             "timestamp": self.timestamp,
             "tolerance_used": self.tolerance_used,
+            "channel_side": self.channel_side,
+            "channel_index": self.channel_index,
+            "channel_position": self.channel_position,
+            "source_zone": self.source_zone,
+            "source": self.source,
         }
 
     @classmethod
@@ -352,6 +368,11 @@ class UnmatchedReturn:
             delta_weight=data["delta_weight"],
             timestamp=data["timestamp"],
             tolerance_used=data.get("tolerance_used", 3.0),
+            channel_side=data.get("channel_side"),
+            channel_index=data.get("channel_index"),
+            channel_position=data.get("channel_position"),
+            source_zone=data.get("source_zone"),
+            source=data.get("source", "positive_return"),
         )
 
 
@@ -365,6 +386,10 @@ class DeferredReturn:
     source: str = "positive_return"
     replay_position: str = "return"
     tolerance_used: float = 5.0
+    channel_side: Optional[str] = None
+    channel_index: Optional[int] = None
+    channel_position: Optional[int] = None
+    source_zone: Optional[int] = None
 
     def to_dict(self) -> dict:
         return {
@@ -374,6 +399,10 @@ class DeferredReturn:
             "source": self.source,
             "replay_position": self.replay_position,
             "tolerance_used": self.tolerance_used,
+            "channel_side": self.channel_side,
+            "channel_index": self.channel_index,
+            "channel_position": self.channel_position,
+            "source_zone": self.source_zone,
         }
 
     @classmethod
@@ -385,6 +414,10 @@ class DeferredReturn:
             source=data.get("source", "positive_return"),
             replay_position=data.get("replay_position", "return"),
             tolerance_used=data.get("tolerance_used", 5.0),
+            channel_side=data.get("channel_side"),
+            channel_index=data.get("channel_index"),
+            channel_position=data.get("channel_position"),
+            source_zone=data.get("source_zone"),
         )
 
 
@@ -467,6 +500,7 @@ class AggregatedProduct:
     weight: float
     total_confidence: float = 0.0
     detection_count: int = 0
+    placement_units: List[Dict[str, object]] = field(default_factory=list)
 
     @property
     def total_price(self) -> int:
@@ -492,6 +526,7 @@ class AggregatedProduct:
             "total_price": self.total_price,
             "average_confidence": round(self.average_confidence, 4),
             "detection_count": self.detection_count,
+            "placement_units": [dict(unit) for unit in self.placement_units],
         }
 
     @classmethod
@@ -506,6 +541,11 @@ class AggregatedProduct:
             weight=data["weight"],
             total_confidence=data.get("total_confidence", 0.0),
             detection_count=data.get("detection_count", 0),
+            placement_units=[
+                dict(unit)
+                for unit in data.get("placement_units", [])
+                if isinstance(unit, dict)
+            ],
         )
 
 

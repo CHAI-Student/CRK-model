@@ -44,7 +44,8 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   removal and return segment target extraction, mixed return-hint construction,
   compatibility `/trigger` return-hint parity, pressure-like vision-required
   targets, pressure-like pair suppression, simultaneous physical-channel
-  removal target extraction, rapid same-zone trace context, freezer mixed-sign
+  removal target extraction, one-sided `channel_movement_targets`, positive
+  channel return targets, rapid same-zone trace context, freezer mixed-sign
   stable-net preservation with diagnostics-only internal positive segments, and
   freezer endpoint fallback trace metadata.
 - [test_scenario_matrix_contract.py](../../../services/model/tests/test_scenario_matrix_contract.py):
@@ -101,7 +102,9 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   Freezer ordered solving covers trigger-priority candidate selection,
   distinct mixed baskets, prior-trigger fail-closed de-dupe, and left/right
   `channel_removal_segment_targets` where a `120g x1` channel is locked before
-  the remaining `50g x2` channel is solved.
+  the remaining `50g x2` channel is solved, plus single-side freezer
+  `channel_movement_targets` where one left `100g` channel can become
+  `50g x2`.
   strict mismatch, loadcell-only, rescue candidates, detected-single fallback,
   strict single-candidate source/rank priority, same-product repeated counts
   through x8, returned-weight hint ranking, and segment-first loadcell matching,
@@ -163,10 +166,12 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
   trigger replay, relaxed same-zone single return tolerance, mixed
   return/removal hint replay, return-hint count reduction, close-time
   unresolved final-weight mismatch exclusion, freezer signed-net mixed-sign
-  close aggregation, freezer no-fit no-charge clearing, and complex scenarios.
+  close aggregation, freezer no-fit no-charge clearing, freezer same-zone
+  same-side and other-side placement returns, and complex scenarios.
 - [test_cross_zone_return.py](../../../services/model/tests/test_cross_zone_return.py):
   cross-zone return repair, combination recovery scenarios, effective
-  net-delta order, and edge cases.
+  net-delta order, freezer same-side placement return fallback across zones,
+  and edge cases.
 - [test_multi_zone_summary.py](../../../services/model/tests/test_multi_zone_summary.py):
   close response decision summary, close latency defaults, and multi-zone active
   product snapshot guards, including effective cross-zone `weightDelta` output

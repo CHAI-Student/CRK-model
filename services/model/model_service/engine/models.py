@@ -166,6 +166,7 @@ class ProductJudgment:
     total_price: int
     confidence: float
     unit_weight: float = 0.0
+    placement_units: list[dict[str, object]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """딕셔너리 변환 (Node.js 형식)."""

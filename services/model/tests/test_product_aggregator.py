@@ -1122,3 +1122,112 @@ class TestProductAggregatorComplexScenarios:
         assert aggregated[15].count == 1
         assert aggregated[26].total_price == 3500
         assert aggregated[15].total_price == 3000
+
+
+class TestFreezerLocationReturnAggregation:
+    def _removal_trigger(self, *, side: str, product_id: int, weight: float):
+        from model_service.session import ProductResult
+        from model_service.session.door_session import TriggerResult
+
+        return TriggerResult(
+            trigger_id="trigger_001",
+            session_id="remove",
+            timestamp=10.0,
+            products=[
+                ProductResult(
+                    product_id=product_id,
+                    product_idx=f"P{product_id}",
+                    name=f"PRODUCT_{product_id}",
+                    count=1,
+                    price=1000,
+                    confidence=0.9,
+                    placement_units=[
+                        {
+                            "zone": 2,
+                            "channelSide": side,
+                            "channelIndex": 0 if side == "left" else 1,
+                            "channelPosition": 0 if side == "left" else 1,
+                            "sourceTriggerId": "trigger_001",
+                            "sourceTimestamp": 10.0,
+                        }
+                    ],
+                )
+            ],
+            delta_weight=-weight,
+            confidence=0.9,
+            video_paths={},
+            is_return=False,
+        )
+
+    def _return_trigger(self, *, side: str, weight: float):
+        from model_service.session.door_session import TriggerResult
+
+        return TriggerResult(
+            trigger_id="trigger_002",
+            session_id="return",
+            timestamp=20.0,
+            products=[],
+            delta_weight=weight,
+            confidence=0.0,
+            video_paths={},
+            is_return=True,
+            loadcell_diagnostics={
+                "channel_movement_targets": [
+                    {
+                        "source": "stable_channel_delta",
+                        "direction": "return",
+                        "weight": weight,
+                        "delta": weight,
+                        "channel_index": 0 if side == "left" else 1,
+                        "channel_position": 0 if side == "left" else 1,
+                        "channel_side": side,
+                    }
+                ]
+            },
+        )
+
+    def test_freezer_return_matches_same_zone_same_side_first(self):
+        from model_service.session.product_aggregator import ProductAggregator
+
+        aggregator = ProductAggregator(
+            weight_tolerance=5.0,
+            get_product_weight=lambda pid: {101: 70.0, 102: 70.0}.get(pid, 0.0),
+        )
+
+        result = aggregator.aggregate_with_unmatched(
+            [
+                self._removal_trigger(side="left", product_id=101, weight=70.0),
+                self._removal_trigger(side="right", product_id=102, weight=70.0),
+                self._return_trigger(side="left", weight=70.0),
+            ],
+            zone=2,
+        )
+
+        assert result.products[101].count == 0
+        assert result.products[102].count == 1
+        assert result.products[101].placement_units == []
+        assert result.unmatched_returns == []
+        diagnostics = result.location_return_diagnostics[0]
+        assert diagnostics["accepted"] is True
+        assert diagnostics["targets"][0]["matchTier"] == "same_zone_same_side"
+
+    def test_freezer_return_falls_back_to_same_zone_other_side(self):
+        from model_service.session.product_aggregator import ProductAggregator
+
+        aggregator = ProductAggregator(
+            weight_tolerance=5.0,
+            get_product_weight=lambda pid: {101: 70.0}.get(pid, 0.0),
+        )
+
+        result = aggregator.aggregate_with_unmatched(
+            [
+                self._removal_trigger(side="right", product_id=101, weight=70.0),
+                self._return_trigger(side="left", weight=70.0),
+            ],
+            zone=2,
+        )
+
+        assert result.products[101].count == 0
+        assert result.unmatched_returns == []
+        diagnostics = result.location_return_diagnostics[0]
+        assert diagnostics["targets"][0]["matchTier"] == "same_zone_other_side"

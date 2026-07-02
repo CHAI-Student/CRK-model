@@ -1,5 +1,21 @@
 # LLM Wiki Log
 
+## [2026-07-02] maintenance | freezer location-aware returns
+
+- Added freezer `channel_movement_targets` documentation. The stricter
+  `channel_removal_segment_targets` still means simultaneous multi-channel
+  removals, while `channel_movement_targets` also exposes one-sided removals
+  and positive return-side movements.
+- Recorded internal freezer placement units. Product judgments/results keep
+  one unit per charged item with zone, channel side/index/position, source
+  trigger/session, target weight, and product identity for DoorSession/YAML
+  recovery; public HTTP product schemas remain unchanged.
+- Added freezer return reconciliation by physical placement. Positive return
+  targets match previous removals in this order: same zone + same side, same
+  zone + other side, other zone + same side, then other zone + any side.
+  Matched returns decrement both product counts and placement units; unmatched
+  targets stay diagnostic/no-invention.
+
 ## [2026-07-02] maintenance | freezer left-right loadcell product groups
 
 - Recorded the new freezer operating assumption: one product group per

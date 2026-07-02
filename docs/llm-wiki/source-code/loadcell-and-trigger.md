@@ -48,6 +48,15 @@ so queue wait is a real latency dimension.
   target carries `channel_position` and `channel_side` (`left`, then `right`
   for the first two physical removal channels) so freezer decisions can keep
   one product group per loadcell.
+- Stable start/end channel deltas are also exposed as
+  `channel_movement_targets`. This broader diagnostic list includes one-sided
+  removals and positive return-side movements, with `direction=removal` or
+  `direction=return`, channel index/position, and channel side. Freezer
+  trigger judgment reads negative movement targets when the stricter
+  `channel_removal_segment_targets` list is absent, so a single left/right
+  loadcell movement can still be solved as one product group. Freezer
+  positive-only return triggers carry positive movement targets into
+  DoorSession for location-aware return reconciliation.
 - Channel split diagnostics are recorded in `channel_delta_diagnostics`,
   including per-channel start/end/delta values, rejection reasons for positive
   channel offsets or insufficient negative channels, and accepted channel
@@ -170,8 +179,9 @@ queued work can be skipped if a later return balances it before video starts.
   product that was just put back.
 - The trigger service passes `decision_delta` to the decision engine for
   chargeable work, while trace metadata still preserves the raw net delta as
-  `net_delta_weight`. Trace metadata also carries segment targets so the engine
-  can run segment-first matching without changing the public trigger schema.
+  `net_delta_weight`. Trace metadata also carries segment and channel movement
+  targets so the engine can run segment-first or freezer left/right matching
+  without changing the public trigger schema.
 - The earlier freezer `[OPS][LOADCELL] mixed_sign_net_masking_guard` path is
   retired in the default configuration. Freezer mixed-sign payloads still show
   compound positive/negative segment diagnostics in traces and carry compact

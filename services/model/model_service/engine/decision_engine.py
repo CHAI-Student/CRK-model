@@ -890,7 +890,7 @@ class ProductDecisionEngine:
         )
 
         channel_targets = self._freezer_channel_targets_from_trace(trace_context)
-        if len(channel_targets) >= 2:
+        if len(channel_targets) >= 1:
             selected_options, reason, search_diagnostics = (
                 self._select_freezer_channel_target_combination(
                     options,
@@ -992,13 +992,22 @@ class ProductDecisionEngine:
         if not isinstance(loadcell, dict):
             return []
         targets: list[dict[str, Any]] = []
-        for fallback_index, entry in enumerate(
-            loadcell.get("channel_removal_segment_targets") or []
-        ):
+        raw_targets = list(loadcell.get("channel_removal_segment_targets") or [])
+        if not raw_targets:
+            raw_targets = [
+                entry
+                for entry in loadcell.get("channel_movement_targets") or []
+                if isinstance(entry, dict)
+                and str(entry.get("direction", "")).lower() == "removal"
+            ]
+        for fallback_index, entry in enumerate(raw_targets):
             if not isinstance(entry, dict):
                 continue
             weight = abs(self._coerce_float(entry.get("weight", 0.0)))
             if weight < self.min_weight_change:
+                continue
+            delta = self._coerce_float(entry.get("delta", -weight))
+            if delta >= 0:
                 continue
             channel_side = str(
                 entry.get("channel_side")
@@ -1025,7 +1034,7 @@ class ProductDecisionEngine:
                     "channel_side": channel_side,
                     "weight": weight,
                     "source": str(
-                        entry.get("source") or "channel_removal_segment_targets"
+                        entry.get("source") or "channel_movement_targets"
                     ),
                 }
             )
@@ -1056,6 +1065,7 @@ class ProductDecisionEngine:
         targets = list(channel_targets)
         attempts: list[dict[str, Any]] = []
         order = 0
+        reused_product_fallback = False
 
         prior_product_idxs = self._normalize_prior_selected_product_idxs(
             prior_selected_product_idxs
@@ -1157,6 +1167,7 @@ class ProductDecisionEngine:
                 "priorExclusionApplied": bool(prior_exclusion_applied),
                 "priorExclusionFallback": False,
                 "maxProductGroupsPerShelf": 2,
+                "sameProductLeftRightFallback": bool(reused_product_fallback),
             }
             if selected_order is not None:
                 result["selectedOrder"] = int(selected_order)
@@ -1165,8 +1176,8 @@ class ProductDecisionEngine:
         if len(targets) > 2:
             reason = "too_many_freezer_channel_targets"
             return [], reason, diagnostics(accepted=False, reason=reason)
-        if len(targets) < 2:
-            reason = "insufficient_freezer_channel_targets"
+        if not targets:
+            reason = "no_freezer_channel_targets"
             return [], reason, diagnostics(accepted=False, reason=reason)
         if not eligible_options:
             reason = "no_channel_candidates_after_prior_exclusion"
@@ -1185,6 +1196,7 @@ class ProductDecisionEngine:
             *,
             counts: range,
         ) -> bool:
+            nonlocal reused_product_fallback
             position = int(target["position"])
             for count in counts:
                 first_reused_fit: Optional[
@@ -1257,6 +1269,7 @@ class ProductDecisionEngine:
                         reused_attempt_order,
                     )
                     used_product_idxs.add(reused_product_idx)
+                    reused_product_fallback = True
                     return True
             return False
 
@@ -1329,6 +1342,7 @@ class ProductDecisionEngine:
                     "channelTargetWeight": round(float(target["weight"]), 1),
                     "channelTargetSource": str(target["source"]),
                     "channelProductGroupPolicy": "one_product_group_per_loadcell",
+                    "sameProductLeftRightFallback": bool(reused_product_fallback),
                 }
             )
             cloned = dict(option)
@@ -2725,6 +2739,31 @@ class ProductDecisionEngine:
             confidence = float(option["confidence"])
             product_id = int(getattr(product, "yolo_class_id", candidate.class_id))
             product_total_price = unit_price * count
+            option_diagnostics = option.get("diagnostics", {})
+            placement_units = [
+                {
+                    "product_id": product_id,
+                    "product_idx": getattr(product, "product_idx", None),
+                    "name": getattr(product, "product_name", candidate.class_name),
+                    "unitWeight": round(float(unit_weight), 1),
+                    "channelSide": option_diagnostics.get("channelSide", "unknown"),
+                    "channelIndex": option_diagnostics.get("channelIndex"),
+                    "channelPosition": option_diagnostics.get("channelPosition"),
+                    "targetWeight": option_diagnostics.get(
+                        "channelTargetWeight",
+                        round(float(target_weight), 1),
+                    ),
+                    "source": option_diagnostics.get(
+                        "channelTargetSource",
+                        "freezer_ordered_vision_candidate_pool",
+                    ),
+                    "channelProductGroupPolicy": option_diagnostics.get(
+                        "channelProductGroupPolicy",
+                        "ordered_vision_combination",
+                    ),
+                }
+                for _ in range(count)
+            ]
             product_judgment = products_by_id.get(product_id)
             if product_judgment is None:
                 product_judgment = ProductJudgment(
@@ -2735,6 +2774,7 @@ class ProductDecisionEngine:
                     total_price=product_total_price,
                     confidence=confidence,
                     unit_weight=unit_weight,
+                    placement_units=placement_units,
                 )
                 products_by_id[product_id] = product_judgment
                 product_order.append(product_id)
@@ -2745,6 +2785,7 @@ class ProductDecisionEngine:
                     float(product_judgment.confidence),
                     confidence,
                 )
+                product_judgment.placement_units.extend(placement_units)
             total_price += product_total_price
             explained_weight += max(0.0, unit_weight) * count
             confidences.append(confidence)

@@ -1085,6 +1085,77 @@ def test_freezer_channel_targets_lock_single_then_solve_remaining_repeat(
     assert selected_by_side["left"]["count"] == 2
 
 
+def test_freezer_single_channel_target_solves_side_repeat(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": 100.0,
+                    "delta": -100.0,
+                    "segment_index": 0,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                }
+            ]
+        }
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_LEFT_50G",
+                combined=0.95,
+                top=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=102,
+                name="FREEZER_RIGHT_120G",
+                combined=0.93,
+                top=0.93,
+            ),
+        ],
+        delta_weight=-100.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_LEFT_50G",
+                weight=50.0,
+                stock=10,
+                product_idx="P101",
+            ),
+            make_active_product(
+                102,
+                "FREEZER_RIGHT_120G",
+                weight=120.0,
+                stock=10,
+                product_idx="P102",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 2)
+    ]
+    assert [
+        unit["channelSide"]
+        for unit in result.products[0].placement_units
+    ] == ["left", "left"]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_channel_target_product_groups"
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["accepted"] is True
+    assert search["channelTargets"][0]["channelSide"] == "left"
+
+
 def test_freezer_vision_first_prior_trigger_dedupe_fails_closed(
     monkeypatch,
 ):

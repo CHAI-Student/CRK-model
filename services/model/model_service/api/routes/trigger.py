@@ -324,6 +324,9 @@ def _loadcell_trace_metadata(
             "channel_removal_segment_targets": list(
                 delta_analysis.channel_removal_segment_targets
             ),
+            "channel_movement_targets": list(
+                delta_analysis.channel_movement_targets
+            ),
             "channel_delta_diagnostics": dict(
                 delta_analysis.channel_delta_diagnostics
             ),
@@ -376,6 +379,54 @@ def _snapshot_allowed_class_ids(active_products_snapshot: List[Any]) -> set[int]
         if class_id is not None and (stock_qty is None or stock_qty > 0):
             allowed_ids.add(class_id)
     return allowed_ids
+
+
+def _placement_units_for_product(
+    product: object,
+    *,
+    zone: int,
+    session_id: str,
+    product_idx: Optional[str],
+) -> List[dict[str, object]]:
+    try:
+        count = max(0, int(getattr(product, "count", 0)))
+    except (TypeError, ValueError):
+        count = 0
+    raw_units = getattr(product, "placement_units", []) or []
+    units = [
+        dict(unit)
+        for unit in raw_units
+        if isinstance(unit, dict)
+    ][:count]
+    for unit in units:
+        unit.setdefault("zone", int(zone))
+        unit.setdefault("sourceSessionId", session_id)
+        unit.setdefault("product_id", int(getattr(product, "product_id", 0)))
+        unit.setdefault("product_idx", product_idx)
+        unit.setdefault("name", str(getattr(product, "name", "")))
+        unit.setdefault(
+            "unitWeight",
+            round(float(getattr(product, "unit_weight", 0.0) or 0.0), 1),
+        )
+        unit.setdefault("channelSide", "unknown")
+        unit.setdefault("source", "engine_product_result")
+    while len(units) < count:
+        units.append(
+            {
+                "zone": int(zone),
+                "sourceSessionId": session_id,
+                "product_id": int(getattr(product, "product_id", 0)),
+                "product_idx": product_idx,
+                "name": str(getattr(product, "name", "")),
+                "unitWeight": round(
+                    float(getattr(product, "unit_weight", 0.0) or 0.0),
+                    1,
+                ),
+                "channelSide": "unknown",
+                "source": "engine_product_result",
+            }
+        )
+    return units
 
 
 def _effective_active_product_snapshot(
@@ -1339,17 +1390,25 @@ async def trigger_judgment(
             confidence=result.confidence,
         )
 
-        products = [
-            ProductResult(
-                product_id=product.product_id,
-                product_idx=get_product_idx(product.product_id),
-                name=product.name,
-                count=product.count,
-                price=product.unit_price,
-                confidence=product.confidence,
+        products = []
+        for product in result_products:
+            product_idx = get_product_idx(product.product_id)
+            products.append(
+                ProductResult(
+                    product_id=product.product_id,
+                    product_idx=product_idx,
+                    name=product.name,
+                    count=product.count,
+                    price=product.unit_price,
+                    confidence=product.confidence,
+                    placement_units=_placement_units_for_product(
+                        product,
+                        zone=request.zone,
+                        session_id=session_id,
+                        product_idx=product_idx,
+                    ),
+                )
             )
-            for product in result_products
-        ]
         final_total_price = sum(product.price * product.count for product in products)
         trace_context.record_storage_result(
             products=products,

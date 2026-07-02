@@ -98,6 +98,7 @@ class LoadcellDeltaAnalysis:
     purchase_delta_candidates: list[dict[str, object]] = field(default_factory=list)
     removal_segment_targets: list[dict[str, object]] = field(default_factory=list)
     channel_removal_segment_targets: list[dict[str, object]] = field(default_factory=list)
+    channel_movement_targets: list[dict[str, object]] = field(default_factory=list)
     channel_delta_diagnostics: dict[str, object] = field(default_factory=dict)
     return_segment_targets: list[dict[str, object]] = field(default_factory=list)
     vision_required_segment_targets: list[dict[str, object]] = field(default_factory=list)
@@ -216,6 +217,10 @@ def close_trigger_loadcell_diagnostics(
         ),
         "return_segment_targets": list(delta_analysis.return_segment_targets),
         "removal_segment_targets": list(delta_analysis.removal_segment_targets),
+        "channel_movement_targets": list(delta_analysis.channel_movement_targets),
+        "channel_removal_segment_targets": list(
+            delta_analysis.channel_removal_segment_targets
+        ),
         "purchase_delta_candidates": list(delta_analysis.purchase_delta_candidates),
         "mixed_sign_net_masking_guard": dict(
             delta_analysis.mixed_sign_net_masking_guard
@@ -581,6 +586,56 @@ def _plateau_channel_means(
     }
 
 
+def _channel_side_for_position(position: int) -> str:
+    if position == 0:
+        return "left"
+    if position == 1:
+        return "right"
+    return f"channel_{position + 1}"
+
+
+def _channel_movement_targets_from_plateaus(
+    loadcells: Sequence[SupportsFilteredValue],
+    *,
+    stable_plateaus: Sequence[LoadcellStablePlateau],
+) -> list[dict[str, object]]:
+    min_delta = float(config.trigger.min_weight_change_grams)
+    if len(stable_plateaus) < 2:
+        return []
+
+    start_plateau = stable_plateaus[0]
+    end_plateau = stable_plateaus[-1]
+    start_means = _plateau_channel_means(loadcells, start_plateau)
+    end_means = _plateau_channel_means(loadcells, end_plateau)
+    channel_indices = sorted(set(start_means) & set(end_means))
+    targets: list[dict[str, object]] = []
+    for position, channel_index in enumerate(channel_indices):
+        start_value = float(start_means[channel_index])
+        end_value = float(end_means[channel_index])
+        delta = end_value - start_value
+        if abs(delta) < min_delta:
+            continue
+        direction = "removal" if delta < 0 else "return"
+        targets.append(
+            {
+                "source": "stable_channel_delta",
+                "direction": direction,
+                "weight": round(abs(delta), 1),
+                "delta": round(delta, 1),
+                "segment_index": int(position),
+                "segment_indices": [int(position)],
+                "channel_index": int(channel_index),
+                "channel_position": int(position),
+                "channel_side": _channel_side_for_position(position),
+                "reason": f"channel_{direction}",
+                "start_timestamp": start_plateau.end_timestamp,
+                "end_timestamp": end_plateau.start_timestamp,
+                "duration_seconds": 0.0,
+            }
+        )
+    return targets
+
+
 def _channel_delta_targets_from_plateaus(
     loadcells: Sequence[SupportsFilteredValue],
     *,
@@ -661,13 +716,7 @@ def _channel_delta_targets_from_plateaus(
     for target_index, channel in enumerate(negative_channels):
         weight = float(channel["abs_delta"])
         delta = float(channel["delta"])
-        channel_side = (
-            "left"
-            if target_index == 0
-            else "right"
-            if target_index == 1
-            else f"channel_{target_index + 1}"
-        )
+        channel_side = _channel_side_for_position(target_index)
         targets.append(
             {
                 "source": "simultaneous_channel_delta",
@@ -1444,6 +1493,10 @@ def analyze_weight_delta(
         loadcells=loadcells,
         records=records,
         endpoint_fallback_enabled=endpoint_fallback_enabled,
+    )
+    analysis.channel_movement_targets = _channel_movement_targets_from_plateaus(
+        loadcells,
+        stable_plateaus=analysis.stable_plateaus,
     )
     (
         analysis.channel_removal_segment_targets,

@@ -107,6 +107,10 @@ class _CrossZoneReturnCandidate:
     unit_weight: float
     unit_index: int
     session_created_at: float
+    channel_side: Optional[str] = None
+    placement_index: Optional[int] = None
+    placement_unit: Optional[Dict[str, object]] = None
+    source_timestamp: float = 0.0
 
     @property
     def stable_key(self) -> tuple:
@@ -115,6 +119,7 @@ class _CrossZoneReturnCandidate:
             self.target_zone,
             self.product_id,
             self.unit_index,
+            self.channel_side or "",
         )
 
 
@@ -581,6 +586,38 @@ class DoorSessionStore:
                 f"session_id={key}, status={status}, pending={self._pending_trigger_count}"
             )
 
+    @staticmethod
+    def _ensure_trigger_placement_metadata(
+        result: TriggerResult,
+        *,
+        zone: int,
+    ) -> None:
+        for product in result.products:
+            units = [
+                dict(unit)
+                for unit in getattr(product, "placement_units", []) or []
+                if isinstance(unit, dict)
+            ]
+            while len(units) < max(0, int(product.count)):
+                units.append(
+                    {
+                        "product_id": int(product.product_id),
+                        "product_idx": product.product_idx,
+                        "name": product.name,
+                        "channelSide": "unknown",
+                        "source": "door_session_trigger_product",
+                    }
+                )
+            product.placement_units = units[: max(0, int(product.count))]
+            for unit in product.placement_units:
+                unit.setdefault("zone", int(zone))
+                unit.setdefault("sourceTriggerId", result.trigger_id)
+                unit.setdefault("sourceSessionId", result.session_id)
+                unit.setdefault("product_id", int(product.product_id))
+                unit.setdefault("product_idx", product.product_idx)
+                unit.setdefault("name", product.name)
+                unit.setdefault("channelSide", "unknown")
+
     def add_trigger(
         self,
         zone: int,
@@ -653,6 +690,7 @@ class DoorSessionStore:
 
             # Trigger ID 생성
             result.trigger_id = f"trigger_{len(session.triggers) + 1:03d}"
+            self._ensure_trigger_placement_metadata(result, zone=zone)
 
             # Trigger 추가
             session.triggers.append(result)
@@ -1211,7 +1249,8 @@ class DoorSessionStore:
         # cross-zone repair pass.
         for active_session in active_sessions:
             result = self._aggregator.aggregate_with_unmatched(
-                active_session.triggers
+                active_session.triggers,
+                zone=active_session.zone,
             )
             active_session.aggregated_products = result.products
             if defer_returns_until_close:
@@ -1225,12 +1264,28 @@ class DoorSessionStore:
                         delta_weight=deferred.delta_weight,
                         timestamp=deferred.timestamp,
                         tolerance_used=deferred.tolerance_used,
+                        channel_side=deferred.channel_side,
+                        channel_index=deferred.channel_index,
+                        channel_position=deferred.channel_position,
+                        source_zone=deferred.source_zone,
+                        source=deferred.source,
                     )
                     for deferred in result.deferred_returns
                 )
                 active_session.deferred_returns = []
             active_session.cross_zone_returns = []
             active_session.final_weight_validation = {}
+            if result.location_return_diagnostics:
+                active_session.final_weight_validation[
+                    "freezerLocationReturnReconciliation"
+                ] = {
+                    "accepted": any(
+                        bool(item.get("accepted"))
+                        for item in result.location_return_diagnostics
+                    ),
+                    "source": "same_zone_reaggregation",
+                    "items": result.location_return_diagnostics,
+                }
 
             if self._get_product_weight is not None:
                 self._aggregator.update_weights_from_db(
@@ -1320,6 +1375,7 @@ class DoorSessionStore:
                     f"[복구 모드] 복구된 상품: {p.name} x{p.count} ({p.weight}g)"
                 )
                 p.count = 0
+                p.placement_units = []
             return
 
         # Case 2: 부분 반환 (net_delta < expected_weight)
@@ -1336,6 +1392,7 @@ class DoorSessionStore:
                         f"[복구 모드] 부분 반환: {p.name} {p.count}개 → {new_count}개"
                     )
                     p.count = new_count
+                    p.placement_units = list(p.placement_units)[:new_count]
                     corrected = True
                 remaining -= p.weight * new_count
                 if remaining <= net_zero_threshold:
@@ -1420,6 +1477,11 @@ class DoorSessionStore:
                         delta_weight=deferred.delta_weight,
                         timestamp=deferred.timestamp,
                         tolerance_used=deferred.tolerance_used,
+                        channel_side=deferred.channel_side,
+                        channel_index=deferred.channel_index,
+                        channel_position=deferred.channel_position,
+                        source_zone=deferred.source_zone,
+                        source=deferred.source,
                     )
                 )
                 diagnostics.setdefault("unmatched", []).append(
@@ -1516,6 +1578,9 @@ class DoorSessionStore:
         for product_id, count in combo.items():
             product = session.aggregated_products[product_id]
             product.count = max(0, product.count - count)
+            product.placement_units = list(product.placement_units)[
+                : max(0, product.count)
+            ]
 
         diagnostics.setdefault("sameZoneApplied", []).append(
             {
@@ -1545,6 +1610,13 @@ class DoorSessionStore:
             if existing_deferred_diagnostics is not None:
                 diagnostics["deferredReturnReconciliation"] = (
                     existing_deferred_diagnostics
+                )
+            existing_location_diagnostics = session.final_weight_validation.get(
+                "freezerLocationReturnReconciliation"
+            )
+            if existing_location_diagnostics is not None:
+                diagnostics["freezerLocationReturnReconciliation"] = (
+                    existing_location_diagnostics
                 )
             session.final_weight_validation = diagnostics
             if replacement is not None:
@@ -2374,12 +2446,72 @@ class DoorSessionStore:
                     continue
 
                 self._apply_cross_zone_return_match(session, unmatched, match)
+                diagnostics = session.final_weight_validation.setdefault(
+                    "freezerLocationReturnReconciliation",
+                    {
+                        "accepted": False,
+                        "source": "cross_zone_reconciliation",
+                        "items": [],
+                    },
+                )
+                if isinstance(diagnostics, dict):
+                    diagnostics["accepted"] = True
+                    diagnostics.setdefault("items", []).append(
+                        {
+                            "triggerId": unmatched.trigger_id,
+                            "sourceZone": session.zone,
+                            "channelSide": getattr(unmatched, "channel_side", None),
+                            "targetWeight": round(
+                                abs(float(unmatched.delta_weight)),
+                                1,
+                            ),
+                            "matchTier": (
+                                "other_zone_same_side"
+                                if getattr(unmatched, "channel_side", None)
+                                and all(
+                                    candidate.channel_side == unmatched.channel_side
+                                    for candidate in match.candidates
+                                )
+                                else "other_zone_any_side"
+                            ),
+                            "matchedProducts": [
+                                {
+                                    "zone": candidate.target_zone,
+                                    "productId": candidate.product_id,
+                                    "name": candidate.product_name,
+                                    "channelSide": candidate.channel_side,
+                                    "weight": round(candidate.unit_weight, 1),
+                                }
+                                for candidate in match.candidates
+                            ],
+                            "matchedWeight": round(float(match.total_weight), 1),
+                            "residual": round(float(match.weight_error), 1),
+                        }
+                    )
 
             session.unmatched_returns = still_unmatched
+
+    @staticmethod
+    def _placement_channel_side(unit: object) -> Optional[str]:
+        if not isinstance(unit, dict):
+            return None
+        raw_side = unit.get("channelSide") or unit.get("channel_side")
+        return str(raw_side) if raw_side is not None else None
+
+    @staticmethod
+    def _placement_source_timestamp(unit: object) -> float:
+        if not isinstance(unit, dict):
+            return 0.0
+        try:
+            return float(unit.get("sourceTimestamp", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _build_cross_zone_return_candidates(
         self,
         source_zone: int,
+        *,
+        channel_side: Optional[str] = None,
     ) -> List[_CrossZoneReturnCandidate]:
         candidates: List[_CrossZoneReturnCandidate] = []
         max_count_per_item = max(1, int(config.weight.max_count_per_item))
@@ -2392,6 +2524,34 @@ class DoorSessionStore:
                 product = target_session.aggregated_products[product_id]
                 if product.count <= 0 or product.weight <= 0:
                     continue
+                placement_units = [
+                    unit
+                    for unit in product.placement_units[: product.count]
+                    if isinstance(unit, dict)
+                ]
+                if placement_units:
+                    for placement_index, unit in enumerate(
+                        placement_units[:max_count_per_item]
+                    ):
+                        unit_side = self._placement_channel_side(unit)
+                        if channel_side and unit_side != channel_side:
+                            continue
+                        candidates.append(
+                            _CrossZoneReturnCandidate(
+                                target_zone=target_zone,
+                                product_id=product_id,
+                                product_name=product.name,
+                                unit_weight=product.weight,
+                                unit_index=placement_index,
+                                session_created_at=target_session.created_at,
+                                channel_side=unit_side,
+                                placement_index=placement_index,
+                                placement_unit=unit,
+                                source_timestamp=self._placement_source_timestamp(unit),
+                            )
+                        )
+                    continue
+
                 for unit_index in range(min(product.count, max_count_per_item)):
                     candidates.append(
                         _CrossZoneReturnCandidate(
@@ -2401,6 +2561,9 @@ class DoorSessionStore:
                             unit_weight=product.weight,
                             unit_index=unit_index,
                             session_created_at=target_session.created_at,
+                            channel_side=None,
+                            placement_index=None,
+                            placement_unit=None,
                         )
                     )
 
@@ -2408,6 +2571,7 @@ class DoorSessionStore:
             candidates,
             key=lambda candidate: (
                 -candidate.unit_weight,
+                -candidate.source_timestamp,
                 candidate.session_created_at,
                 candidate.target_zone,
                 candidate.product_id,
@@ -2428,9 +2592,14 @@ class DoorSessionStore:
                 for candidate in match.candidates
             }
         )
+        latest_timestamp = max(
+            (candidate.source_timestamp for candidate in match.candidates),
+            default=0.0,
+        )
         return (
-            match.weight_error,
             len(match.candidates),
+            match.weight_error,
+            -latest_timestamp,
             kind_count,
             stable_keys,
         )
@@ -2444,10 +2613,6 @@ class DoorSessionStore:
         if target_weight <= 0:
             return None
 
-        candidates = self._build_cross_zone_return_candidates(source_zone)
-        if not candidates:
-            return None
-
         max_units = max(
             1,
             int(config.weight.max_count_per_item),
@@ -2457,64 +2622,96 @@ class DoorSessionStore:
         max_kinds = max(1, int(config.weight.max_combination_kinds))
         max_visits = max(1000, int(config.weight.max_combinations) * 50)
         max_possible_error = self._cross_zone_match_allowed_error(max_units)
+        attempted_candidate_count = 0
+
+        def search_candidates(
+            candidates: List[_CrossZoneReturnCandidate],
+        ) -> Optional[_CrossZoneReturnMatch]:
+            best_match: Optional[_CrossZoneReturnMatch] = None
+            visits = 0
+
+            def consider(
+                chosen: List[_CrossZoneReturnCandidate],
+                total: float,
+            ) -> None:
+                nonlocal best_match
+                if not chosen:
+                    return
+                error = abs(total - target_weight)
+                if error > self._cross_zone_match_allowed_error(len(chosen)):
+                    return
+                match = _CrossZoneReturnMatch(
+                    candidates=list(chosen),
+                    total_weight=total,
+                    weight_error=error,
+                )
+                if (
+                    best_match is None
+                    or self._cross_zone_match_key(match)
+                    < self._cross_zone_match_key(best_match)
+                ):
+                    best_match = match
+
+            def search(
+                start_idx: int,
+                chosen: List[_CrossZoneReturnCandidate],
+                total: float,
+            ) -> None:
+                nonlocal visits
+                if visits >= max_visits:
+                    return
+                visits += 1
+
+                consider(chosen, total)
+
+                if len(chosen) >= max_units:
+                    return
+                if total > target_weight + max_possible_error:
+                    return
+
+                current_kinds = {
+                    (candidate.target_zone, candidate.product_id)
+                    for candidate in chosen
+                }
+                for index in range(start_idx, len(candidates)):
+                    candidate = candidates[index]
+                    next_kinds = set(current_kinds)
+                    next_kinds.add((candidate.target_zone, candidate.product_id))
+                    if len(next_kinds) > max_kinds:
+                        continue
+                    chosen.append(candidate)
+                    search(index + 1, chosen, total + candidate.unit_weight)
+                    chosen.pop()
+
+            search(0, [], 0.0)
+            return best_match
+
+        source_side = getattr(unmatched, "channel_side", None)
+        tiers: List[tuple[str, Optional[str]]] = []
+        if source_side:
+            tiers.append(("other_zone_same_side", str(source_side)))
+            tiers.append(("other_zone_any_side", None))
+        else:
+            tiers.append(("other_zone_any_side", None))
+
         best_match: Optional[_CrossZoneReturnMatch] = None
-        visits = 0
-
-        def consider(chosen: List[_CrossZoneReturnCandidate], total: float) -> None:
-            nonlocal best_match
-            if not chosen:
-                return
-            error = abs(total - target_weight)
-            if error > self._cross_zone_match_allowed_error(len(chosen)):
-                return
-            match = _CrossZoneReturnMatch(
-                candidates=list(chosen),
-                total_weight=total,
-                weight_error=error,
+        for _tier_name, side in tiers:
+            candidates = self._build_cross_zone_return_candidates(
+                source_zone,
+                channel_side=side,
             )
-            if (
-                best_match is None
-                or self._cross_zone_match_key(match) < self._cross_zone_match_key(best_match)
-            ):
-                best_match = match
-
-        def search(
-            start_idx: int,
-            chosen: List[_CrossZoneReturnCandidate],
-            total: float,
-        ) -> None:
-            nonlocal visits
-            if visits >= max_visits:
-                return
-            visits += 1
-
-            consider(chosen, total)
-
-            if len(chosen) >= max_units:
-                return
-            if total > target_weight + max_possible_error:
-                return
-
-            current_kinds = {
-                (candidate.target_zone, candidate.product_id)
-                for candidate in chosen
-            }
-            for index in range(start_idx, len(candidates)):
-                candidate = candidates[index]
-                next_kinds = set(current_kinds)
-                next_kinds.add((candidate.target_zone, candidate.product_id))
-                if len(next_kinds) > max_kinds:
-                    continue
-                chosen.append(candidate)
-                search(index + 1, chosen, total + candidate.unit_weight)
-                chosen.pop()
-
-        search(0, [], 0.0)
+            attempted_candidate_count += len(candidates)
+            if not candidates:
+                continue
+            best_match = search_candidates(candidates)
+            if best_match is not None:
+                break
 
         if best_match is None:
             logger.warning(
                 f"Cross-zone return matching failed: zone={source_zone}, "
-                f"delta={unmatched.delta_weight:.1f}g, candidates={len(candidates)}"
+                f"delta={unmatched.delta_weight:.1f}g, "
+                f"candidates={attempted_candidate_count}"
             )
             return None
 
@@ -2551,6 +2748,17 @@ class DoorSessionStore:
                 continue
 
             product.count -= 1
+            if candidate.placement_unit is not None:
+                remaining_units = list(product.placement_units)
+                for unit_index, unit in enumerate(remaining_units):
+                    if unit == candidate.placement_unit:
+                        remaining_units.pop(unit_index)
+                        break
+                product.placement_units = remaining_units
+            else:
+                product.placement_units = list(product.placement_units)[
+                    : max(0, product.count)
+                ]
             if index == len(sorted_candidates) - 1:
                 component_delta = unmatched.delta_weight - allocated_delta
             else:

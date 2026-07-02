@@ -1,6 +1,6 @@
 # CRK-model LLM Wiki
 
-Last updated: 2026-07-01
+Last updated: 2026-07-02
 
 This wiki is the LLM-facing map of the CRK model service. The original
 documents under `docs/` remain the raw sources. Pages here summarize and
@@ -195,6 +195,12 @@ shape without rereading every long historical document.
 - Simultaneous same-zone removals can use physical loadcell channel deltas as
   evidence-required segment targets. A channel-supported split such as
   Tteokbokki + Welchs is judged before a same-weight aggregate rescue product.
+- Freezer stable loadcell analysis also records `channel_movement_targets`.
+  Unlike the stricter legacy `channel_removal_segment_targets`, these include
+  single-channel left/right movements and positive return movements. Freezer
+  negative judgment can use one or two negative channel targets when their
+  selected product groups still explain the stable net delta inside freezer
+  tolerance.
 - Freezer mixed-sign stable payloads now keep the confirmed stable start/end
   net delta. Internal positive segments inside a freezer negative trigger are
   diagnostics-only and do not create `return_weight_hints`; for example `+70g`
@@ -276,8 +282,20 @@ shape without rereading every long historical document.
   solving: one product group per physical loadcell, at most left/right two
   groups per freezer shelf. The engine locks `x1` channel matches first, then
   solves remaining channel targets as same-product multiples from the visual
-  candidate pool; prior freezer trigger products are excluded fail-closed in
-  later trigger solving.
+  candidate pool. Single-side targets follow the same path. Distinct left/right
+  product groups are preferred; using the same product on both sides is
+  fallback-only and recorded in ordered-combination diagnostics. Prior freezer
+  trigger products are excluded fail-closed in later trigger solving.
+- Freezer removals now persist internal placement units per charged item in
+  DoorSession/YAML metadata: zone, channel side/index/position, target weight,
+  source trigger/session, product id/index, and unit weight. Public HTTP
+  product schemas are unchanged; placement units are used only for close-time
+  repair and diagnostics.
+- Freezer positive-only return triggers reconcile against those placement
+  units before generic weight matching. The order is same zone + same side,
+  same zone + other side, other zone + same side, then other zone + any side.
+  A matched return decrements both product count and placement units; unmatched
+  returns keep diagnostics and do not invent active-only products.
 - Segment-first matching treats low-confidence stage traces as unsupported
   evidence, so weak Pepero/Binch-style small-item repeats do not outrank
   active large-bottle explanations or become `COMPLETE`.
