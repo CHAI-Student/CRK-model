@@ -615,6 +615,22 @@ def test_freezer_close_aggregate_preserves_trigger_products_when_total_fits(
                 "count": 1,
             },
         ]
+        assert {
+            product.product_id: product.count
+            for product in global_session.zone_sessions[1].get_active_products()
+        } == {13: 1}
+        assert {
+            product.product_id: product.count
+            for product in global_session.zone_sessions[4].get_active_products()
+        } == {23: 1}
+        selected_by_zone = {
+            item["zone"]: {
+                product["productId"]: product["count"]
+                for product in item["products"]
+            }
+            for item in aggregate["selectedProductsByZone"]
+        }
+        assert selected_by_zone == {1: {13: 1}, 4: {23: 1}}
         assert all(
             product["name"] != "STICK_BINGGRAE_MELONA_75ML"
             for zone in response["zones"]
@@ -622,6 +638,134 @@ def test_freezer_close_aggregate_preserves_trigger_products_when_total_fits(
         )
     finally:
         store.clear_all()
+
+
+def test_freezer_close_aggregate_preserve_rewrites_stale_aggregated_products(
+    monkeypatch,
+):
+    from model_service.core.config import config
+    from model_service.session.door_session import (
+        AggregatedProduct,
+        DoorSession,
+        TriggerResult,
+    )
+    from model_service.session.freezer_close_aggregate import (
+        FreezerCloseAggregateResolver,
+    )
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+    weights = {24: 165.0, 44: 79.0, 46: 71.0, 77: 224.0}
+
+    hotdog = _product(
+        24,
+        "BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+        1,
+        price=2200,
+        confidence=0.9,
+    )
+    hotdog.placement_units = [{"channelSide": "left", "channelPosition": "left"}]
+    melona = _product(
+        44,
+        "STICK_BINGGRAE_MELONA_75ML",
+        1,
+        price=800,
+        confidence=0.9,
+    )
+    bibigo = _product(
+        77,
+        "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+        1,
+        price=3900,
+        confidence=0.9,
+    )
+    lala = _product(
+        46,
+        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+        1,
+        price=500,
+        confidence=0.9,
+    )
+
+    zone_4 = DoorSession(
+        door_session_id="door-zone-4",
+        zone=4,
+        status="complete",
+        triggers=[
+            TriggerResult(
+                trigger_id="zone4-hotdog-melona",
+                session_id="zone4-hotdog-melona-session",
+                timestamp=110.0,
+                products=[hotdog, melona],
+                delta_weight=-234.9,
+                confidence=0.9,
+                video_paths={},
+            )
+        ],
+        aggregated_products={
+            44: AggregatedProduct(
+                product_id=44,
+                product_idx="P44",
+                name="STICK_BINGGRAE_MELONA_75ML",
+                count=3,
+                unit_price=800,
+                weight=79.0,
+                total_confidence=2.7,
+                detection_count=3,
+            )
+        },
+        last_trigger_at=110.0,
+    )
+    zone_2 = DoorSession(
+        door_session_id="door-zone-2",
+        zone=2,
+        status="complete",
+        triggers=[
+            TriggerResult(
+                trigger_id="zone2-bibigo-lala",
+                session_id="zone2-bibigo-lala-session",
+                timestamp=120.0,
+                products=[bibigo, lala],
+                delta_weight=-296.9,
+                confidence=0.9,
+                video_paths={},
+            )
+        ],
+        aggregated_products={},
+        last_trigger_at=120.0,
+    )
+
+    diagnostics = FreezerCloseAggregateResolver(
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    ).apply({2: zone_2, 4: zone_4})
+
+    assert diagnostics is not None
+    assert diagnostics["reason"] == "freezer_close_aggregate_trigger_products_preserved"
+    assert diagnostics["globalNetDelta"] == -531.8
+    assert diagnostics["selectedWeight"] == 539.0
+    assert diagnostics["residual"] == 7.2
+    assert {
+        product.product_id: product.count
+        for product in zone_4.get_active_products()
+    } == {24: 1, 44: 1}
+    assert {
+        product.product_id: product.count
+        for product in zone_2.get_active_products()
+    } == {77: 1, 46: 1}
+    assert zone_4.aggregated_products[24].placement_units == [
+        {"channelSide": "left", "channelPosition": "left"}
+    ]
+    assert zone_4.aggregated_products[44].count == 1
+    selected_by_zone = {
+        item["zone"]: {
+            product["productId"]: product["count"]
+            for product in item["products"]
+        }
+        for item in zone_2.final_weight_validation["freezerCloseAggregate"][
+            "selectedProductsByZone"
+        ]
+    }
+    assert selected_by_zone == {2: {46: 1, 77: 1}, 4: {24: 1, 44: 1}}
 
 
 def test_freezer_close_aggregate_suppresses_returned_yomamte_candidate(

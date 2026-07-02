@@ -868,16 +868,27 @@ class FreezerCloseAggregateResolver:
                 dict(output_products) if zone == output_zone else {}
             )
 
-    @staticmethod
     def _apply_preserve_output(
+        self,
         participants: List[_Participant],
         *,
         output_zone: int,
         diagnostics: dict[str, object],
     ) -> None:
+        preserved_products_by_zone = self._preserved_trigger_products_by_zone(
+            participants
+        )
+        selected_products_by_zone = [
+            {
+                "zone": int(zone),
+                "products": self._aggregated_product_diagnostics(products),
+            }
+            for zone, products in sorted(preserved_products_by_zone.items())
+        ]
         for item in participants:
             zone_diagnostics = dict(diagnostics)
             zone_diagnostics["role"] = "preserved"
+            zone_diagnostics["selectedProductsByZone"] = selected_products_by_zone
             if item.zone == output_zone:
                 zone_diagnostics["outputZoneRole"] = "latest_trigger_zone"
             item.session.final_weight_validation = dict(
@@ -886,6 +897,9 @@ class FreezerCloseAggregateResolver:
             item.session.final_weight_validation[
                 "freezerCloseAggregate"
             ] = zone_diagnostics
+            item.session.aggregated_products = dict(
+                preserved_products_by_zone.get(item.zone, {})
+            )
 
     def _apply_no_charge_output(
         self,
@@ -938,6 +952,72 @@ class FreezerCloseAggregateResolver:
             if product_id in groups
         )
         return counts, groups, float(selected_weight)
+
+    def _preserved_trigger_products_by_zone(
+        self,
+        participants: List[_Participant],
+    ) -> Dict[int, Dict[int, AggregatedProduct]]:
+        products_by_zone: Dict[int, Dict[int, AggregatedProduct]] = {}
+        for item in participants:
+            zone_products = products_by_zone.setdefault(int(item.zone), {})
+            for product in item.trigger.products:
+                count = int(getattr(product, "count", 0) or 0)
+                if count <= 0:
+                    continue
+                parsed = self._candidate_from_trigger_product(product)
+                if parsed is None:
+                    continue
+                product_id = int(parsed.product_id)
+                existing = zone_products.get(product_id)
+                product_confidence = float(getattr(product, "confidence", 0.0) or 0.0)
+                placement_units = [
+                    dict(unit)
+                    for unit in getattr(product, "placement_units", []) or []
+                    if isinstance(unit, dict)
+                ][:count]
+                if existing is None:
+                    zone_products[product_id] = AggregatedProduct(
+                        product_id=product_id,
+                        product_idx=parsed.product_idx,
+                        name=parsed.name,
+                        count=count,
+                        unit_price=int(parsed.unit_price),
+                        weight=float(parsed.unit_weight),
+                        total_confidence=product_confidence * count,
+                        detection_count=count,
+                        placement_units=placement_units,
+                    )
+                    continue
+
+                existing.count += count
+                existing.total_confidence += product_confidence * count
+                existing.detection_count += count
+                existing.placement_units.extend(placement_units)
+                if existing.unit_price <= 0 and parsed.unit_price > 0:
+                    existing.unit_price = int(parsed.unit_price)
+                if existing.product_idx is None and parsed.product_idx is not None:
+                    existing.product_idx = parsed.product_idx
+        return products_by_zone
+
+    @staticmethod
+    def _aggregated_product_diagnostics(
+        products: Dict[int, AggregatedProduct],
+    ) -> List[dict[str, object]]:
+        diagnostics: List[dict[str, object]] = []
+        for product in sorted(
+            products.values(),
+            key=lambda item: (item.name, int(item.product_id)),
+        ):
+            if int(product.count) <= 0:
+                continue
+            diagnostics.append(
+                {
+                    "productId": int(product.product_id),
+                    "name": product.name,
+                    "count": int(product.count),
+                }
+            )
+        return diagnostics
 
     @staticmethod
     def _aggregated_products(
