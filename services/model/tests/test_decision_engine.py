@@ -1263,6 +1263,276 @@ def test_freezer_single_channel_target_solves_side_repeat(monkeypatch):
     assert search["channelTargets"][0]["channelSide"] == "left"
 
 
+def test_freezer_dual_channel_targets_override_total_repeat_fit(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": 219.0,
+                    "delta": -219.0,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                },
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": 73.0,
+                    "delta": -73.0,
+                    "channel_index": 1,
+                    "channel_position": 1,
+                    "channel_side": "right",
+                },
+            ]
+        }
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=46,
+                name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                combined=0.831,
+                top=0.831,
+                side=0.778,
+            ),
+            make_freezer_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                combined=0.852,
+                top=0.789,
+                side=0.852,
+            ),
+            make_freezer_candidate(
+                class_id=13,
+                name="BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                combined=0.868,
+                top=0.868,
+            ),
+            make_freezer_candidate(
+                class_id=77,
+                name="BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                combined=0.751,
+                top=0.751,
+                side=0.666,
+            ),
+            make_freezer_candidate(
+                class_id=24,
+                name="BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+                combined=0.698,
+                top=0.698,
+                side=0.520,
+            ),
+        ],
+        delta_weight=-278.8,
+        active_products=[
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                stock=20,
+                product_idx="P46",
+            ),
+            make_active_product(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                weight=79.0,
+                stock=20,
+                product_idx="P44",
+            ),
+            make_active_product(
+                13,
+                "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                weight=189.0,
+                stock=20,
+                product_idx="P13",
+            ),
+            make_active_product(
+                77,
+                "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                weight=224.0,
+                stock=20,
+                product_idx="P77",
+            ),
+            make_active_product(
+                24,
+                "BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+                weight=165.0,
+                stock=20,
+                product_idx="P24",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (77, 1),
+        (46, 1),
+    ]
+    placement_by_id = {
+        product.product_id: product.placement_units[0]
+        for product in result.products
+    }
+    assert placement_by_id[77]["channelSide"] == "left"
+    assert placement_by_id[46]["channelSide"] == "right"
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_channel_target_product_groups"
+    assert diagnostics["channelSelectionTotalResidualIgnored"] is True
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["accepted"] is True
+    assert search["channelTargetTotalWeight"] == 292.0
+    assert search["totalResidual"] == 16.2
+    assert search["channelSelectionTotalResidualIgnored"] is True
+
+
+def test_freezer_dual_channel_targets_fallback_from_endpoint_values(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace(
+        {
+            "first_filtered_values": ["+00300", "+00231"],
+            "last_filtered_values": ["+00081", "+00158"],
+            "channel_movement_targets": [],
+            "channel_removal_segment_targets": [],
+        }
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=46,
+                name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                combined=0.831,
+                top=0.831,
+                side=0.778,
+            ),
+            make_freezer_candidate(
+                class_id=77,
+                name="BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                combined=0.751,
+                top=0.751,
+                side=0.666,
+            ),
+        ],
+        delta_weight=-278.8,
+        active_products=[
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                stock=20,
+                product_idx="P46",
+            ),
+            make_active_product(
+                77,
+                "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                weight=224.0,
+                stock=20,
+                product_idx="P77",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (77, 1),
+        (46, 1),
+    ]
+    search = trace.weight_diagnostics["freezer_vision_first"][
+        "orderedCombinationSearch"
+    ]
+    assert search["channelTargetSourceFallback"] is True
+    assert [
+        target["source"] for target in search["channelTargets"]
+    ] == [
+        "filtered_endpoint_channel_delta",
+        "filtered_endpoint_channel_delta",
+    ]
+
+
+def test_freezer_channel_target_miss_does_not_use_total_repeat_fallback(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": 219.0,
+                    "delta": -219.0,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                },
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": 170.0,
+                    "delta": -170.0,
+                    "channel_index": 1,
+                    "channel_position": 1,
+                    "channel_side": "right",
+                },
+            ]
+        }
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_REPEAT_100G",
+                combined=0.95,
+                top=0.95,
+                side=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=77,
+                name="BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                combined=0.90,
+                top=0.90,
+                side=0.90,
+            ),
+        ],
+        delta_weight=-389.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_REPEAT_100G",
+                weight=100.0,
+                stock=20,
+                product_idx="P101",
+            ),
+            make_active_product(
+                77,
+                "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                weight=224.0,
+                stock=20,
+                product_idx="P77",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "no_weight_fit_for_vision_candidate_pool"
+    assert diagnostics["orderedCombinationSearch"]["reason"] == (
+        "channel_target_without_weight_fit"
+    )
+
+
 def test_freezer_vision_first_prior_trigger_dedupe_fails_closed(
     monkeypatch,
 ):

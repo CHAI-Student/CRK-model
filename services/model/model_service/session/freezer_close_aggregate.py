@@ -172,7 +172,18 @@ class FreezerCloseAggregateResolver:
             diagnostics["triggerProductsPreserveBlockedByReturnedPosition"] = True
         if current_allowed:
             diagnostics["samePositionReturnedProductAllowed"] = current_allowed
-        if current_counts and current_residual <= self._tolerance and not current_suppressed:
+        channel_solved_products_preserved = (
+            self._has_channel_solved_trigger_products(participants)
+            and not current_suppressed
+        )
+        if (
+            current_counts
+            and (
+                current_residual <= self._tolerance
+                or channel_solved_products_preserved
+            )
+            and not current_suppressed
+        ):
             diagnostics.update(
                 {
                     "accepted": True,
@@ -180,6 +191,9 @@ class FreezerCloseAggregateResolver:
                     "selectedWeight": round(float(current_weight), 1),
                     "residual": round(float(current_residual), 1),
                     "allowedResidual": round(float(self._tolerance), 1),
+                    "channelSolvedProductsPreserved": bool(
+                        channel_solved_products_preserved
+                    ),
                     "selectedProducts": self._selected_product_diagnostics(
                         current_counts,
                         current_groups,
@@ -952,6 +966,32 @@ class FreezerCloseAggregateResolver:
             if product_id in groups
         )
         return counts, groups, float(selected_weight)
+
+    @staticmethod
+    def _has_channel_solved_trigger_products(
+        participants: List[_Participant],
+    ) -> bool:
+        for item in participants:
+            for product in item.trigger.products:
+                if int(getattr(product, "count", 0) or 0) <= 0:
+                    continue
+                if FreezerCloseAggregateResolver._product_has_channel_solved_unit(
+                    product
+                ):
+                    return True
+        return False
+
+    @staticmethod
+    def _product_has_channel_solved_unit(product: object) -> bool:
+        for unit in getattr(product, "placement_units", []) or []:
+            if not isinstance(unit, dict):
+                continue
+            if (
+                str(unit.get("channelProductGroupPolicy") or "")
+                == "one_product_group_per_loadcell"
+            ):
+                return True
+        return False
 
     def _preserved_trigger_products_by_zone(
         self,

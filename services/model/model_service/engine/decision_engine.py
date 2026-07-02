@@ -1060,14 +1060,18 @@ class ProductDecisionEngine:
         if not isinstance(loadcell, dict):
             return []
         targets: list[dict[str, Any]] = []
+        source_fallback = False
         raw_targets = list(loadcell.get("channel_removal_segment_targets") or [])
         if not raw_targets:
+            source_fallback = True
             raw_targets = [
                 entry
                 for entry in loadcell.get("channel_movement_targets") or []
                 if isinstance(entry, dict)
                 and str(entry.get("direction", "")).lower() == "removal"
             ]
+        if not raw_targets:
+            raw_targets = self._freezer_endpoint_channel_targets_from_trace(loadcell)
         for fallback_index, entry in enumerate(raw_targets):
             if not isinstance(entry, dict):
                 continue
@@ -1104,6 +1108,9 @@ class ProductDecisionEngine:
                     "source": str(
                         entry.get("source") or "channel_movement_targets"
                     ),
+                    "source_fallback": bool(
+                        source_fallback or entry.get("source_fallback", False)
+                    ),
                 }
             )
         return sorted(
@@ -1114,6 +1121,53 @@ class ProductDecisionEngine:
                 int(target["channel_index"]),
             ),
         )
+
+    def _freezer_endpoint_channel_targets_from_trace(
+        self,
+        loadcell: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        first_values = loadcell.get("first_filtered_values")
+        last_values = loadcell.get("last_filtered_values")
+        if not isinstance(first_values, list) or not isinstance(last_values, list):
+            return []
+        if len(first_values) < 2 or len(last_values) < 2:
+            return []
+
+        targets: list[dict[str, Any]] = []
+        for index in range(2):
+            first = self._parse_loadcell_channel_value(first_values[index])
+            last = self._parse_loadcell_channel_value(last_values[index])
+            if first is None or last is None:
+                continue
+            delta = float(last) - float(first)
+            weight = abs(delta)
+            if delta >= 0 or weight < self.min_weight_change:
+                continue
+            targets.append(
+                {
+                    "source": "filtered_endpoint_channel_delta",
+                    "direction": "removal",
+                    "weight": round(float(weight), 1),
+                    "delta": round(float(delta), 1),
+                    "segment_index": int(index),
+                    "channel_index": int(index),
+                    "channel_position": int(index),
+                    "channel_side": "left" if index == 0 else "right",
+                    "reason": "endpoint_channel_removal",
+                    "source_fallback": True,
+                }
+            )
+        return targets
+
+    @staticmethod
+    def _parse_loadcell_channel_value(value: object) -> Optional[float]:
+        try:
+            cleaned = str(value).strip()
+            if cleaned.startswith("+"):
+                cleaned = cleaned[1:]
+            return float(cleaned)
+        except (TypeError, ValueError):
+            return None
 
     def _select_freezer_channel_target_combination(
         self,
@@ -1213,12 +1267,33 @@ class ProductDecisionEngine:
             total_expected_weight: float = 0.0,
             total_residual: Optional[float] = None,
         ) -> dict[str, Any]:
+            channel_target_total_weight = sum(
+                float(target["weight"]) for target in targets
+            )
+            computed_total_residual = float(
+                abs(float(target_weight) - float(total_expected_weight))
+                if total_residual is None
+                else total_residual
+            )
             result = {
                 "policy": "loadcell_channel_product_group_ordered_weight_validation",
                 "accepted": bool(accepted),
                 "reason": reason,
                 "targetWeight": round(float(target_weight), 1),
                 "tolerance": round(float(tolerance), 1),
+                "channelTargetSourceFallback": any(
+                    bool(target.get("source_fallback", False)) for target in targets
+                ),
+                "channelTargetTotalWeight": round(
+                    float(channel_target_total_weight),
+                    1,
+                ),
+                "zoneTotalResidual": round(float(computed_total_residual), 1),
+                "channelSelectionTotalResidualIgnored": bool(
+                    accepted
+                    and len(targets) >= 2
+                    and computed_total_residual > tolerance
+                ),
                 "channelTargets": [
                     {
                         "channelSide": str(target["channel_side"]),
@@ -1226,18 +1301,14 @@ class ProductDecisionEngine:
                         "channelPosition": int(target["position"]),
                         "weight": round(float(target["weight"]), 1),
                         "source": str(target["source"]),
+                        "sourceFallback": bool(
+                            target.get("source_fallback", False)
+                        ),
                     }
                     for target in targets
                 ],
                 "totalExpectedWeight": round(float(total_expected_weight), 1),
-                "totalResidual": round(
-                    float(
-                        abs(float(target_weight) - float(total_expected_weight))
-                        if total_residual is None
-                        else total_residual
-                    ),
-                    1,
-                ),
+                "totalResidual": round(float(computed_total_residual), 1),
                 "attemptCount": len(attempts),
                 "attempts": attempts[:100],
                 "attemptsTruncated": len(attempts) > 100,
@@ -1457,7 +1528,7 @@ class ProductDecisionEngine:
         ]
         total_expected_weight = sum(float(item[3]) for item in selected_items)
         total_residual = abs(float(target_weight) - total_expected_weight)
-        if total_residual > tolerance:
+        if total_residual > tolerance and len(targets) < 2:
             reason = "channel_selection_total_mismatch"
             return (
                 [],
@@ -1505,6 +1576,17 @@ class ProductDecisionEngine:
                     "channelTargetWeight": round(float(target["weight"]), 1),
                     "channelTargetSource": str(target["source"]),
                     "channelProductGroupPolicy": "one_product_group_per_loadcell",
+                    "channelTargetSourceFallback": bool(
+                        target.get("source_fallback", False)
+                    ),
+                    "channelTargetTotalWeight": round(
+                        sum(float(item[0]["weight"]) for item in selected_items),
+                        1,
+                    ),
+                    "zoneTotalResidual": round(float(total_residual), 1),
+                    "channelSelectionTotalResidualIgnored": bool(
+                        len(targets) >= 2 and total_residual > tolerance
+                    ),
                     "sameProductLeftRightFallback": bool(reused_product_fallback),
                     "samePositionRepeatApplied": bool(selected_same_position),
                     "samePositionRepeatTargetKey": current_target_key,
@@ -3331,7 +3413,11 @@ class ProductDecisionEngine:
         products = [products_by_id[product_id] for product_id in product_order]
         residual = abs(target_weight - explained_weight)
         tolerance = self._freezer_weight_tolerance_grams()
-        weight_reliable = residual <= tolerance
+        channel_total_residual_ignored = bool(
+            combination_search
+            and combination_search.get("channelSelectionTotalResidualIgnored")
+        )
+        weight_reliable = residual <= tolerance or channel_total_residual_ignored
         status = JudgmentStatus.COMPLETE if weight_reliable else JudgmentStatus.PARTIAL
         confidence = sum(confidences) / len(confidences) if confidences else 0.0
         diagnostics = {
@@ -3344,6 +3430,9 @@ class ProductDecisionEngine:
             "freezer_weight_tolerance": round(tolerance, 1),
             "weight_used_as": "combination_validation",
             "weight_reliable": weight_reliable,
+            "channelSelectionTotalResidualIgnored": bool(
+                channel_total_residual_ignored
+            ),
             "multiItemTraceEvidence": bool(
                 self._freezer_trace_has_multi_item_evidence(trace_context)
             ),
@@ -9576,7 +9665,11 @@ class ProductDecisionEngine:
             branch=branch,
         )
         unit_count = max(0, sum(int(product.count) for product in result.products))
-        accepted = residual <= tolerance
+        channel_target_authoritative = (
+            branch == "freezer_vision_first"
+            and self._result_has_multi_channel_target_units(result)
+        )
+        accepted = residual <= tolerance or channel_target_authoritative
 
         diagnostics = {
             "accepted": accepted,
@@ -9587,9 +9680,17 @@ class ProductDecisionEngine:
             "tolerance": round(float(tolerance), 1),
             "unit_count": unit_count,
             "status_before_guard": result.status.value,
+            "channelTargetAuthoritative": bool(channel_target_authoritative),
+            "channelSelectionTotalResidualIgnored": bool(
+                channel_target_authoritative and residual > tolerance
+            ),
         }
         if accepted:
-            diagnostics["reason"] = "full_delta_matched"
+            diagnostics["reason"] = (
+                "channel_target_authoritative"
+                if channel_target_authoritative and residual > tolerance
+                else "full_delta_matched"
+            )
             self._record_weight_diagnostics(
                 trace_context,
                 {"final_weight_mismatch_guard": diagnostics},
@@ -9621,6 +9722,27 @@ class ProductDecisionEngine:
             weight_residual=round(float(residual), 1),
             timestamp=result.timestamp,
         )
+
+    @staticmethod
+    def _result_has_multi_channel_target_units(result: JudgmentResult) -> bool:
+        channel_keys: set[tuple[object, object, object]] = set()
+        for product in result.products:
+            for unit in getattr(product, "placement_units", []) or []:
+                if not isinstance(unit, dict):
+                    continue
+                if (
+                    str(unit.get("channelProductGroupPolicy") or "")
+                    != "one_product_group_per_loadcell"
+                ):
+                    continue
+                channel_keys.add(
+                    (
+                        unit.get("channelSide"),
+                        unit.get("channelIndex"),
+                        unit.get("channelPosition"),
+                    )
+                )
+        return len(channel_keys) >= 2
 
     @staticmethod
     def _result_explained_weight(result: JudgmentResult) -> float:

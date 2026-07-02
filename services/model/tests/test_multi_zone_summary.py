@@ -768,6 +768,114 @@ def test_freezer_close_aggregate_preserve_rewrites_stale_aggregated_products(
     assert selected_by_zone == {2: {46: 1, 77: 1}, 4: {24: 1, 44: 1}}
 
 
+def test_freezer_close_aggregate_preserves_channel_solved_products(
+    monkeypatch,
+):
+    from model_service.core.config import config
+    from model_service.session.door_session import DoorSession, TriggerResult
+    from model_service.session.freezer_close_aggregate import (
+        FreezerCloseAggregateResolver,
+    )
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+    weights = {44: 79.0, 46: 71.0, 77: 224.0}
+
+    bibigo = _product(
+        77,
+        "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+        1,
+        price=3900,
+        confidence=0.9,
+    )
+    bibigo.placement_units = [
+        {
+            "channelSide": "left",
+            "channelIndex": 0,
+            "channelPosition": 0,
+            "targetWeight": 219.0,
+            "channelProductGroupPolicy": "one_product_group_per_loadcell",
+        }
+    ]
+    lala = _product(
+        46,
+        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+        1,
+        price=500,
+        confidence=0.9,
+    )
+    lala.placement_units = [
+        {
+            "channelSide": "right",
+            "channelIndex": 1,
+            "channelPosition": 1,
+            "targetWeight": 73.0,
+            "channelProductGroupPolicy": "one_product_group_per_loadcell",
+        }
+    ]
+    melona = _product(
+        44,
+        "STICK_BINGGRAE_MELONA_75ML",
+        1,
+        price=800,
+        confidence=0.9,
+    )
+
+    zone_2 = DoorSession(
+        door_session_id="door-zone-2",
+        zone=2,
+        status="complete",
+        triggers=[
+            TriggerResult(
+                trigger_id="zone2-bibigo-lala-channel",
+                session_id="zone2-bibigo-lala-channel-session",
+                timestamp=100.0,
+                products=[bibigo, lala],
+                delta_weight=-278.8,
+                confidence=0.9,
+                video_paths={},
+            )
+        ],
+        aggregated_products={},
+        last_trigger_at=100.0,
+    )
+    zone_3 = DoorSession(
+        door_session_id="door-zone-3",
+        zone=3,
+        status="complete",
+        triggers=[
+            TriggerResult(
+                trigger_id="zone3-melona",
+                session_id="zone3-melona-session",
+                timestamp=110.0,
+                products=[melona],
+                delta_weight=-79.0,
+                confidence=0.9,
+                video_paths={},
+            )
+        ],
+        aggregated_products={},
+        last_trigger_at=110.0,
+    )
+
+    diagnostics = FreezerCloseAggregateResolver(
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    ).apply({2: zone_2, 3: zone_3})
+
+    assert diagnostics is not None
+    assert diagnostics["reason"] == "freezer_close_aggregate_trigger_products_preserved"
+    assert diagnostics["channelSolvedProductsPreserved"] is True
+    assert diagnostics["triggerSelectedResidual"] == 16.2
+    assert {
+        product.product_id: product.count
+        for product in zone_2.get_active_products()
+    } == {77: 1, 46: 1}
+    assert {
+        product.product_id: product.count
+        for product in zone_3.get_active_products()
+    } == {44: 1}
+
+
 def test_freezer_close_aggregate_suppresses_returned_yomamte_candidate(
     monkeypatch,
     tmp_path,
