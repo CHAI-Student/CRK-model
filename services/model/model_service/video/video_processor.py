@@ -1208,6 +1208,60 @@ class VideoProcessor:
             "handPathHardReject": hand_path_hard_reject,
         }
 
+    @staticmethod
+    def _freezer_static_low_vote_hard_reject(entry: dict[str, Any]) -> bool:
+        """Reject shelf-like single-camera freezer candidates with floor evidence."""
+        if bool(entry.get("dualCameraExitPath")):
+            return False
+        if not bool(entry.get("staticShelfLikely")):
+            return False
+        if bool(entry.get("trajectoryExitPathPassed")):
+            return False
+        try:
+            exit_path_votes = int(entry.get("freezerExitPathVotes", 0) or 0)
+        except (TypeError, ValueError):
+            exit_path_votes = 0
+        min_votes = max(1, int(config.vision.freezer_min_vote_count))
+        if exit_path_votes > min_votes:
+            return False
+        try:
+            motion_threshold = float(
+                entry.get(
+                    "motionThresholdPx",
+                    config.vision.freezer_motion_min_displacement_px,
+                )
+                or 0.0
+            )
+            path_displacement = float(entry.get("pathDisplacementPx", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return motion_threshold > 0.0 and path_displacement < motion_threshold
+
+    @staticmethod
+    def _freezer_vote_floor_hard_reject(entry: dict[str, Any]) -> bool:
+        min_votes = max(1, int(config.vision.freezer_min_vote_count))
+        try:
+            exit_path_votes = int(entry.get("freezerExitPathVotes", 0) or 0)
+        except (TypeError, ValueError):
+            exit_path_votes = 0
+        if exit_path_votes <= 0 or exit_path_votes >= min_votes:
+            return False
+        try:
+            vote_count = max(
+                int(entry.get("vote_count", 0) or 0),
+                int(entry.get("raw_vote_count", 0) or 0),
+                exit_path_votes,
+            )
+        except (TypeError, ValueError):
+            vote_count = exit_path_votes
+        if vote_count >= min_votes:
+            return False
+        try:
+            vote_ratio = float(entry.get("voteRatio", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            vote_ratio = 0.0
+        return vote_ratio < float(config.vision.freezer_min_vote_ratio)
+
     @classmethod
     def _freezer_stage_camera_exit_counts(
         cls,
@@ -1520,6 +1574,15 @@ class VideoProcessor:
                 "rank": int(index) + 1,
                 "class_id": int(vote.class_id),
                 "name": vote.class_name,
+                "vote_count": int(getattr(vote, "vote_count", 0) or 0),
+                "raw_vote_count": max(
+                    int(getattr(vote, "raw_vote_count", 0) or 0),
+                    int(getattr(vote, "vote_count", 0) or 0),
+                ),
+                "voteRatio": round(
+                    float(getattr(vote, "vote_ratio", 0.0) or 0.0),
+                    4,
+                ),
                 "confidence": round(
                     float(getattr(vote, "weighted_confidence", 0.0) or 0.0),
                     4,
@@ -1549,6 +1612,7 @@ class VideoProcessor:
                 "maxDistancePx": interaction_payload.get("maxDistancePx"),
                 "centerSpanX": interaction_payload.get("centerSpanX"),
                 "centerSpanY": interaction_payload.get("centerSpanY"),
+                "motionThresholdPx": interaction_payload.get("motionThresholdPx"),
                 "trajectoryExitPathPassed": bool(
                     interaction_payload.get("trajectoryExitPathPassed")
                 ),
@@ -1577,8 +1641,10 @@ class VideoProcessor:
 
         considered_vision: list[dict[str, Any]] = []
         passthrough_items: list[dict[str, Any]] = []
+        rejected_interaction_items: list[dict[str, Any]] = []
         rejected_source_items: list[dict[str, Any]] = []
         rejected_confidence_items: list[dict[str, Any]] = []
+        rejected_vote_floor_items: list[dict[str, Any]] = []
         for index, vote in enumerate(ranked_votes):
             source = str(getattr(vote, "source", "vision") or "vision")
             stage_entry = cls._freezer_stage_entry(trace_context, int(vote.class_id))
@@ -1605,6 +1671,17 @@ class VideoProcessor:
                 entry["reason"] = "raw_confidence_below_threshold"
                 rejected_confidence_items.append(entry)
                 continue
+            if cls._freezer_vote_floor_hard_reject(entry):
+                entry["reason"] = "vote_floor_below_threshold"
+                rejected_vote_floor_items.append(entry)
+                continue
+            if cls._freezer_static_low_vote_hard_reject(entry):
+                entry["reason"] = "static_low_vote_shelf_candidate"
+                entry["interactionRejectedReason"] = (
+                    "static_low_vote_shelf_candidate"
+                )
+                rejected_interaction_items.append(entry)
+                continue
             passthrough_items.append(
                 {
                     "index": index,
@@ -1618,7 +1695,7 @@ class VideoProcessor:
                 }
             )
 
-        interaction_rejected_items: list[dict[str, Any]] = []
+        interaction_rejected_items = list(rejected_interaction_items)
         hand_blocked_items = [
             item
             for item in passthrough_items
@@ -1629,7 +1706,9 @@ class VideoProcessor:
             for item in hand_blocked_items:
                 item["entry"]["reason"] = "hand_path_blocked"
                 item["entry"]["interactionRejectedReason"] = "hand_path_blocked"
-            interaction_rejected_items = [item["entry"] for item in hand_blocked_items]
+            interaction_rejected_items.extend(
+                item["entry"] for item in hand_blocked_items
+            )
             selectable_items = [
                 item
                 for item in passthrough_items
@@ -1688,6 +1767,7 @@ class VideoProcessor:
             "rejectedInteractionCandidates": interaction_rejected_items,
             "rejectedSourceCandidates": rejected_source_items,
             "rejectedConfidenceCandidates": rejected_confidence_items,
+            "rejectedVoteFloorCandidates": rejected_vote_floor_items,
         }
         cls._record_freezer_candidate_filter_diagnostics(trace_context, diagnostics)
         logger.info(

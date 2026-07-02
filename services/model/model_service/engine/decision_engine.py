@@ -219,6 +219,7 @@ class ProductDecisionEngine:
         vision_only: bool = False,
         active_products: Optional[List] = None,
         trace_context: Optional[object] = None,
+        prior_selected_product_idxs: Optional[object] = None,
     ) -> JudgmentResult:
         """
         상품 판단 수행.
@@ -276,6 +277,7 @@ class ProductDecisionEngine:
             timestamp=timestamp,
             active_products=active_products,
             trace_context=trace_context,
+            prior_selected_product_idxs=prior_selected_product_idxs,
         )
         if freezer_result is not None:
             if self._result_has_positive_product_weight(freezer_result):
@@ -542,6 +544,7 @@ class ProductDecisionEngine:
         timestamp: float,
         active_products: Optional[List],
         trace_context: Optional[object],
+        prior_selected_product_idxs: Optional[object],
     ) -> Optional[JudgmentResult]:
         """Use freezer vision identity candidates and validate counts by weight."""
         if not self._is_freezer_mode() or delta_weight >= 0:
@@ -552,11 +555,19 @@ class ProductDecisionEngine:
             trace_context
         )
         rejected_stage_only_candidates: list[dict[str, Any]] = []
-        vision_candidates = [
+        rejected_roi_weight_rescue_candidates: list[dict[str, Any]] = []
+        regular_vision_candidates = [
             candidate
             for candidate in vision_candidates
             if str(getattr(candidate, "source", "vision") or "vision") == "vision"
         ]
+        vision_candidates = self._augment_freezer_roi_weight_rescue_candidates(
+            vision_candidates=regular_vision_candidates,
+            active_products=active_products,
+            trace_context=trace_context,
+            target_weight=target_weight,
+            rejected_candidates=rejected_roi_weight_rescue_candidates,
+        )
         if not vision_candidates:
             diagnostics = {
                 "accepted": False,
@@ -566,6 +577,10 @@ class ProductDecisionEngine:
             if rejected_stage_only_candidates:
                 diagnostics["rejectedStageOnlyCandidates"] = (
                     rejected_stage_only_candidates
+                )
+            if rejected_roi_weight_rescue_candidates:
+                diagnostics["rejectedRoiWeightRescueCandidates"] = (
+                    rejected_roi_weight_rescue_candidates
                 )
             self._record_weight_diagnostics(
                 trace_context,
@@ -586,7 +601,7 @@ class ProductDecisionEngine:
                 candidate
                 for candidate in vision_candidates[top_k:]
                 if str(getattr(candidate, "source", "") or "")
-                == "freezer_stage_exit_path"
+                in {"freezer_stage_exit_path", "freezer_roi_weight_rescue"}
             ],
         ]
         candidate_class_ids = {int(candidate.class_id) for candidate in candidate_pool}
@@ -645,6 +660,7 @@ class ProductDecisionEngine:
                 "maxDistancePx": interaction_evidence["maxDistancePx"],
                 "centerSpanX": interaction_evidence["centerSpanX"],
                 "centerSpanY": interaction_evidence["centerSpanY"],
+                "motionThresholdPx": interaction_evidence["motionThresholdPx"],
                 "trajectoryExitPathPassed": interaction_evidence[
                     "trajectoryExitPathPassed"
                 ],
@@ -753,11 +769,12 @@ class ProductDecisionEngine:
                 ),
             )
             diag.update(
-                {
-                    "product_name": getattr(product, "product_name", candidate.class_name),
-                    "product_eng_name": getattr(product, "product_eng_name", ""),
-                    "stock": stock,
-                    "unit_weight": round(unit_weight, 1),
+                    {
+                        "product_name": getattr(product, "product_name", candidate.class_name),
+                        "product_idx": getattr(product, "product_idx", None),
+                        "product_eng_name": getattr(product, "product_eng_name", ""),
+                        "stock": stock,
+                        "unit_weight": round(unit_weight, 1),
                     "raw_instance_count_hint": raw_instance_count_hint,
                     "instance_count_hint": count,
                     "count": count,
@@ -768,6 +785,14 @@ class ProductDecisionEngine:
                     "reason": "candidate",
                 }
             )
+            static_low_vote_hard_reject = (
+                self._freezer_static_low_vote_hard_reject(diag)
+            )
+            if static_low_vote_hard_reject:
+                diag["staticLowVoteHardReject"] = True
+                diag["interactionRejectedReason"] = (
+                    "static_low_vote_shelf_candidate"
+                )
             if repeat_diagnostic is not None:
                 if repeat_diagnostic.get("accepted"):
                     diag.update(
@@ -819,7 +844,7 @@ class ProductDecisionEngine:
                 "dual_camera_exit_path": bool(diag["dualCameraExitPath"]),
                 "stage_only": bool(diag["stageOnly"]),
                 "source": source,
-                "source_priority": 1 if source == "freezer_stage_exit_path" else 0,
+                "source_priority": self._candidate_source_priority(source),
                 "diagnostics": diag,
                 "interaction_penalty": bool(
                     interaction_evidence["interactionPenalty"]
@@ -827,6 +852,7 @@ class ProductDecisionEngine:
                 "hand_path_hard_reject": bool(
                     interaction_evidence["handPathHardReject"]
                 ),
+                "static_low_vote_hard_reject": static_low_vote_hard_reject,
                 "same_product_repeat": repeat_diagnostic
                 if repeat_diagnostic is not None
                 and repeat_diagnostic.get("accepted")
@@ -846,6 +872,10 @@ class ProductDecisionEngine:
                 diagnostics["rejectedStageOnlyCandidates"] = (
                     rejected_stage_only_candidates
                 )
+            if rejected_roi_weight_rescue_candidates:
+                diagnostics["rejectedRoiWeightRescueCandidates"] = (
+                    rejected_roi_weight_rescue_candidates
+                )
             self._record_weight_diagnostics(
                 trace_context,
                 {
@@ -859,9 +889,60 @@ class ProductDecisionEngine:
             self._filter_freezer_interaction_rejections(options)
         )
 
+        channel_targets = self._freezer_channel_targets_from_trace(trace_context)
+        if len(channel_targets) >= 2:
+            selected_options, reason, search_diagnostics = (
+                self._select_freezer_channel_target_combination(
+                    options,
+                    channel_targets=channel_targets,
+                    target_weight=target_weight,
+                    prior_selected_product_idxs=prior_selected_product_idxs,
+                )
+            )
+            if selected_options:
+                return self._create_freezer_vision_result(
+                    selected_options=selected_options,
+                    delta_weight=delta_weight,
+                    target_weight=target_weight,
+                    timestamp=timestamp,
+                    trace_context=trace_context,
+                    considered=considered,
+                    interaction_rejected_options=interaction_rejected_options,
+                    rejected_stage_only_candidates=rejected_stage_only_candidates,
+                    rejected_roi_weight_rescue_candidates=(
+                        rejected_roi_weight_rescue_candidates
+                    ),
+                    reason=reason,
+                    combination_search=search_diagnostics,
+                )
+            self._record_freezer_no_weight_fit(
+                delta_weight=delta_weight,
+                target_weight=target_weight,
+                timestamp=timestamp,
+                trace_context=trace_context,
+                considered=considered,
+                interaction_rejected_options=interaction_rejected_options,
+                rejected_stage_only_candidates=rejected_stage_only_candidates,
+                rejected_roi_weight_rescue_candidates=(
+                    rejected_roi_weight_rescue_candidates
+                ),
+                search_diagnostics=search_diagnostics,
+            )
+            return JudgmentResult(
+                products=[],
+                total_price=0,
+                confidence=0.0,
+                status=JudgmentStatus.UNCERTAIN,
+                weight_delta=delta_weight,
+                weight_explained=0.0,
+                weight_residual=round(target_weight, 1),
+                timestamp=timestamp,
+            )
+
         ordered_selection = self._select_freezer_ordered_vision_combination(
             options,
             target_weight=target_weight,
+            prior_selected_product_idxs=prior_selected_product_idxs,
         )
         selected_options, reason, search_diagnostics = ordered_selection
         if selected_options:
@@ -874,6 +955,9 @@ class ProductDecisionEngine:
                 considered=considered,
                 interaction_rejected_options=interaction_rejected_options,
                 rejected_stage_only_candidates=rejected_stage_only_candidates,
+                rejected_roi_weight_rescue_candidates=(
+                    rejected_roi_weight_rescue_candidates
+                ),
                 reason=reason,
                 combination_search=search_diagnostics,
             )
@@ -886,6 +970,7 @@ class ProductDecisionEngine:
             considered=considered,
             interaction_rejected_options=interaction_rejected_options,
             rejected_stage_only_candidates=rejected_stage_only_candidates,
+            rejected_roi_weight_rescue_candidates=rejected_roi_weight_rescue_candidates,
             search_diagnostics=search_diagnostics,
         )
         return JudgmentResult(
@@ -899,7 +984,455 @@ class ProductDecisionEngine:
             timestamp=timestamp,
         )
 
+    def _freezer_channel_targets_from_trace(
+        self,
+        trace_context: Optional[object],
+    ) -> list[dict[str, Any]]:
+        loadcell = getattr(trace_context, "loadcell", None)
+        if not isinstance(loadcell, dict):
+            return []
+        targets: list[dict[str, Any]] = []
+        for fallback_index, entry in enumerate(
+            loadcell.get("channel_removal_segment_targets") or []
+        ):
+            if not isinstance(entry, dict):
+                continue
+            weight = abs(self._coerce_float(entry.get("weight", 0.0)))
+            if weight < self.min_weight_change:
+                continue
+            channel_side = str(
+                entry.get("channel_side")
+                or entry.get("side")
+                or (
+                    "left"
+                    if fallback_index == 0
+                    else "right"
+                    if fallback_index == 1
+                    else f"channel_{fallback_index + 1}"
+                )
+            )
+            targets.append(
+                {
+                    "position": self._coerce_int(
+                        entry.get("channel_position", fallback_index)
+                    ),
+                    "segment_index": self._coerce_int(
+                        entry.get("segment_index", fallback_index)
+                    ),
+                    "channel_index": self._coerce_int(
+                        entry.get("channel_index", fallback_index)
+                    ),
+                    "channel_side": channel_side,
+                    "weight": weight,
+                    "source": str(
+                        entry.get("source") or "channel_removal_segment_targets"
+                    ),
+                }
+            )
+        return sorted(
+            targets,
+            key=lambda target: (
+                int(target["position"]),
+                int(target["segment_index"]),
+                int(target["channel_index"]),
+            ),
+        )
+
+    def _select_freezer_channel_target_combination(
+        self,
+        options: list[dict[str, Any]],
+        *,
+        channel_targets: list[dict[str, Any]],
+        target_weight: float,
+        prior_selected_product_idxs: Optional[object] = None,
+    ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+        """Solve freezer left/right loadcell targets as one product group each."""
+
+        ordered_options = sorted(
+            options,
+            key=lambda option: (int(option["rank"]), -float(option["confidence"])),
+        )
+        tolerance = self._freezer_weight_tolerance_grams()
+        targets = list(channel_targets)
+        attempts: list[dict[str, Any]] = []
+        order = 0
+
+        prior_product_idxs = self._normalize_prior_selected_product_idxs(
+            prior_selected_product_idxs
+        )
+        excluded_product_idxs = self._freezer_prior_excluded_product_idxs(
+            ordered_options,
+            prior_product_idxs,
+        )
+        if bool(config.weight.freezer_prior_trigger_dedupe_enabled):
+            eligible_options = [
+                option
+                for option in ordered_options
+                if self._freezer_option_product_idx(option) not in excluded_product_idxs
+            ]
+            prior_exclusion_applied = bool(excluded_product_idxs)
+        else:
+            eligible_options = ordered_options
+            prior_exclusion_applied = False
+
+        def count_cap(option: dict[str, Any]) -> int:
+            product = option["product"]
+            caps = [
+                max(1, int(config.weight.max_items_per_segment)),
+                max(1, int(config.weight.same_product_max_count)),
+                max(1, int(config.weight.max_count_per_item)),
+                max(1, int(config.weight.max_combination_items)),
+            ]
+            stock = self._coerce_int(getattr(product, "stock_qty", 0))
+            if stock > 0:
+                caps.append(stock)
+            return max(0, min(caps))
+
+        def record_attempt(
+            target: dict[str, Any],
+            option: dict[str, Any],
+            *,
+            count: int,
+            expected_weight: float,
+            residual: float,
+            accepted: bool,
+        ) -> int:
+            nonlocal order
+            order += 1
+            attempts.append(
+                {
+                    "order": order,
+                    "channelSide": str(target["channel_side"]),
+                    "channelIndex": int(target["channel_index"]),
+                    "channelPosition": int(target["position"]),
+                    "targetWeight": round(float(target["weight"]), 1),
+                    "classId": int(option["candidate"].class_id),
+                    "name": str(option["candidate"].class_name),
+                    "count": int(count),
+                    "expectedWeight": round(float(expected_weight), 1),
+                    "residual": round(float(residual), 1),
+                    "accepted": bool(accepted),
+                }
+            )
+            return order
+
+        def diagnostics(
+            *,
+            accepted: bool,
+            reason: str,
+            selected_order: Optional[int] = None,
+            total_expected_weight: float = 0.0,
+            total_residual: Optional[float] = None,
+        ) -> dict[str, Any]:
+            result = {
+                "policy": "loadcell_channel_product_group_ordered_weight_validation",
+                "accepted": bool(accepted),
+                "reason": reason,
+                "targetWeight": round(float(target_weight), 1),
+                "tolerance": round(float(tolerance), 1),
+                "channelTargets": [
+                    {
+                        "channelSide": str(target["channel_side"]),
+                        "channelIndex": int(target["channel_index"]),
+                        "channelPosition": int(target["position"]),
+                        "weight": round(float(target["weight"]), 1),
+                        "source": str(target["source"]),
+                    }
+                    for target in targets
+                ],
+                "totalExpectedWeight": round(float(total_expected_weight), 1),
+                "totalResidual": round(
+                    float(
+                        abs(float(target_weight) - float(total_expected_weight))
+                        if total_residual is None
+                        else total_residual
+                    ),
+                    1,
+                ),
+                "attemptCount": len(attempts),
+                "attempts": attempts[:100],
+                "attemptsTruncated": len(attempts) > 100,
+                "priorSelectedProductIdxs": sorted(prior_product_idxs),
+                "priorExcludedProductIdxs": sorted(excluded_product_idxs),
+                "priorExclusionApplied": bool(prior_exclusion_applied),
+                "priorExclusionFallback": False,
+                "maxProductGroupsPerShelf": 2,
+            }
+            if selected_order is not None:
+                result["selectedOrder"] = int(selected_order)
+            return result
+
+        if len(targets) > 2:
+            reason = "too_many_freezer_channel_targets"
+            return [], reason, diagnostics(accepted=False, reason=reason)
+        if len(targets) < 2:
+            reason = "insufficient_freezer_channel_targets"
+            return [], reason, diagnostics(accepted=False, reason=reason)
+        if not eligible_options:
+            reason = "no_channel_candidates_after_prior_exclusion"
+            return [], reason, diagnostics(accepted=False, reason=reason)
+
+        selected_by_position: dict[int, tuple[dict[str, Any], dict[str, Any], int, float, float, int]] = {}
+        used_product_idxs: set[str] = set()
+
+        def option_key(option: dict[str, Any]) -> str:
+            return self._freezer_option_product_idx(option) or str(
+                int(option["candidate"].class_id)
+            )
+
+        def select_for_target(
+            target: dict[str, Any],
+            *,
+            counts: range,
+        ) -> bool:
+            position = int(target["position"])
+            for count in counts:
+                first_reused_fit: Optional[
+                    tuple[
+                        dict[str, Any],
+                        dict[str, Any],
+                        int,
+                        float,
+                        float,
+                        int,
+                        str,
+                    ]
+                ] = None
+                for option in eligible_options:
+                    product_idx = option_key(option)
+                    if count_cap(option) < count:
+                        continue
+                    expected_weight = float(option["unit_weight"]) * count
+                    residual = abs(float(target["weight"]) - expected_weight)
+                    accepted = residual <= tolerance
+                    attempt_order = record_attempt(
+                        target,
+                        option,
+                        count=count,
+                        expected_weight=expected_weight,
+                        residual=residual,
+                        accepted=accepted,
+                    )
+                    if not accepted:
+                        continue
+                    selected_item = (
+                        target,
+                        option,
+                        count,
+                        expected_weight,
+                        residual,
+                        attempt_order,
+                        product_idx,
+                    )
+                    if product_idx in used_product_idxs:
+                        if first_reused_fit is None:
+                            first_reused_fit = selected_item
+                        continue
+                    selected_by_position[position] = (
+                        target,
+                        option,
+                        count,
+                        expected_weight,
+                        residual,
+                        attempt_order,
+                    )
+                    used_product_idxs.add(product_idx)
+                    return True
+                if first_reused_fit is not None:
+                    (
+                        reused_target,
+                        reused_option,
+                        reused_count,
+                        reused_expected_weight,
+                        reused_residual,
+                        reused_attempt_order,
+                        reused_product_idx,
+                    ) = first_reused_fit
+                    selected_by_position[position] = (
+                        reused_target,
+                        reused_option,
+                        reused_count,
+                        reused_expected_weight,
+                        reused_residual,
+                        reused_attempt_order,
+                    )
+                    used_product_idxs.add(reused_product_idx)
+                    return True
+            return False
+
+        for target in targets:
+            select_for_target(target, counts=range(1, 2))
+
+        max_count = max(count_cap(option) for option in eligible_options)
+        for target in targets:
+            if int(target["position"]) in selected_by_position:
+                continue
+            select_for_target(target, counts=range(2, max_count + 1))
+
+        if len(selected_by_position) != len(targets):
+            reason = "channel_target_without_weight_fit"
+            total_expected_weight = sum(
+                float(item[3]) for item in selected_by_position.values()
+            )
+            return (
+                [],
+                reason,
+                diagnostics(
+                    accepted=False,
+                    reason=reason,
+                    total_expected_weight=total_expected_weight,
+                ),
+            )
+
+        selected_items = [
+            selected_by_position[int(target["position"])]
+            for target in targets
+        ]
+        total_expected_weight = sum(float(item[3]) for item in selected_items)
+        total_residual = abs(float(target_weight) - total_expected_weight)
+        if total_residual > tolerance:
+            reason = "channel_selection_total_mismatch"
+            return (
+                [],
+                reason,
+                diagnostics(
+                    accepted=False,
+                    reason=reason,
+                    total_expected_weight=total_expected_weight,
+                    total_residual=total_residual,
+                ),
+            )
+
+        reason = "freezer_channel_target_product_groups"
+        selected_order = min(int(item[5]) for item in selected_items)
+        selected_options: list[dict[str, Any]] = []
+        for target, option, count, expected_weight, residual, attempt_order in selected_items:
+            option_diagnostics = dict(option["diagnostics"])
+            option_diagnostics.update(
+                {
+                    "count": int(count),
+                    "instance_count_hint": int(count),
+                    "expected_weight": round(float(expected_weight), 1),
+                    "weight_residual": round(float(residual), 1),
+                    "weight_used_as": "channel_combination_validation",
+                    "weight_reliable": bool(residual <= tolerance),
+                    "selectionTier": reason,
+                    "combinationOrder": int(attempt_order),
+                    "combinationExpectedWeight": round(
+                        float(total_expected_weight),
+                        1,
+                    ),
+                    "combinationResidual": round(float(total_residual), 1),
+                    "channelSide": str(target["channel_side"]),
+                    "channelIndex": int(target["channel_index"]),
+                    "channelPosition": int(target["position"]),
+                    "channelTargetWeight": round(float(target["weight"]), 1),
+                    "channelTargetSource": str(target["source"]),
+                    "channelProductGroupPolicy": "one_product_group_per_loadcell",
+                }
+            )
+            cloned = dict(option)
+            cloned.update(
+                {
+                    "count": int(count),
+                    "expected_weight": float(expected_weight),
+                    "residual": float(residual),
+                    "diagnostics": option_diagnostics,
+                }
+            )
+            selected_options.append(cloned)
+
+        return (
+            selected_options,
+            reason,
+            diagnostics(
+                accepted=True,
+                reason=reason,
+                selected_order=selected_order,
+                total_expected_weight=total_expected_weight,
+                total_residual=total_residual,
+            ),
+        )
+
     def _select_freezer_ordered_vision_combination(
+        self,
+        options: list[dict[str, Any]],
+        *,
+        target_weight: float,
+        prior_selected_product_idxs: Optional[object] = None,
+    ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+        prior_product_idxs = self._normalize_prior_selected_product_idxs(
+            prior_selected_product_idxs
+        )
+        excluded_product_idxs = self._freezer_prior_excluded_product_idxs(
+            options,
+            prior_product_idxs,
+        )
+        if (
+            bool(config.weight.freezer_prior_trigger_dedupe_enabled)
+            and excluded_product_idxs
+        ):
+            if len(excluded_product_idxs) >= len(options):
+                reason = "no_candidates_after_prior_trigger_exclusion"
+                selected: list[dict[str, Any]] = []
+                search = self._freezer_ordered_search_diagnostics(
+                    attempts=[],
+                    target_weight=target_weight,
+                    accepted=False,
+                    reason=reason,
+                )
+                self._annotate_prior_exclusion_search(
+                    search,
+                    prior_selected_product_idxs=prior_product_idxs,
+                    excluded_product_idxs=excluded_product_idxs,
+                    applied=True,
+                    fallback=False,
+                )
+                return selected, reason, search
+
+            remaining_options = [
+                option
+                for option in options
+                if self._freezer_option_product_idx(option) not in excluded_product_idxs
+            ]
+            selected, reason, search = (
+                self._select_freezer_ordered_vision_combination_once(
+                    remaining_options,
+                    target_weight=target_weight,
+                )
+            )
+            self._annotate_prior_exclusion_search(
+                search,
+                prior_selected_product_idxs=prior_product_idxs,
+                excluded_product_idxs=excluded_product_idxs,
+                applied=True,
+                fallback=False,
+            )
+            if selected:
+                self._annotate_prior_exclusion_selection(
+                    selected,
+                    applied=True,
+                    fallback=False,
+                )
+                return selected, reason, search
+
+            return selected, reason, search
+
+        selected, reason, search = self._select_freezer_ordered_vision_combination_once(
+            options,
+            target_weight=target_weight,
+        )
+        if prior_product_idxs:
+            self._annotate_prior_exclusion_search(
+                search,
+                prior_selected_product_idxs=prior_product_idxs,
+                excluded_product_idxs=excluded_product_idxs,
+                applied=False,
+                fallback=False,
+            )
+        return selected, reason, search
+
+    def _select_freezer_ordered_vision_combination_once(
         self,
         options: list[dict[str, Any]],
         *,
@@ -911,6 +1444,7 @@ class ProductDecisionEngine:
         )
         tolerance = self._freezer_weight_tolerance_grams()
         attempts: list[dict[str, Any]] = []
+        accepted_attempts: list[dict[str, Any]] = []
         order = 0
 
         def count_cap(option: dict[str, Any]) -> int:
@@ -989,7 +1523,64 @@ class ProductDecisionEngine:
                 "accepted": bool(accepted),
             }
             attempts.append(attempt)
+            if accepted:
+                accepted_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "selected": selected,
+                        "expected_weight": float(expected_weight),
+                        "residual": float(residual),
+                    }
+                )
             return attempt
+
+        def build_selection(
+            accepted_item: dict[str, Any],
+            *,
+            distinct_mixed_preferred: bool = False,
+        ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+            reason = "freezer_ordered_vision_candidate_pool"
+            attempt = accepted_item["attempt"]
+            selected = accepted_item["selected"]
+            search_diagnostics = self._freezer_ordered_search_diagnostics(
+                attempts=attempts,
+                target_weight=target_weight,
+                accepted=True,
+                reason=reason,
+                selected_order=int(attempt["order"]),
+            )
+            search_diagnostics["distinctMixedPreferenceEnabled"] = bool(
+                config.weight.freezer_distinct_mixed_preference_enabled
+            )
+            search_diagnostics["distinctMixedMaxExtraResidualGrams"] = round(
+                max(
+                    0.0,
+                    float(
+                        config.weight.freezer_distinct_mixed_max_extra_residual_grams
+                    ),
+                ),
+                1,
+            )
+            search_diagnostics["distinctMixedPreferred"] = bool(
+                distinct_mixed_preferred
+            )
+            return (
+                [
+                    clone_option(
+                        option,
+                        count=count,
+                        total_expected_weight=float(
+                            accepted_item["expected_weight"]
+                        ),
+                        total_residual=float(accepted_item["residual"]),
+                        reason=reason,
+                        order_index=int(attempt["order"]),
+                    )
+                    for option, count in selected
+                ],
+                reason,
+                search_diagnostics,
+            )
 
         max_single_count = max(caps_by_rank.values() or [0])
         for count in range(1, max_single_count + 1):
@@ -998,33 +1589,12 @@ class ProductDecisionEngine:
                     continue
                 expected_weight = float(option["unit_weight"]) * count
                 residual = abs(float(target_weight) - expected_weight)
-                attempt = record_attempt(
+                record_attempt(
                     [(option, count)],
                     expected_weight=expected_weight,
                     residual=residual,
                     accepted=residual <= tolerance,
                 )
-                if residual <= tolerance:
-                    reason = "freezer_ordered_vision_candidate_pool"
-                    return (
-                        [
-                            clone_option(
-                                option,
-                                count=count,
-                                total_expected_weight=expected_weight,
-                                total_residual=residual,
-                                reason=reason,
-                                order_index=int(attempt["order"]),
-                            )
-                        ],
-                        reason,
-                        self._freezer_ordered_search_diagnostics(
-                            attempts=attempts,
-                            target_weight=target_weight,
-                            accepted=True,
-                            reason=reason,
-                        ),
-                    )
 
         def count_allocations(
             *,
@@ -1072,34 +1642,81 @@ class ProductDecisionEngine:
                         )
                         residual = abs(float(target_weight) - expected_weight)
                         selected = list(zip(combo, counts))
-                        attempt = record_attempt(
+                        record_attempt(
                             selected,
                             expected_weight=expected_weight,
                             residual=residual,
                             accepted=residual <= tolerance,
                         )
-                        if residual <= tolerance:
-                            reason = "freezer_ordered_vision_candidate_pool"
-                            return (
-                                [
-                                    clone_option(
-                                        option,
-                                        count=count,
-                                        total_expected_weight=expected_weight,
-                                        total_residual=residual,
-                                        reason=reason,
-                                        order_index=int(attempt["order"]),
-                                    )
-                                    for option, count in selected
-                                ],
-                                reason,
-                                self._freezer_ordered_search_diagnostics(
-                                    attempts=attempts,
-                                    target_weight=target_weight,
-                                    accepted=True,
-                                    reason=reason,
-                                ),
+        def accepted_total_count(item: dict[str, Any]) -> int:
+            return sum(int(count) for _, count in item["selected"])
+
+        def accepted_kind_count(item: dict[str, Any]) -> int:
+            return len(item["selected"])
+
+        def residual_rank_key(item: dict[str, Any]) -> tuple[float, int, int, int, int]:
+            return (
+                round(float(item["residual"]), 4),
+                accepted_total_count(item),
+                min(
+                    self._candidate_source_priority(option.get("source", "vision"))
+                    for option, _ in item["selected"]
+                ),
+                min(int(option["rank"]) for option, _ in item["selected"]),
+                int(item["attempt"]["order"]),
+            )
+
+        if accepted_attempts:
+            first_accepted = accepted_attempts[0]
+            if (
+                accepted_kind_count(first_accepted) == 1
+                and accepted_total_count(first_accepted) > 1
+            ):
+                mixed_attempts = [
+                    item
+                    for item in accepted_attempts
+                    if accepted_kind_count(item) > 1
+                ]
+                if mixed_attempts:
+                    if bool(config.weight.freezer_distinct_mixed_preference_enabled):
+                        first_total_count = accepted_total_count(first_accepted)
+                        max_extra_residual = max(
+                            0.0,
+                            float(
+                                config.weight.freezer_distinct_mixed_max_extra_residual_grams
+                            ),
+                        )
+                        all_single_same_count_mixed_attempts = [
+                            item
+                            for item in mixed_attempts
+                            if accepted_total_count(item) == first_total_count
+                            and all(
+                                int(count) == 1 for _, count in item["selected"]
                             )
+                            and float(item["residual"])
+                            <= float(first_accepted["residual"]) + max_extra_residual
+                        ]
+                        if all_single_same_count_mixed_attempts:
+                            best_distinct_mixed = min(
+                                all_single_same_count_mixed_attempts,
+                                key=residual_rank_key,
+                            )
+                            return build_selection(
+                                best_distinct_mixed,
+                                distinct_mixed_preferred=True,
+                            )
+
+                    best_mixed = min(mixed_attempts, key=residual_rank_key)
+                    residual_gain = float(first_accepted["residual"]) - float(
+                        best_mixed["residual"]
+                    )
+                    material_gain = max(5.0, tolerance / 3.0)
+                    if residual_gain >= material_gain:
+                        return build_selection(
+                            best_mixed,
+                            distinct_mixed_preferred=True,
+                        )
+            return build_selection(first_accepted)
 
         reason = "no_weight_fit_for_vision_candidate_pool"
         return (
@@ -1113,6 +1730,110 @@ class ProductDecisionEngine:
             ),
         )
 
+    @staticmethod
+    def _normalize_prior_selected_product_idxs(value: Optional[object]) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, (str, int, float)):
+            items = [value]
+        else:
+            try:
+                items = list(value)  # type: ignore[arg-type]
+            except TypeError:
+                items = [value]
+        normalized: set[str] = set()
+        for item in items:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.add(text)
+        return normalized
+
+    @staticmethod
+    def _freezer_option_product_idx(option: dict[str, Any]) -> Optional[str]:
+        product = option.get("product")
+        diagnostics = option.get("diagnostics")
+        product_idx = getattr(product, "product_idx", None)
+        if product_idx is None and isinstance(diagnostics, dict):
+            product_idx = diagnostics.get("product_idx")
+        if product_idx is not None:
+            text = str(product_idx).strip()
+            if text:
+                return text
+
+        product_id = getattr(product, "yolo_class_id", None)
+        if product_id is None:
+            candidate = option.get("candidate")
+            product_id = getattr(candidate, "class_id", None)
+        try:
+            return f"id:{int(product_id)}"
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _freezer_option_product_keys(cls, option: dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        product_idx = cls._freezer_option_product_idx(option)
+        if product_idx:
+            keys.add(product_idx)
+
+        product = option.get("product")
+        candidate = option.get("candidate")
+        product_id = getattr(product, "yolo_class_id", None)
+        if product_id is None:
+            product_id = getattr(candidate, "class_id", None)
+        try:
+            keys.add(f"id:{int(product_id)}")
+        except (TypeError, ValueError):
+            pass
+        return keys
+
+    @classmethod
+    def _freezer_prior_excluded_product_idxs(
+        cls,
+        options: list[dict[str, Any]],
+        prior_product_idxs: set[str],
+    ) -> set[str]:
+        if not prior_product_idxs:
+            return set()
+        excluded: set[str] = set()
+        for option in options:
+            product_idx = cls._freezer_option_product_idx(option)
+            if product_idx and cls._freezer_option_product_keys(option) & prior_product_idxs:
+                excluded.add(product_idx)
+        return excluded
+
+    @staticmethod
+    def _annotate_prior_exclusion_search(
+        search: dict[str, Any],
+        *,
+        prior_selected_product_idxs: set[str],
+        excluded_product_idxs: set[str],
+        applied: bool,
+        fallback: bool,
+        first_pass_search: Optional[dict[str, Any]] = None,
+    ) -> None:
+        search["priorSelectedProductIdxs"] = sorted(prior_selected_product_idxs)
+        search["priorExcludedProductIdxs"] = sorted(excluded_product_idxs)
+        search["priorExclusionApplied"] = bool(applied)
+        search["priorExclusionFallback"] = bool(fallback)
+        if first_pass_search is not None:
+            search["priorExclusionFirstPass"] = first_pass_search
+
+    @staticmethod
+    def _annotate_prior_exclusion_selection(
+        selected: list[dict[str, Any]],
+        *,
+        applied: bool,
+        fallback: bool,
+    ) -> None:
+        for option in selected:
+            diagnostics = dict(option.get("diagnostics", {}) or {})
+            diagnostics["priorExclusionApplied"] = bool(applied)
+            diagnostics["priorExclusionFallback"] = bool(fallback)
+            option["diagnostics"] = diagnostics
+
     def _freezer_ordered_search_diagnostics(
         self,
         *,
@@ -1120,9 +1841,10 @@ class ProductDecisionEngine:
         target_weight: float,
         accepted: bool,
         reason: str,
+        selected_order: Optional[int] = None,
     ) -> dict[str, Any]:
         max_attempts = 100
-        return {
+        diagnostics = {
             "policy": "vision_candidate_pool_ordered_weight_validation",
             "accepted": bool(accepted),
             "reason": reason,
@@ -1131,7 +1853,23 @@ class ProductDecisionEngine:
             "attemptCount": len(attempts),
             "attempts": attempts[:max_attempts],
             "attemptsTruncated": len(attempts) > max_attempts,
+            "distinctMixedPreferenceEnabled": bool(
+                config.weight.freezer_distinct_mixed_preference_enabled
+            ),
+            "distinctMixedMaxExtraResidualGrams": round(
+                max(
+                    0.0,
+                    float(
+                        config.weight.freezer_distinct_mixed_max_extra_residual_grams
+                    ),
+                ),
+                1,
+            ),
+            "distinctMixedPreferred": False,
         }
+        if selected_order is not None:
+            diagnostics["selectedOrder"] = int(selected_order)
+        return diagnostics
 
     def _record_freezer_no_weight_fit(
         self,
@@ -1144,6 +1882,7 @@ class ProductDecisionEngine:
         search_diagnostics: dict[str, Any],
         interaction_rejected_options: Optional[list[dict[str, Any]]] = None,
         rejected_stage_only_candidates: Optional[list[dict[str, Any]]] = None,
+        rejected_roi_weight_rescue_candidates: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         diagnostics = {
             "accepted": False,
@@ -1157,12 +1896,29 @@ class ProductDecisionEngine:
             "considered": considered,
             "orderedCombinationSearch": search_diagnostics,
         }
+        diagnostics["distinctMixedPreferred"] = bool(
+            search_diagnostics.get("distinctMixedPreferred", False)
+        )
+        if "priorSelectedProductIdxs" in search_diagnostics:
+            diagnostics["priorSelectedProductIdxs"] = list(
+                search_diagnostics.get("priorSelectedProductIdxs", [])
+            )
+            diagnostics["priorExclusionApplied"] = bool(
+                search_diagnostics.get("priorExclusionApplied", False)
+            )
+            diagnostics["priorExclusionFallback"] = bool(
+                search_diagnostics.get("priorExclusionFallback", False)
+            )
         if interaction_rejected_options:
             diagnostics["rejectedInteractionCandidates"] = [
                 option["diagnostics"] for option in interaction_rejected_options
             ]
         if rejected_stage_only_candidates:
             diagnostics["rejectedStageOnlyCandidates"] = rejected_stage_only_candidates
+        if rejected_roi_weight_rescue_candidates:
+            diagnostics["rejectedRoiWeightRescueCandidates"] = (
+                rejected_roi_weight_rescue_candidates
+            )
         self._record_weight_diagnostics(
             trace_context,
             {
@@ -1392,6 +2148,36 @@ class ProductDecisionEngine:
             "handPathHardReject": hand_path_hard_reject,
         }
 
+    @staticmethod
+    def _freezer_static_low_vote_hard_reject(entry: dict[str, Any]) -> bool:
+        if bool(entry.get("dualCameraExitPath")):
+            return False
+        if str(entry.get("source", "vision") or "vision") != "vision":
+            return False
+        if not bool(entry.get("staticShelfLikely")):
+            return False
+        if bool(entry.get("trajectoryExitPathPassed")):
+            return False
+        try:
+            exit_path_votes = int(entry.get("freezerExitPathVotes", 0) or 0)
+        except (TypeError, ValueError):
+            exit_path_votes = 0
+        min_votes = max(1, int(config.vision.freezer_min_vote_count))
+        if exit_path_votes > min_votes:
+            return False
+        try:
+            motion_threshold = float(
+                entry.get(
+                    "motionThresholdPx",
+                    config.vision.freezer_motion_min_displacement_px,
+                )
+                or 0.0
+            )
+            path_displacement = float(entry.get("pathDisplacementPx", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return motion_threshold > 0.0 and path_displacement < motion_threshold
+
     @classmethod
     def _freezer_stage_camera_exit_counts(
         cls,
@@ -1481,6 +2267,156 @@ class ProductDecisionEngine:
             considered_class_ids - selected_class_ids,
             str(filter_diagnostics.get("reason") or ""),
         )
+
+    def _augment_freezer_roi_weight_rescue_candidates(
+        self,
+        *,
+        vision_candidates: List[EnsembleResult],
+        active_products: Optional[List],
+        trace_context: Optional[object],
+        target_weight: float,
+        rejected_candidates: Optional[list[dict[str, Any]]] = None,
+    ) -> List[EnsembleResult]:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        if not isinstance(stage_counts, dict) or not active_products:
+            return vision_candidates
+
+        active_map = self._active_products_by_class(active_products)
+        if not active_map:
+            return vision_candidates
+
+        existing_class_ids = {
+            int(candidate.class_id)
+            for candidate in vision_candidates
+            if getattr(candidate, "class_id", None) is not None
+        }
+        augmented = list(vision_candidates)
+        min_votes = max(
+            1,
+            int(config.vision.freezer_min_vote_count),
+            int(config.weight.detected_single_fallback_min_votes),
+        )
+        residual_limit = max(0.0, float(config.weight.rescue_tolerance_grams))
+        top_threshold = self._freezer_threshold_for_camera("top")
+        side_threshold = self._freezer_threshold_for_camera("side")
+
+        def reject(entry: dict[str, Any], reason: str, **extra: Any) -> None:
+            if rejected_candidates is None:
+                return
+            rejected_candidates.append(
+                {
+                    "class_id": int(entry.get("class_id", -1) or -1),
+                    "name": str(entry.get("name") or ""),
+                    "source": "freezer_roi_weight_rescue",
+                    "reason": reason,
+                    **extra,
+                }
+            )
+
+        for raw_class_id, entry in stage_counts.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                class_id = int(entry.get("class_id", raw_class_id))
+            except (TypeError, ValueError):
+                continue
+            if class_id in existing_class_ids:
+                continue
+
+            cameras = entry.get("cameras") if isinstance(entry.get("cameras"), dict) else {}
+            top_entry = cameras.get("top", {}) if isinstance(cameras, dict) else {}
+            side_entry = cameras.get("side", {}) if isinstance(cameras, dict) else {}
+            if not isinstance(top_entry, dict):
+                top_entry = {}
+            if not isinstance(side_entry, dict):
+                side_entry = {}
+
+            top_filtered_votes = self._freezer_stage_int(
+                top_entry,
+                "freezer_roi_filtered",
+                "freezerRoiFilteredVotes",
+            )
+            side_filtered_votes = self._freezer_stage_int(
+                side_entry,
+                "freezer_roi_filtered",
+                "freezerRoiFilteredVotes",
+            )
+            filtered_votes = top_filtered_votes + side_filtered_votes
+            if filtered_votes <= 0:
+                continue
+
+            top_confidence = self._freezer_stage_float(
+                top_entry,
+                "freezer_roi_filtered_max_confidence",
+            )
+            side_confidence = self._freezer_stage_float(
+                side_entry,
+                "freezer_roi_filtered_max_confidence",
+            )
+            top_strong = (
+                top_filtered_votes >= min_votes and top_confidence >= top_threshold
+            )
+            side_strong = (
+                side_filtered_votes >= min_votes and side_confidence >= side_threshold
+            )
+            confidence = max(top_confidence, side_confidence)
+            if not (top_strong or side_strong):
+                reject(
+                    entry,
+                    "roi_filtered_evidence_below_floor",
+                    filteredVotes=filtered_votes,
+                    confidence=round(float(confidence), 4),
+                    minVotes=min_votes,
+                )
+                continue
+
+            product = active_map.get(class_id)
+            if product is None or not self._active_product_has_loadcell(product):
+                reject(entry, "inactive_or_no_loadcell_product")
+                continue
+            stock = self._coerce_int(getattr(product, "stock_qty", 0))
+            unit_weight = self._coerce_float(getattr(product, "product_weight", 0.0))
+            if stock <= 0 or unit_weight <= 0.0:
+                reject(entry, "invalid_weight_or_stock")
+                continue
+            residual = abs(float(target_weight) - unit_weight)
+            if residual > residual_limit:
+                reject(
+                    entry,
+                    "roi_weight_residual_exceeds_tolerance",
+                    unitWeight=round(unit_weight, 1),
+                    residual=round(residual, 1),
+                    tolerance=round(residual_limit, 1),
+                )
+                continue
+
+            threshold_votes = self._freezer_stage_int(
+                entry,
+                "threshold_passed",
+                "raw",
+            )
+            augmented.append(
+                EnsembleResult(
+                    class_id=class_id,
+                    class_name=str(
+                        entry.get("name") or getattr(product, "product_name", "")
+                    ),
+                    top_confidence=top_confidence if top_strong else 0.0,
+                    side_confidence=side_confidence if side_strong else 0.0,
+                    combined_confidence=confidence,
+                    vote_count=2 if top_strong and side_strong else 1,
+                    source="freezer_roi_weight_rescue",
+                    raw_vote_count=max(threshold_votes, filtered_votes),
+                    top_motion_passed=False,
+                    side_motion_passed=False,
+                    motion_gate_passed=False,
+                    weight_gate_passed=True,
+                    rescue_tolerance_g=residual_limit,
+                    rescue_weight_residual_g=residual,
+                    freezer_exit_path_votes=0,
+                )
+            )
+        return augmented
 
     def _augment_freezer_stage_exit_path_candidates(
         self,
@@ -1678,17 +2614,37 @@ class ProductDecisionEngine:
     def _filter_freezer_interaction_rejections(
         options: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        blocked_options = [
-            option for option in options if bool(option.get("hand_path_hard_reject"))
+        static_options = [
+            option
+            for option in options
+            if bool(option.get("static_low_vote_hard_reject"))
         ]
-        if not blocked_options or len(blocked_options) >= len(options):
-            return options, []
+        for option in static_options:
+            option["diagnostics"]["interactionRejectedReason"] = (
+                "static_low_vote_shelf_candidate"
+            )
+            option["diagnostics"]["reason"] = "static_low_vote_shelf_candidate"
+        selectable_options = [
+            option
+            for option in options
+            if not bool(option.get("static_low_vote_hard_reject"))
+        ]
+        blocked_options = [
+            option
+            for option in selectable_options
+            if bool(option.get("hand_path_hard_reject"))
+        ]
+        if not blocked_options or len(blocked_options) >= len(selectable_options):
+            return selectable_options, static_options
 
         for option in blocked_options:
             option["diagnostics"]["interactionRejectedReason"] = "hand_path_blocked"
+            option["diagnostics"]["reason"] = "hand_path_blocked"
         return [
-            option for option in options if not bool(option.get("hand_path_hard_reject"))
-        ], blocked_options
+            option
+            for option in selectable_options
+            if not bool(option.get("hand_path_hard_reject"))
+        ], [*static_options, *blocked_options]
 
     def _freezer_same_product_repeat_diagnostic(
         self,
@@ -1727,6 +2683,9 @@ class ProductDecisionEngine:
         if not isinstance(loadcell, dict):
             return False
 
+        channel_targets = loadcell.get("channel_removal_segment_targets") or []
+        if isinstance(channel_targets, list) and len(channel_targets) >= 2:
+            return True
         removal_targets = loadcell.get("removal_segment_targets") or []
         if isinstance(removal_targets, list) and len(removal_targets) >= 2:
             return True
@@ -1749,9 +2708,11 @@ class ProductDecisionEngine:
         reason: str,
         interaction_rejected_options: Optional[list[dict[str, Any]]] = None,
         rejected_stage_only_candidates: Optional[list[dict[str, Any]]] = None,
+        rejected_roi_weight_rescue_candidates: Optional[list[dict[str, Any]]] = None,
         combination_search: Optional[dict[str, Any]] = None,
     ) -> JudgmentResult:
-        products: list[ProductJudgment] = []
+        products_by_id: dict[int, ProductJudgment] = {}
+        product_order: list[int] = []
         total_price = 0
         explained_weight = 0.0
         confidences: list[float] = []
@@ -1762,20 +2723,33 @@ class ProductDecisionEngine:
             unit_price = self._coerce_int(getattr(product, "sale_price", 0))
             unit_weight = self._coerce_float(getattr(product, "product_weight", 0.0))
             confidence = float(option["confidence"])
-            product_judgment = ProductJudgment(
-                product_id=int(getattr(product, "yolo_class_id", candidate.class_id)),
-                name=getattr(product, "product_name", candidate.class_name),
-                count=count,
-                unit_price=unit_price,
-                total_price=unit_price * count,
-                confidence=confidence,
-                unit_weight=unit_weight,
-            )
-            products.append(product_judgment)
-            total_price += product_judgment.total_price
+            product_id = int(getattr(product, "yolo_class_id", candidate.class_id))
+            product_total_price = unit_price * count
+            product_judgment = products_by_id.get(product_id)
+            if product_judgment is None:
+                product_judgment = ProductJudgment(
+                    product_id=product_id,
+                    name=getattr(product, "product_name", candidate.class_name),
+                    count=count,
+                    unit_price=unit_price,
+                    total_price=product_total_price,
+                    confidence=confidence,
+                    unit_weight=unit_weight,
+                )
+                products_by_id[product_id] = product_judgment
+                product_order.append(product_id)
+            else:
+                product_judgment.count += count
+                product_judgment.total_price += product_total_price
+                product_judgment.confidence = max(
+                    float(product_judgment.confidence),
+                    confidence,
+                )
+            total_price += product_total_price
             explained_weight += max(0.0, unit_weight) * count
             confidences.append(confidence)
 
+        products = [products_by_id[product_id] for product_id in product_order]
         residual = abs(target_weight - explained_weight)
         tolerance = self._freezer_weight_tolerance_grams()
         weight_reliable = residual <= tolerance
@@ -1799,6 +2773,19 @@ class ProductDecisionEngine:
         }
         if combination_search is not None:
             diagnostics["orderedCombinationSearch"] = combination_search
+            diagnostics["distinctMixedPreferred"] = bool(
+                combination_search.get("distinctMixedPreferred", False)
+            )
+            if "priorSelectedProductIdxs" in combination_search:
+                diagnostics["priorSelectedProductIdxs"] = list(
+                    combination_search.get("priorSelectedProductIdxs", [])
+                )
+                diagnostics["priorExclusionApplied"] = bool(
+                    combination_search.get("priorExclusionApplied", False)
+                )
+                diagnostics["priorExclusionFallback"] = bool(
+                    combination_search.get("priorExclusionFallback", False)
+                )
         same_product_repeat_candidates = [
             item for item in considered if item.get("sameProductRepeatCandidate")
         ]
@@ -1831,6 +2818,10 @@ class ProductDecisionEngine:
         )
         if stage_only_rejections:
             diagnostics["rejectedStageOnlyCandidates"] = stage_only_rejections
+        if rejected_roi_weight_rescue_candidates:
+            diagnostics["rejectedRoiWeightRescueCandidates"] = (
+                rejected_roi_weight_rescue_candidates
+            )
         ambiguous_candidates = [
             item
             for item in considered
@@ -3539,7 +4530,11 @@ class ProductDecisionEngine:
             return 1
         if source_name == "stage_counts":
             return 2
-        if source_name in {"threshold_rescue", "roi_rescue"}:
+        if source_name in {
+            "threshold_rescue",
+            "roi_rescue",
+            "freezer_roi_weight_rescue",
+        }:
             return 3
         if source_name == "diagnostic":
             return 4
@@ -8208,6 +9203,12 @@ class ProductDecisionEngine:
         if source in {"threshold_rescue", "roi_rescue"}:
             return bool(getattr(candidate, "weight_gate_passed", False)) and (
                 confidence >= self._product_identity_confidence_floor()
+            )
+        if source == "freezer_roi_weight_rescue":
+            return (
+                self._is_freezer_mode()
+                and bool(getattr(candidate, "weight_gate_passed", False))
+                and confidence >= self._product_identity_confidence_floor()
             )
         if source == "freezer_stage_exit_path":
             return (

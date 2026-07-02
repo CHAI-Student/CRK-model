@@ -416,6 +416,27 @@ class WeightModel(BaseModel):
             "require combined weight to fit freezer_weight_tolerance_grams."
         ),
     )
+    freezer_distinct_mixed_preference_enabled: bool = Field(
+        default=True,
+        description=(
+            "Prefer all-single mixed freezer baskets over same-product repeats "
+            "when both explain the same item count within tolerance."
+        ),
+    )
+    freezer_distinct_mixed_max_extra_residual_grams: float = Field(
+        default=5.0,
+        description=(
+            "Maximum extra residual allowed when preferring a distinct mixed "
+            "freezer basket over a same-product repeat."
+        ),
+    )
+    freezer_prior_trigger_dedupe_enabled: bool = Field(
+        default=True,
+        description=(
+            "Exclude products already selected by earlier freezer removal "
+            "triggers in the same global door session."
+        ),
+    )
     min_weight_change: float = Field(
         default=5.0,
         description="Minimum weight change in grams",

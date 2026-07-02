@@ -28,6 +28,17 @@ def reset_weight_identity_policy(monkeypatch):
         True,
     )
     monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_distinct_mixed_preference_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_distinct_mixed_max_extra_residual_grams",
+        5.0,
+    )
+    monkeypatch.setattr(config.weight, "freezer_prior_trigger_dedupe_enabled", True)
 
 
 def test_low_confidence_trace_evidence_does_not_create_fallback_identity(
@@ -95,6 +106,9 @@ def test_weight_model_defaults_to_vision_first_identity_policy():
     assert settings.fusion_count_weight == 0.10
     assert settings.freezer_weight_tolerance_grams == 15.0
     assert settings.freezer_vision_multi_without_weight_enabled is True
+    assert settings.freezer_distinct_mixed_preference_enabled is True
+    assert settings.freezer_distinct_mixed_max_extra_residual_grams == 5.0
+    assert settings.freezer_prior_trigger_dedupe_enabled is True
 
 
 def make_candidate(
@@ -119,12 +133,39 @@ def make_candidate(
     )
 
 
+def make_freezer_candidate(
+    *,
+    class_id: int,
+    name: str,
+    combined: float,
+    top: float = 0.0,
+    side: float = 0.0,
+    raw_vote_count: int = 6,
+    motion_gate_passed: bool = True,
+    source: str = "vision",
+) -> EnsembleResult:
+    return EnsembleResult(
+        class_id=class_id,
+        class_name=name,
+        top_confidence=top,
+        side_confidence=side,
+        combined_confidence=combined,
+        vote_count=2 if top > 0.0 and side > 0.0 else 1,
+        source=source,
+        raw_vote_count=raw_vote_count,
+        top_motion_passed=motion_gate_passed and top > 0.0,
+        side_motion_passed=motion_gate_passed and side > 0.0,
+        motion_gate_passed=motion_gate_passed,
+    )
+
+
 def make_active_product(
     class_id: int = 26,
     name: str = "치킨마요",
     weight: float = 365.0,
     stock: int = 5,
     price: int = 3500,
+    product_idx: str = "P1",
 ) -> MockActiveProduct:
     return MockActiveProduct(
         yolo_class_id=class_id,
@@ -132,6 +173,7 @@ def make_active_product(
         product_weight=weight,
         stock_qty=stock,
         sale_price=price,
+        product_idx=product_idx,
     )
 
 
@@ -550,6 +592,701 @@ def test_freezer_vision_first_selects_single_178g_candidate_not_top_three(
     diagnostics = trace.weight_diagnostics["freezer_vision_first"]
     assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
     assert diagnostics["orderedCombinationSearch"]["attempts"][0]["classIds"] == [101]
+
+
+def test_freezer_vision_first_prefers_mixed_dumplings_over_baskin_repeat(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 3)
+    trace = FakeLoadcellTrace({"removal_segment_targets": [224.0, 189.0]})
+    trace.stage_counts_by_class = {
+        "3": {
+            "class_id": 3,
+            "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+            "freezerExitPathVotes": 15,
+            "pathDisplacementPx": 214.6,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 6},
+                "side": {"freezerExitPathVotes": 9},
+            },
+        },
+        "40": {
+            "class_id": 40,
+            "name": "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+            "freezerExitPathVotes": 8,
+            "pathDisplacementPx": 33.6,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "cameras": {"top": {"freezerExitPathVotes": 8}},
+        },
+        "13": {
+            "class_id": 13,
+            "name": "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+            "freezerExitPathVotes": 10,
+            "pathDisplacementPx": 109.3,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 6},
+                "side": {"freezerExitPathVotes": 4},
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=3,
+                name="BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                combined=1.0,
+                top=0.8520,
+                side=0.8524,
+                raw_vote_count=15,
+            ),
+            make_freezer_candidate(
+                class_id=40,
+                name="CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+                combined=0.5471,
+                top=0.9118,
+                raw_vote_count=8,
+            ),
+            make_freezer_candidate(
+                class_id=13,
+                name="BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                combined=0.4664,
+                top=0.7773,
+                raw_vote_count=10,
+            ),
+        ],
+        delta_weight=-407.4,
+        active_products=[
+            make_active_product(
+                3,
+                "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+                weight=224.0,
+                stock=64,
+            ),
+            make_active_product(
+                40,
+                "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+                weight=131.0,
+                stock=30,
+            ),
+            make_active_product(
+                13,
+                "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                weight=189.0,
+                stock=30,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (3, 1),
+        (13, 1),
+    ]
+    assert result.weight_explained == 413.0
+    assert result.weight_residual == pytest.approx(5.6)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["orderedCombinationSearch"]["selectedOrder"] > 0
+    assert any(
+        attempt["classIds"] == [40] and attempt["counts"] == [3]
+        for attempt in diagnostics["orderedCombinationSearch"]["attempts"]
+    )
+
+
+def test_freezer_vision_first_prefers_all_single_mixed_over_exact_repeat(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_A",
+                combined=0.95,
+                top=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=102,
+                name="FREEZER_B",
+                combined=0.93,
+                top=0.93,
+            ),
+            make_freezer_candidate(
+                class_id=103,
+                name="FREEZER_C",
+                combined=0.91,
+                top=0.91,
+            ),
+        ],
+        delta_weight=-300.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_A",
+                weight=100.0,
+                stock=10,
+                product_idx="P101",
+            ),
+            make_active_product(
+                102,
+                "FREEZER_B",
+                weight=102.0,
+                stock=10,
+                product_idx="P102",
+            ),
+            make_active_product(
+                103,
+                "FREEZER_C",
+                weight=103.0,
+                stock=10,
+                product_idx="P103",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 1),
+        (102, 1),
+        (103, 1),
+    ]
+    assert result.weight_explained == 305.0
+    assert result.weight_residual == 5.0
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["distinctMixedPreferred"] is True
+    assert any(
+        attempt["classIds"] == [101] and attempt["counts"] == [3]
+        for attempt in diagnostics["orderedCombinationSearch"]["attempts"]
+    )
+
+
+def test_freezer_vision_first_keeps_repeat_when_no_mixed_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_A",
+                combined=0.95,
+                top=0.95,
+            )
+        ],
+        delta_weight=-300.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_A",
+                weight=100.0,
+                stock=10,
+                product_idx="P101",
+            )
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 3)
+    ]
+    assert trace.weight_diagnostics["freezer_vision_first"][
+        "distinctMixedPreferred"
+    ] is False
+
+
+def test_freezer_vision_first_keeps_repeat_when_mixed_is_too_much_worse(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_A",
+                combined=0.95,
+                top=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=102,
+                name="FREEZER_B",
+                combined=0.93,
+                top=0.93,
+            ),
+            make_freezer_candidate(
+                class_id=103,
+                name="FREEZER_C",
+                combined=0.91,
+                top=0.91,
+            ),
+        ],
+        delta_weight=-300.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_A",
+                weight=100.0,
+                stock=10,
+                product_idx="P101",
+            ),
+            make_active_product(
+                102,
+                "FREEZER_B",
+                weight=107.0,
+                stock=10,
+                product_idx="P102",
+            ),
+            make_active_product(
+                103,
+                "FREEZER_C",
+                weight=108.0,
+                stock=10,
+                product_idx="P103",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 3)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["distinctMixedPreferred"] is False
+
+
+def test_freezer_vision_first_prior_trigger_dedupe_selects_next_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_A",
+                combined=0.95,
+                top=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=102,
+                name="FREEZER_B",
+                combined=0.93,
+                top=0.93,
+            ),
+        ],
+        delta_weight=-100.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_A",
+                weight=100.0,
+                stock=10,
+                product_idx="P101",
+            ),
+            make_active_product(
+                102,
+                "FREEZER_B",
+                weight=100.0,
+                stock=10,
+                product_idx="P102",
+            ),
+        ],
+        trace_context=trace,
+        prior_selected_product_idxs={"P101"},
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (102, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["priorExclusionApplied"] is True
+    assert diagnostics["priorExclusionFallback"] is False
+
+
+def test_freezer_vision_first_prior_trigger_dedupe_advances_to_third_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_A",
+                combined=0.95,
+                top=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=102,
+                name="FREEZER_B",
+                combined=0.93,
+                top=0.93,
+            ),
+            make_freezer_candidate(
+                class_id=103,
+                name="FREEZER_C",
+                combined=0.91,
+                top=0.91,
+            ),
+        ],
+        delta_weight=-100.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_A",
+                weight=100.0,
+                stock=10,
+                product_idx="P101",
+            ),
+            make_active_product(
+                102,
+                "FREEZER_B",
+                weight=100.0,
+                stock=10,
+                product_idx="P102",
+            ),
+            make_active_product(
+                103,
+                "FREEZER_C",
+                weight=100.0,
+                stock=10,
+                product_idx="P103",
+            ),
+        ],
+        trace_context=trace,
+        prior_selected_product_idxs={"P101", "P102"},
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (103, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["priorExclusionApplied"] is True
+    assert diagnostics["priorExclusionFallback"] is False
+
+
+def test_freezer_channel_targets_lock_single_then_solve_remaining_repeat(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace(
+        {
+            "channel_removal_segment_targets": [
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 100.0,
+                    "delta": -100.0,
+                    "segment_index": 0,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                    "evidence_required": True,
+                },
+                {
+                    "source": "simultaneous_channel_delta",
+                    "weight": 120.0,
+                    "delta": -120.0,
+                    "segment_index": 1,
+                    "channel_index": 1,
+                    "channel_position": 1,
+                    "channel_side": "right",
+                    "evidence_required": True,
+                },
+            ]
+        }
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_LEFT_50G",
+                combined=0.95,
+                top=0.95,
+            ),
+            make_freezer_candidate(
+                class_id=102,
+                name="FREEZER_RIGHT_120G",
+                combined=0.93,
+                top=0.93,
+            ),
+        ],
+        delta_weight=-220.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_LEFT_50G",
+                weight=50.0,
+                stock=10,
+                product_idx="P101",
+            ),
+            make_active_product(
+                102,
+                "FREEZER_RIGHT_120G",
+                weight=120.0,
+                stock=10,
+                product_idx="P102",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (101, 2),
+        (102, 1),
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "freezer_channel_target_product_groups"
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["policy"] == "loadcell_channel_product_group_ordered_weight_validation"
+    assert search["accepted"] is True
+    selected_by_side = {
+        selected["channelSide"]: selected for selected in diagnostics["selected"]
+    }
+    assert selected_by_side["right"]["class_id"] == 102
+    assert selected_by_side["right"]["count"] == 1
+    assert selected_by_side["left"]["class_id"] == 101
+    assert selected_by_side["left"]["count"] == 2
+
+
+def test_freezer_vision_first_prior_trigger_dedupe_fails_closed(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace({})
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=101,
+                name="FREEZER_A",
+                combined=0.95,
+                top=0.95,
+            )
+        ],
+        delta_weight=-100.0,
+        active_products=[
+            make_active_product(
+                101,
+                "FREEZER_A",
+                weight=100.0,
+                stock=10,
+                product_idx="P101",
+            )
+        ],
+        trace_context=trace,
+        prior_selected_product_idxs={"P101"},
+    )
+
+    assert result.status == JudgmentStatus.UNCERTAIN
+    assert result.products == []
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert diagnostics["reason"] == "no_weight_fit_for_vision_candidate_pool"
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["reason"] == "no_candidates_after_prior_trigger_exclusion"
+    assert search["priorExclusionApplied"] is True
+    assert search["priorExclusionFallback"] is False
+
+
+def test_freezer_vision_first_zone2_still_selects_baskin_single(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "40": {
+            "class_id": 40,
+            "name": "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+            "freezerExitPathVotes": 10,
+            "pathDisplacementPx": 259.1,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 4},
+                "side": {"freezerExitPathVotes": 6},
+            },
+        }
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=40,
+                name="CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+                combined=1.0,
+                top=0.9005,
+                side=0.9404,
+                raw_vote_count=10,
+            )
+        ],
+        delta_weight=-129.9,
+        active_products=[
+            make_active_product(
+                40,
+                "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+                weight=131.0,
+                stock=27,
+                price=4000,
+            )
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (40, 1)
+    ]
+    assert result.weight_residual == pytest.approx(1.1)
+
+
+def test_freezer_vision_first_roi_weight_rescues_worldcon_over_static_melona(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 3)
+    trace = FakeLoadcellTrace({})
+    trace.stage_counts_by_class = {
+        "40": {
+            "class_id": 40,
+            "name": "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+            "freezerExitPathVotes": 8,
+            "pathDisplacementPx": 207.2,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "cameras": {
+                "top": {"freezerExitPathVotes": 4},
+                "side": {"freezerExitPathVotes": 4},
+            },
+        },
+        "44": {
+            "class_id": 44,
+            "name": "STICK_BINGGRAE_MELONA_75ML",
+            "freezerExitPathVotes": 3,
+            "pathDisplacementPx": 3.2,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": False,
+            "staticShelfLikely": True,
+            "cameras": {"top": {"freezerExitPathVotes": 3}},
+        },
+        "35": {
+            "class_id": 35,
+            "name": "BOX_LOTTE_WORLDCON_160ML",
+            "threshold_passed": 25,
+            "freezer_roi_filtered": 25,
+            "freezer_roi_filtered_max_confidence": 0.7905,
+            "cameras": {
+                "top": {
+                    "threshold_passed": 25,
+                    "freezer_roi_filtered": 25,
+                    "freezerRoiFilteredVotes": 25,
+                    "freezer_roi_filtered_max_confidence": 0.7905,
+                },
+                "side": {"raw": 43, "raw_max_confidence": 0.6584},
+            },
+        },
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=40,
+                name="CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+                combined=1.0,
+                top=0.9005,
+                side=0.9320,
+                raw_vote_count=8,
+            ),
+            make_freezer_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                combined=0.4521,
+                top=0.7535,
+                raw_vote_count=3,
+            ),
+        ],
+        delta_weight=-70.6,
+        active_products=[
+            make_active_product(
+                40,
+                "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+                weight=131.0,
+                stock=27,
+            ),
+            make_active_product(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                weight=79.0,
+                stock=46,
+            ),
+            make_active_product(
+                35,
+                "BOX_LOTTE_WORLDCON_160ML",
+                weight=70.0,
+                stock=42,
+                price=1400,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (35, 1)
+    ]
+    assert result.weight_residual == pytest.approx(0.6)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    selected = diagnostics["selected"][0]
+    assert selected["source"] == "freezer_roi_weight_rescue"
+    assert selected["weight_residual"] == pytest.approx(0.6)
+    rejected = diagnostics["rejectedInteractionCandidates"]
+    assert rejected[0]["class_id"] == 44
+    assert rejected[0]["interactionRejectedReason"] == (
+        "static_low_vote_shelf_candidate"
+    )
 
 
 def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(

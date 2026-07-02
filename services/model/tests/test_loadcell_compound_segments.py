@@ -335,6 +335,13 @@ def test_history_exposes_simultaneous_channel_removal_targets():
         144.0,
         375.0,
     ]
+    assert [
+        target["channel_side"] for target in analysis.channel_removal_segment_targets
+    ] == ["left", "right"]
+    assert [
+        target["channel_position"]
+        for target in analysis.channel_removal_segment_targets
+    ] == [0, 1]
     assert all(
         target["source"] == "simultaneous_channel_delta"
         for target in analysis.channel_removal_segment_targets

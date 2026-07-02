@@ -52,11 +52,13 @@ vision-supported product identity.
   template uses the upper 240 pixels of the 480x480 crop
   (`FREEZER_ROI_VERTICAL_REGION=upper`, `center_y <= FREEZER_ROI_Y_SPLIT`),
   pass the freezer motion floor, and pass freezer vote thresholds. Threshold
-  rescue and ROI rescue are disabled so weak/static evidence does not enter
-  freezer candidates.
+  rescue and regular ROI rescue are disabled so weak/static evidence does not
+  enter freezer handled candidates. The decision engine may still recover
+  strong `freezer_roi_filtered` evidence through strict single-item ROI-weight
+  rescue.
 - Current freezer product confidence thresholds are `0.70` raw/max confidence
   for both Top and Side, matching the stricter freezer field setting. Hand tracking uses
-  a separate `0.30` floor for class `0`, but freezer `dual_top_proxy` only
+  a separate `0.40` floor for class `0`, but freezer `dual_top_proxy` only
   enables hand class `0` and hand-path filtering on physical `top_middle`.
   Physical `top_side` remains product-only and cannot filter candidates through
   hand evidence.
@@ -160,6 +162,11 @@ vision-supported product identity.
   loadcell channel deltas can become evidence-required segment targets. A
   supported channel split such as Tteokbokki + Welchs is evaluated before a
   single aggregate threshold-rescue product with a tighter residual.
+- In freezer mode, those physical channel deltas are interpreted with the
+  current shelf rule: one product group per loadcell, left/right at most two
+  groups. The freezer branch checks channel `x1` matches first and then solves
+  any remaining channel as a same-product multiple from the visual candidate
+  pool.
 - Segment-first matching ranks weak stage traces as unsupported evidence. This
   prevents low-confidence small-product repeats from beating active large-bottle
   explanations or being reported as `COMPLETE`.

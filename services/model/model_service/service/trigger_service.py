@@ -911,6 +911,57 @@ class TriggerService:
             for product in products
         )
 
+    def _freezer_prior_selected_product_idxs(self, delta_weight: float) -> set[str]:
+        if not bool(config.weight.freezer_prior_trigger_dedupe_enabled):
+            return set()
+        if str(config.machine.cabinet_type).strip().lower() != "freezer":
+            return set()
+        if delta_weight >= 0:
+            return set()
+        if self._door_session_store is None:
+            return set()
+
+        global_session = self._door_session_store.get_global_session()
+        if global_session is None:
+            return set()
+
+        selected: set[str] = set()
+        for session in global_session.zone_sessions.values():
+            for trigger in getattr(session, "triggers", []) or []:
+                try:
+                    if float(getattr(trigger, "delta_weight", 0.0) or 0.0) >= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                for product in getattr(trigger, "products", []) or []:
+                    try:
+                        if int(getattr(product, "count", 0) or 0) <= 0:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    product_idx = getattr(product, "product_idx", None)
+                    if product_idx is not None and str(product_idx).strip():
+                        selected.add(str(product_idx).strip())
+                    try:
+                        selected.add(f"id:{int(getattr(product, 'product_id'))}")
+                    except (TypeError, ValueError):
+                        pass
+        return selected
+
+    @staticmethod
+    def _candidate_ops_confidence_fields(
+        vote: VoteResult,
+    ) -> Tuple[float, float, float, float]:
+        _, identity_confidence, identity_threshold, top_confidence, side_confidence = (
+            VideoProcessor._freezer_identity_confidence_gate(vote)
+        )
+        return (
+            float(identity_confidence),
+            float(identity_threshold),
+            float(top_confidence),
+            float(side_confidence),
+        )
+
     @staticmethod
     def _log_candidate_ops(
         zone: int,
@@ -932,10 +983,20 @@ class TriggerService:
                 else "unknown"
             )
             source = getattr(vote, "source", "vision")
+            (
+                identity_confidence,
+                identity_threshold,
+                top_confidence,
+                side_confidence,
+            ) = TriggerService._candidate_ops_confidence_fields(vote)
             ops_logger.info(
                 f"{prefix} zone={zone} rank={index} name={vote.class_name} "
                 f"weight={weight_text} "
-                f"confidence={vote.weighted_confidence:.3f} "
+                f"confidence={identity_confidence:.3f} "
+                f"weighted_confidence={vote.weighted_confidence:.3f} "
+                f"top_confidence={top_confidence:.3f} "
+                f"side_confidence={side_confidence:.3f} "
+                f"identity_threshold={identity_threshold:.3f} "
                 f"top={vote.top_detected} side={vote.side_detected} "
                 f"source={source} "
                 f"count_hint={getattr(vote, 'instance_count_hint', 1)} "
@@ -2758,6 +2819,15 @@ class TriggerService:
             self._should_force_vision_only(input_data, delta_analysis)
             or (delta_weight == 0.0 and len(input_data.loadcells) == 0)
         )
+        prior_selected_product_idxs = self._freezer_prior_selected_product_idxs(
+            delta_weight
+        )
+        if prior_selected_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-DEDUPE] prior_selected_product_idxs=%s",
+                sorted(prior_selected_product_idxs),
+            )
+
         removal_stabilization = self._removal_stabilization_conflict(
             vision_candidates=vision_candidates,
             delta_weight=delta_weight,
@@ -2793,6 +2863,7 @@ class TriggerService:
             vision_only=vision_only,
             active_products=active_products,
             trace_context=trace_context,
+            prior_selected_product_idxs=prior_selected_product_idxs,
         )
 
         # 6. Node.js 상품 리스트에 없는 상품 제거 (v4.6)
@@ -3365,12 +3436,22 @@ class TriggerService:
                 waiting_for="stable_loadcell",
             )
 
+        prior_selected_product_idxs = self._freezer_prior_selected_product_idxs(
+            delta_weight
+        )
+        if prior_selected_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-DEDUPE] prior_selected_product_idxs=%s",
+                sorted(prior_selected_product_idxs),
+            )
+
         result = self._engine.judge(
             vision_candidates=vision_candidates,
             delta_weight=delta_weight,
             vision_only=vision_only,
             active_products=active_products,  # v4.7: 신규 파라미터
             trace_context=trace_context,
+            prior_selected_product_idxs=prior_selected_product_idxs,
         )
 
         # 7-B. Node.js 상품 리스트에 없는 상품 제거 (v4.6)

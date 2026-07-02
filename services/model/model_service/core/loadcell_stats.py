@@ -661,6 +661,13 @@ def _channel_delta_targets_from_plateaus(
     for target_index, channel in enumerate(negative_channels):
         weight = float(channel["abs_delta"])
         delta = float(channel["delta"])
+        channel_side = (
+            "left"
+            if target_index == 0
+            else "right"
+            if target_index == 1
+            else f"channel_{target_index + 1}"
+        )
         targets.append(
             {
                 "source": "simultaneous_channel_delta",
@@ -669,6 +676,8 @@ def _channel_delta_targets_from_plateaus(
                 "segment_index": int(target_index),
                 "segment_indices": [int(target_index)],
                 "channel_index": int(channel["channel_index"]),
+                "channel_position": int(target_index),
+                "channel_side": channel_side,
                 "reason": "simultaneous_channel_removal",
                 "start_timestamp": start_plateau.end_timestamp,
                 "end_timestamp": end_plateau.start_timestamp,

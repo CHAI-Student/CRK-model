@@ -98,6 +98,10 @@ then run `pytest services/model/tests -q` for docs/code delivery when feasible.
 - [test_voting_ensemble.py](../../../services/model/tests/test_voting_ensemble.py):
   Top/Side voting weights and ordering, including the current top-middle bias.
 - [test_decision_engine.py](../../../services/model/tests/test_decision_engine.py):
+  Freezer ordered solving covers trigger-priority candidate selection,
+  distinct mixed baskets, prior-trigger fail-closed de-dupe, and left/right
+  `channel_removal_segment_targets` where a `120g x1` channel is locked before
+  the remaining `50g x2` channel is solved.
   strict mismatch, loadcell-only, rescue candidates, detected-single fallback,
   strict single-candidate source/rank priority, same-product repeated counts
   through x8, returned-weight hint ranking, and segment-first loadcell matching,

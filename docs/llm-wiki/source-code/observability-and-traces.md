@@ -34,9 +34,10 @@ Important patterns include:
 - `[VIDEO-ASYNC]` fatal extractor, frame queue, and YOLO task errors propagate
   to the trigger worker and should end with trace/session `status=error`, not
   `status=complete` with empty candidates.
-- `[OPS][CANDIDATES]`: ranked pre-engine handled candidates, weights,
-  confidence, camera flags, source, `count_hint`, and `freezer_exit_votes`.
-  These are not final chargeable counts.
+- `[OPS][CANDIDATES]`: ranked pre-engine handled candidates, weights, raw
+  identity `confidence`, `weighted_confidence`, camera-specific confidence,
+  camera flags, source, `count_hint`, and `freezer_exit_votes`. These are not
+  final chargeable counts.
 - `[OPS][FREEZER-CANDIDATE-FILTER]`: freezer handled-filter enablement,
   raw/handled counts, and the filter reason. Normal enabled freezer removal
   paths should show `reason=vision_identity_passthrough`; selected counts and
@@ -284,9 +285,13 @@ rotation policy.
   `loadcell.channel_delta_diagnostics` first. `accepted=true` means physical
   loadcell channels split a simultaneous same-zone removal; positive channel
   deltas or only one negative channel should reject the split. In decision
-  diagnostics, `target_source=channel_removal_segment_targets` with
-  `reason=channel_supported_split_preferred` means the channel-supported basket
-  beat an aggregate single rescue candidate.
+  diagnostics for freezer, inspect `freezer_vision_first.selected[*]` for
+  `channelSide`, `channelTargetWeight`, and `channelProductGroupPolicy`, plus
+  `orderedCombinationSearch.policy =
+  loadcell_channel_product_group_ordered_weight_validation`. In legacy
+  non-freezer segment diagnostics, `target_source=channel_removal_segment_targets`
+  with `reason=channel_supported_split_preferred` means the channel-supported
+  basket beat an aggregate single rescue candidate.
 - Segment option diagnostics include evidence source, trusted/strong flags, and
   motion gate status when class evidence exists. They also include
   `stage_score`, `side_confidence`, `top_confidence`, `side_votes`,

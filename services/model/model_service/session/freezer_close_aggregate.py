@@ -504,7 +504,7 @@ class FreezerCloseAggregateResolver:
         search(0, {}, 0.0, 0, 0)
         if not matches:
             return None
-        return sorted(
+        ordered_matches = sorted(
             matches,
             key=lambda item: (
                 item.total_count,
@@ -513,7 +513,35 @@ class FreezerCloseAggregateResolver:
                 item.residual,
                 -item.score,
             ),
-        )[0]
+        )
+        best = ordered_matches[0]
+        if (
+            bool(config.weight.freezer_distinct_mixed_preference_enabled)
+            and best.kind_count == 1
+            and best.total_count > 1
+        ):
+            max_extra_residual = max(
+                0.0,
+                float(config.weight.freezer_distinct_mixed_max_extra_residual_grams),
+            )
+            distinct_mixed = [
+                item
+                for item in matches
+                if item.total_count == best.total_count
+                and item.kind_count == item.total_count
+                and all(int(count) == 1 for count in item.counts.values())
+                and float(item.residual) <= float(best.residual) + max_extra_residual
+            ]
+            if distinct_mixed:
+                return sorted(
+                    distinct_mixed,
+                    key=lambda item: (
+                        item.residual,
+                        item.rank_sum,
+                        -item.score,
+                    ),
+                )[0]
+        return best
 
     @staticmethod
     def _selected_product_diagnostics(

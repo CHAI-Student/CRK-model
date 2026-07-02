@@ -38,7 +38,7 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   collection broad; service-side regular candidate thresholds do the main
   filtering.
 - `MODEL__VISION__HAND_CLASS_ID=0` identifies hand detections, and
-  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30` is the separate hand-tracking
+  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` is the separate hand-tracking
   confidence floor. This is intentionally lower than the current freezer
   product vote floor because hand recall is weaker.
 - `MODEL__VISION__LOG_ENGINE_CLASSES=off` by default. Set it to `on`/`true`/`1`
@@ -96,6 +96,16 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   segment/combined-weight support inside the freezer tolerance before returning
   multiple product identities. `.env.example` sets this rollback flag to
   `false`.
+- `MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_PREFERENCE_ENABLED=true` lets an
+  all-single mixed freezer basket replace a same-product repeat with the same
+  total item count when the mixed residual is no more than
+  `MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_MAX_EXTRA_RESIDUAL_GRAMS=5.0` worse.
+- `MODEL__WEIGHT__FREEZER_PRIOR_TRIGGER_DEDUPE_ENABLED=true` excludes products
+  already selected by earlier freezer removal triggers in the same global door
+  session before later freezer trigger solving. The current policy is
+  fail-closed: if the remaining candidate pool cannot fit the later target, the
+  trigger returns no-charge diagnostics rather than reusing an earlier product
+  group.
 - `MODEL__WEIGHT__MULTI_KIND_MIN_CONFIDENCE=0.18` is the per-item confidence
   floor for multi-kind combinations.
 - `MODEL__WEIGHT__SAME_PRODUCT_COUNT_TOLERANCE_GRAMS=5.0` applies only to the
@@ -147,8 +157,9 @@ delimiter, `.env` auto-load, and runtime overrides through CLI host/port.
   also use this as the minimum floor before applying the bbox-size rule.
 - `MODEL__VISION__FREEZER_MOTION_MIN_DISPLACEMENT_PX=12.0` is the freezer
   motion floor used only when `MODEL__MACHINE__CABINET_TYPE=freezer`.
-- `MODEL__VISION__FREEZER_MIN_VOTE_RATIO=0.08` and
-  `MODEL__VISION__FREEZER_MIN_VOTE_COUNT=3` tighten freezer candidate voting.
+- The freezer field template uses `MODEL__VISION__FREEZER_MIN_VOTE_RATIO=0.08`
+  and `MODEL__VISION__FREEZER_MIN_VOTE_COUNT=4` to tighten freezer candidate
+  voting.
 - `MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper` and
   `MODEL__VISION__FREEZER_ROI_Y_SPLIT=240.0` keep freezer dual-top detections
   only when their 480x480 bbox center is in the upper half

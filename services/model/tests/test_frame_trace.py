@@ -755,32 +755,44 @@ def test_trigger_trace_context_candidate_weight_defaults_to_null(tmp_path):
     assert detail["candidates"][0]["unit_weight_g"] is None
 
 
-def test_trigger_service_candidate_ops_log_includes_weight(caplog):
+def test_trigger_service_candidate_ops_log_includes_weight_and_raw_confidence(
+    caplog,
+    monkeypatch,
+):
+    from model_service.core.config import config
     from model_service.service.trigger_service import TriggerService
     from model_service.video.voting_ensemble import VoteResult
 
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.70)
     caplog.set_level(logging.INFO, logger="model_service.ops")
 
     TriggerService._log_candidate_ops(
         3,
         [
             VoteResult(
-                class_id=114,
-                class_name="BOX_LOTTE_PEPERO_ORIGINAL_46G",
-                vote_count=13,
-                max_confidence=0.386,
-                avg_confidence=0.28,
+                class_id=23,
+                class_name="BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                vote_count=3,
+                max_confidence=0.8749,
+                avg_confidence=0.82,
                 top_detected=True,
                 side_detected=False,
-                top_vote_count=13,
-                top_max_confidence=0.386,
-                weighted_confidence=0.174,
+                top_vote_count=3,
+                top_max_confidence=0.8749,
+                weighted_confidence=0.525,
+                freezer_exit_path_votes=3,
             )
         ],
-        {114: 66.0},
+        {23: 176.0},
     )
 
-    assert "name=BOX_LOTTE_PEPERO_ORIGINAL_46G weight=66.0g" in caplog.text
+    assert "name=BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G weight=176.0g" in caplog.text
+    assert (
+        "confidence=0.875 weighted_confidence=0.525 "
+        "top_confidence=0.875 side_confidence=0.000 "
+        "identity_threshold=0.700"
+    ) in caplog.text
 
 
 def test_trigger_trace_context_writes_diagnostics_sections(tmp_path):
@@ -1076,8 +1088,11 @@ async def test_trigger_service_freezer_single_bagel_candidate_counts_repeat_and_
 
         detail = json.loads(read_trigger_detail_files(tmp_path / "logs")[0].read_text())
         diagnostics = detail["weight_diagnostics"]["freezer_vision_first"]
-        assert diagnostics["reason"] == "freezer_ordered_vision_candidate_pool"
-        assert diagnostics["selected"][0]["count"] == 2
+        assert diagnostics["reason"] == "freezer_channel_target_product_groups"
+        assert sum(item["count"] for item in diagnostics["selected"]) == 2
+        assert diagnostics["orderedCombinationSearch"]["policy"] == (
+            "loadcell_channel_product_group_ordered_weight_validation"
+        )
         assert diagnostics["selected"][0]["combinationResidual"] == pytest.approx(
             2.5,
             abs=0.2,

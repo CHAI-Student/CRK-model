@@ -2598,6 +2598,202 @@ def test_video_processor_freezer_static_single_loses_to_trajectory_candidate(
     assert diagnostics["selectedClassIds"] == [101, 102]
 
 
+def test_video_processor_freezer_static_low_vote_candidate_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 3)
+    monkeypatch.setattr(config.vision, "freezer_motion_min_displacement_px", 12.0)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-static-low-vote",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "101": {
+            "class_id": 101,
+            "name": "STATIC_LOW_VOTE_SINGLE",
+            "freezerExitPathVotes": 3,
+            "pathDisplacementPx": 3.0,
+            "maxDistancePx": 20.0,
+            "centerSpanX": 25.0,
+            "centerSpanY": 6.0,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": False,
+            "staticShelfLikely": True,
+            "cameras": {"top": {"freezerExitPathVotes": 3}},
+        }
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                101,
+                "STATIC_LOW_VOTE_SINGLE",
+                3,
+                0.82,
+                0.76,
+                weighted_confidence=0.76,
+                top_detected=True,
+                top_vote_count=3,
+            )
+        ],
+        delta_weight=-79.0,
+        product_weights={101: 79.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert handled == []
+    assert diagnostics["selectedClassIds"] == []
+    rejected = diagnostics["rejectedInteractionCandidates"][0]
+    assert rejected["class_id"] == 101
+    assert rejected["interactionRejectedReason"] == "static_low_vote_shelf_candidate"
+
+
+def test_video_processor_freezer_vote_floor_rejects_three_vote_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.08)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-vote-floor-reject",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "23": {
+            "class_id": 23,
+            "name": "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+            "freezerExitPathVotes": 3,
+            "pathDisplacementPx": 198.1,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "staticShelfLikely": False,
+            "handPathPassed": True,
+            "cameras": {"top": {"freezerExitPathVotes": 3}},
+        }
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                23,
+                "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                3,
+                0.8749,
+                0.82,
+                vote_ratio=0.01,
+                weighted_confidence=0.525,
+                top_detected=True,
+                top_vote_count=3,
+                top_max_confidence=0.8749,
+            )
+        ],
+        delta_weight=-176.0,
+        product_weights={23: 176.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert handled == []
+    assert diagnostics["selectedClassIds"] == []
+    rejected = diagnostics["rejectedVoteFloorCandidates"][0]
+    assert rejected["class_id"] == 23
+    assert rejected["reason"] == "vote_floor_below_threshold"
+    assert rejected["confidenceFloorPassed"] is True
+
+
+def test_video_processor_freezer_vote_floor_accepts_four_vote_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from model_service.core.config import config
+    from model_service.video import VideoProcessor, VoteResult
+    from model_service.video.frame_trace import TriggerTraceContext
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_ratio", 0.08)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.70)
+
+    trace_context = TriggerTraceContext(
+        session_id="freezer-vote-floor-accept",
+        zone=5,
+        top_path="/tmp/top.avi",
+        side_path="/tmp/side.avi",
+        log_dir=tmp_path / "logs",
+        sample_export_dir=tmp_path / "samples",
+        sample_export_enabled=False,
+    )
+    trace_context.stage_counts_by_class = {
+        "23": {
+            "class_id": 23,
+            "name": "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+            "freezerExitPathVotes": 4,
+            "pathDisplacementPx": 198.1,
+            "motionThresholdPx": 12.0,
+            "trajectoryExitPathPassed": True,
+            "staticShelfLikely": False,
+            "handPathPassed": True,
+            "cameras": {"top": {"freezerExitPathVotes": 4}},
+        }
+    }
+
+    handled = VideoProcessor.filter_freezer_handled_candidates(
+        [
+            VoteResult(
+                23,
+                "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                4,
+                0.8749,
+                0.82,
+                vote_ratio=0.01,
+                weighted_confidence=0.525,
+                top_detected=True,
+                top_vote_count=4,
+                top_max_confidence=0.8749,
+            )
+        ],
+        delta_weight=-176.0,
+        product_weights={23: 176.0},
+        trace_context=trace_context,
+        log_prefix="TEST",
+    )
+
+    diagnostics = trace_context.weight_diagnostics["freezer_candidate_filter"]
+    assert [candidate.class_id for candidate in handled] == [23]
+    assert diagnostics["selectedClassIds"] == [23]
+    assert diagnostics["rejectedVoteFloorCandidates"] == []
+
+
 def test_video_processor_freezer_hand_path_blocks_candidate_when_alternative_exists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

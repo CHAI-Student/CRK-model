@@ -44,7 +44,10 @@ so queue wait is a real latency dimension.
   channel deltas across the stable start/end plateaus when two or more channels
   drop at the same time and their summed negative delta matches the aggregate
   removal within tolerance. They are evidence-required targets for cases such
-  as `144g + 375g` being merged into one `519g` time segment.
+  as `144g + 375g` being merged into one `519g` time segment. Each accepted
+  target carries `channel_position` and `channel_side` (`left`, then `right`
+  for the first two physical removal channels) so freezer decisions can keep
+  one product group per loadcell.
 - Channel split diagnostics are recorded in `channel_delta_diagnostics`,
   including per-channel start/end/delta values, rejection reasons for positive
   channel offsets or insufficient negative channels, and accepted channel

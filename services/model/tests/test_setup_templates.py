@@ -40,6 +40,9 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
         "MODEL__VISION__TOP_CONFIDENCE_THRESHOLD",
         "MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD",
         "MODEL__WEIGHT__FREEZER_VISION_MULTI_WITHOUT_WEIGHT_ENABLED",
+        "MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_PREFERENCE_ENABLED",
+        "MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_MAX_EXTRA_RESIDUAL_GRAMS",
+        "MODEL__WEIGHT__FREEZER_PRIOR_TRIGGER_DEDUPE_ENABLED",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -49,7 +52,7 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.vision.camera_layout == "dual_top_proxy"
     assert settings.vision.yolo_model_path == "models/set9_imbalance_16.engine"
     assert settings.vision.hand_class_id == 0
-    assert settings.vision.hand_confidence_threshold == 0.30
+    assert settings.vision.hand_confidence_threshold == 0.40
     assert settings.vision.top_confidence_threshold == 0.70
     assert settings.vision.side_confidence_threshold == 0.70
     assert settings.vision.top_weight == 0.60
@@ -57,12 +60,15 @@ def test_env_example_parses_as_freezer_template(monkeypatch):
     assert settings.vision.top_only_weight == 0.60
     assert settings.vision.side_only_weight == 0.40
     assert settings.vision.freezer_min_vote_ratio == 0.08
-    assert settings.vision.freezer_min_vote_count == 3
+    assert settings.vision.freezer_min_vote_count == 4
     assert settings.vision.freezer_motion_min_displacement_px == 12.0
     assert settings.vision.freezer_roi_vertical_region == "upper"
     assert settings.vision.freezer_roi_y_split == 240.0
     assert settings.weight.freezer_weight_tolerance_grams == 15.0
     assert settings.weight.freezer_vision_multi_without_weight_enabled is False
+    assert settings.weight.freezer_distinct_mixed_preference_enabled is True
+    assert settings.weight.freezer_distinct_mixed_max_extra_residual_grams == 5.0
+    assert settings.weight.freezer_prior_trigger_dedupe_enabled is True
     assert settings.trace.sample_export_enabled is False
 
 

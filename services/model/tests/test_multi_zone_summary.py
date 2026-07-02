@@ -393,6 +393,95 @@ def test_freezer_close_aggregate_combines_multiple_zones_to_last_trigger_zone(
         store.clear_all()
 
 
+def test_freezer_close_aggregate_prefers_distinct_mixed_over_repeat(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_distinct_mixed_preference_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        config.weight,
+        "freezer_distinct_mixed_max_extra_residual_grams",
+        5.0,
+    )
+    weights = {101: 100.0, 102: 102.0, 103: 103.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+
+    def trigger(seq, timestamp):
+        return TriggerResult(
+            trigger_id=f"trigger-{seq}",
+            session_id=f"session-{seq}",
+            timestamp=timestamp,
+            products=[_product(101, "FREEZER_A", 1)],
+            delta_weight=-150.0,
+            confidence=0.9,
+            video_paths={},
+            is_return=False,
+            vision_candidates=[
+                _candidate_snapshot(
+                    101,
+                    "FREEZER_A",
+                    rank=1,
+                    weight=100.0,
+                    confidence=0.95,
+                ),
+                _candidate_snapshot(
+                    102,
+                    "FREEZER_B",
+                    rank=2,
+                    weight=102.0,
+                    confidence=0.93,
+                ),
+                _candidate_snapshot(
+                    103,
+                    "FREEZER_C",
+                    rank=3,
+                    weight=103.0,
+                    confidence=0.91,
+                ),
+            ],
+        )
+
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(zone=1, result=trigger(1, 100.0))
+        store.add_trigger_with_global(zone=1, result=trigger(2, 120.0))
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_1 = next(zone for zone in response["zones"] if zone["zone"] == 1)
+
+        assert [(product["productId"], product["count"]) for product in zone_1["products"]] == [
+            (101, 1),
+            (102, 1),
+            (103, 1),
+        ]
+        aggregate = global_session.zone_sessions[1].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["selectedWeight"] == 305.0
+        assert aggregate["residual"] == 5.0
+        assert aggregate["selectedProducts"] == [
+            {"productId": 101, "name": "FREEZER_A", "count": 1},
+            {"productId": 102, "name": "FREEZER_B", "count": 1},
+            {"productId": 103, "name": "FREEZER_C", "count": 1},
+        ]
+    finally:
+        store.clear_all()
+
+
 def test_freezer_close_aggregate_preserves_trigger_products_when_total_fits(
     monkeypatch,
     tmp_path,

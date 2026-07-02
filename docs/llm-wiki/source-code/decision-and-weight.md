@@ -98,18 +98,37 @@ Important inputs:
   loadcell validation. Candidate identity order comes from the passed vision
   candidates, not from loadcell residual. The solver tests rank-1 `x1`, rank-2
   `x1`, and so on, then rank-ordered same-product counts, then mixed
-  combinations by total count and rank. The first expected weight within
-  `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` is selected.
+  combinations by total count and rank. Single `x1` choices preserve vision
+  order within `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`; a
+  same-product repeat can be replaced by an all-single mixed basket with the
+  same total item count when the mixed residual is no more than
+  `MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_MAX_EXTRA_RESIDUAL_GRAMS=5.0` worse,
+  or by another mixed-kind basket when the mixed residual is materially better.
 - This order is deliberate: for the cheese burger field failure, target
   `183.7g`, rank-1 cheese burger `176g`, and lower-rank dumpling `189g`, the
   engine selects cheese burger `x1` because rank-1 `x1` already fits freezer
   tolerance. Weight residual is a pass/fail signal, not an identity ranking
   score once a higher-ranked candidate is inside tolerance.
+- Freezer channel targets now come before aggregate candidate-pool solving.
+  The operating assumption is one product group per physical loadcell:
+  left/right loadcells on one freezer shelf may hold different product groups,
+  but one shelf trigger should produce at most two product groups. When
+  `loadcell.channel_removal_segment_targets` exists, `freezer_vision_first`
+  first locks any channel target that fits a visual candidate as `x1`, then
+  solves the remaining channel targets as same-product multiples from the
+  remaining visual candidates. For example, left `100g` and right `120g` with
+  visual candidates `50g` and `120g` selects right `120g x1` first and then
+  left `50g x2`. If both left/right channels fit the same product as `x1`,
+  the output products merge those selections into one product judgment such as
+  `Bagel x2`.
 - Freezer diagnostics record `decision_branch=freezer_vision_first`,
   `weight_used_as=combination_validation` or `diagnostic`,
   `weight_reliable`, `weight_residual`, `selectionTier`,
   `orderedCombinationSearch`, `freezerExitPathVotes`, and the full
-  considered/selected candidate list. `freezerExitPathVotes` comes from
+  considered/selected candidate list. Distinct mixed preference and prior
+  trigger de-dupe add `distinctMixedPreferred`, `priorSelectedProductIdxs`,
+  `priorExclusionApplied`, and `priorExclusionFallback`. `freezerExitPathVotes`
+  comes from
   `freezer_roi_passed` or explicit legacy vote fields, not ROI-rejected
   detections. If no candidate-pool combination fits a valid positive-weight
   freezer target, the branch returns no-charge `UNCERTAIN` with
@@ -122,14 +141,16 @@ Important inputs:
 - Stage-only freezer rescue is diagnostic-only under this branch. If a product
   is absent from the passed vision candidate pool, it cannot be created from
   stage evidence, active products, or nearest weight during freezer ordered
-  solving.
+  solving. The freezer-only exception is strict single-item ROI-weight rescue
+  from strong `freezer_roi_filtered` evidence with an active, stock-positive,
+  positive-weight product and a tight single-unit residual.
 - Freezer product identity creation also respects the freezer product
-  confidence floor. Stage-count, diagnostic, threshold-rescue, ROI-rescue, and
-  weight-gated rescue evidence below the current `0.70` raw/max product
-  threshold can remain visible in diagnostics, but it cannot create a final
-  product fallback. Weighted/combined confidence is diagnostic only for this
-  gate; at least one detected camera's raw/max product confidence must meet
-  the configured floor.
+  confidence floor. Stage-count, diagnostic, threshold-rescue, ROI-weight
+  rescue, and weight-gated rescue evidence below the current `0.70` raw/max
+  product threshold can remain visible in diagnostics, but it cannot create a
+  final product fallback. Weighted/combined confidence is diagnostic only for
+  this gate; at least one detected camera's raw/max product confidence must
+  meet the configured floor.
 - Same-product freezer repeats are now inferred only by the ordered solver.
   Dual-top same-class observations are normalized to `count_hint=1` before the
   engine; `x2/x3` appears only when the rank-ordered same-product count pass
@@ -138,12 +159,23 @@ Important inputs:
   and raw identity confidence above the product floor becomes `x2` because
   `156g x2 ~= 309.5g`; a low raw-confidence candidate remains diagnostic-only,
   and a non-fitting single remains no-charge instead of chargeable `PARTIAL x1`.
-- Multi-kind freezer results are selected only after all same-product count
-  attempts miss. Mixed combinations are still limited to candidates in the
-  visual pool with valid active-product stock and positive unit weight.
+- Multi-kind freezer results are selected from the same visual pool as repeat
+  candidates. When multiple different candidates plausibly explain the same
+  trigger, an all-single mixed basket can supersede a same-product repeat even
+  when the repeat is slightly closer, bounded by the distinct-mixed residual
+  slack. Mixed combinations are still limited to candidates in the visual pool
+  with valid active-product stock and positive unit weight.
+- In a single active global freezer door session, prior removal trigger
+  products are excluded before solving the next trigger so overlapping camera
+  candidate pools advance from product A to product B/C across separated
+  triggers. This exclusion is fail-closed: if the remaining candidate pool
+  cannot fit the later freezer loadcell target, the trigger returns no-charge
+  diagnostics instead of reusing an earlier product group.
 - Direct `freezer_vision_first` selection reads the same interaction evidence
-  as the video candidate-pool path. `staticShelfLikely` top-only candidates are
-  softly demoted unless trajectory or hand-path support exists. The hand
+  as the video candidate-pool path. `staticShelfLikely` top-only candidates at
+  the freezer vote floor, with no trajectory and below-floor motion, are
+  hard-rejected; other static candidates are softly demoted unless trajectory
+  or hand-path support exists. The hand
   fields include `handPathValidUpperRoi`, `handInteractionPassed`,
   `handNearFrameCount`, `handNearVoteRatio`, `minHandDistancePx`,
   `handPathPassed`, and `handPathBlocked`. A `handPathBlocked` candidate is
@@ -225,16 +257,15 @@ Important inputs:
   removal such as `210g + 105g + 103g + 107g` from collapsing into a simpler
   aggregate one-item match near `530g`.
 - If `loadcell.channel_removal_segment_targets` contains two or more physical
-  channel targets, segment matching evaluates them before ordinary time-based
-  `removal_segment_targets`. Channel targets are evidence-required and only
-  allow one single-product option per channel; all selected channel products
-  must be evidence-supported. A supported channel split such as Tteokbokki
-  `144g` plus Welchs `371g` can therefore beat a same-weight aggregate
-  threshold rescue such as Kwangdong `520g`. If a channel split cannot explain
-  every channel target, the engine records
-  `channel_segment_weight_matching` diagnostics and retries ordinary
-  time-based `removal_segment_targets` before aggregate strict or fallback
-  branches.
+  channel targets outside the freezer branch, segment matching evaluates them
+  before ordinary time-based `removal_segment_targets`. Those legacy channel
+  targets are evidence-required and only allow one single-product option per
+  channel; all selected channel products must be evidence-supported. In current
+  freezer mode, channel targets are handled earlier by `freezer_vision_first`
+  with `orderedCombinationSearch.policy =
+  loadcell_channel_product_group_ordered_weight_validation`, which allows a
+  same-product multiple inside one channel target while still limiting the
+  shelf to left/right product groups.
 - Segment-first matching respects active stock across segments, allows repeated
   same-product counts per segment, and records
   `weight_diagnostics.segment_weight_matching` with segment targets, options,

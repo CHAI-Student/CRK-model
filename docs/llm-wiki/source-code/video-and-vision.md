@@ -102,8 +102,10 @@ selected frames, accumulates per-camera evidence, and returns ranked
   `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT` (default `240`).
   `lower` remains a rollback mode, and
   `MODEL__VISION__FREEZER_LOWER_ROI_Y_SPLIT` is only a deprecated split
-  fallback. Threshold rescue and ROI rescue are disabled for freezer
-  candidates so only strong in-ROI evidence reaches the decision engine.
+  fallback. Regular threshold/ROI rescue is disabled for freezer handled
+  candidates so weak evidence does not enter the normal candidate pool; the
+  decision engine has a separate strict single-item ROI-weight rescue for
+  strong `freezer_roi_filtered` evidence.
 - Current freezer product vote floors are `0.70` for both Top and Side through
   `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD` and
   `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD`. Product detections below the
@@ -113,7 +115,7 @@ selected frames, accumulates per-camera evidence, and returns ranked
   aggregate fallback candidates in freezer mode. Weighted/combined confidence
   is logged separately and does not satisfy this raw identity floor.
 - Hand tracking has a separate floor:
-  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30`. Hand detections below this
+  `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40`. Hand detections below this
   value are removed before `HandPathTracker` sees them; hand class id remains
   `MODEL__VISION__HAND_CLASS_ID=0`. This class is included in the top-middle
   inference allowlist only.
@@ -124,19 +126,21 @@ selected frames, accumulates per-camera evidence, and returns ranked
 - After video processing, freezer dual-top removals keep a vision candidate
   pool. `VideoProcessor.filter_freezer_handled_candidates()` passes through all
   regular `source=vision` candidates inside top-K that already passed the
-  raw product threshold, freezer ROI, motion, and valid top-middle hand-path gates.
+  raw product threshold, freezer vote floor, freezer ROI, motion, and valid
+  top-middle hand-path gates.
   It no longer narrows by loadcell residual, multi-kind weight fit, or
   same-product repeat. The filter normalizes dual-top same-class
   `instance_count_hint` to `1`; repeated counts are inferred later by the
   decision engine's ordered weight solver.
-- Stage-only, active-only, weight-nearest, threshold-rescue, and ROI-rescue
-  evidence remains diagnostic-only for freezer identity. The freezer candidate
-  filter records these sources in trace diagnostics when available, but it does
-  not return them as handled candidates or create a chargeable product from
-  them.
+- Stage-only, active-only, weight-nearest, and threshold-rescue evidence
+  remains diagnostic-only for freezer identity. Regular ROI-rescue is not
+  returned as a handled candidate; only the decision engine's strict single-item
+  ROI-weight rescue may create a freezer option from strong
+  `freezer_roi_filtered` evidence.
 - Freezer ROI stage names are split by meaning: `freezer_roi_passed` is the
   only stage that increments `freezerExitPathVotes`; `freezer_roi_filtered`
-  records rejected ROI evidence and `freezerRoiFilteredVotes` only.
+  records rejected ROI evidence and `freezerRoiFilteredVotes`, which are used
+  only by the strict single-item ROI-weight rescue path.
 - Freezer handled filtering now records and uses interaction evidence:
   `pathDisplacementPx`, `maxDistancePx`, `centerSpanX/Y`,
   `trajectoryExitPathPassed`, `staticShelfLikely`, `handPathValid`,

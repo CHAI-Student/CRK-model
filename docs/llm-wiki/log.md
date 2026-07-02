@@ -1,5 +1,56 @@
 # LLM Wiki Log
 
+## [2026-07-02] maintenance | freezer left-right loadcell product groups
+
+- Recorded the new freezer operating assumption: one product group per
+  physical loadcell, with left/right loadcells on one shelf allowed to carry
+  different product groups. A freezer shelf trigger is therefore capped at two
+  product groups.
+- Added freezer channel-target selection policy. When
+  `channel_removal_segment_targets` exist, `freezer_vision_first` solves
+  left/right targets before aggregate candidate-pool solving: first it locks
+  any `x1` channel match, then it solves remaining channels as same-product
+  multiples from the visual candidate pool.
+- Updated prior-trigger de-dupe from fail-open to fail-closed. Products
+  selected by earlier freezer removal triggers in the same global door session
+  are excluded from later freezer trigger solving; if no remaining candidate
+  fits, the trigger returns no-charge diagnostics instead of reusing the
+  earlier product group.
+
+## [2026-07-02] maintenance | freezer distinct mixed and trigger de-dupe
+
+- Added freezer distinct-mixed preference. Same-product repeats such as rank-1
+  `x3` can now be replaced by an all-single mixed basket with the same total
+  item count when the mixed residual is within the configured `5g` extra
+  residual slack.
+- Added freezer prior-trigger de-dupe for active global door sessions. Earlier
+  removal products are excluded before solving the next freezer trigger. This
+  entry is superseded by the left/right product-group update above: the current
+  policy is fail-closed/no-charge when the remaining freezer candidate pool
+  cannot fit the loadcell delta.
+- Added `.env.example` controls:
+  `MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_PREFERENCE_ENABLED=true`,
+  `MODEL__WEIGHT__FREEZER_DISTINCT_MIXED_MAX_EXTRA_RESIDUAL_GRAMS=5.0`, and
+  `MODEL__WEIGHT__FREEZER_PRIOR_TRIGGER_DEDUPE_ENABLED=true`.
+
+## [2026-07-01] maintenance | freezer candidate filtering refinement
+
+- Kept freezer product identity at raw/max camera confidence `0.70`, but raised
+  the field template hand floor to `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40`
+  and freezer candidate vote floor to `MODEL__VISION__FREEZER_MIN_VOTE_COUNT=4`.
+- Split OPS candidate confidence logging so `confidence` now reports raw
+  identity confidence and `weighted_confidence` reports the rank/display score.
+- Added a freezer handled-filter vote-floor guard so regular candidates below
+  both `FREEZER_MIN_VOTE_COUNT` and `FREEZER_MIN_VOTE_RATIO` are rejected before
+  reaching engine candidate selection.
+- Refined freezer ordered selection so `x1` candidates still preserve vision
+  order inside tolerance, while same-product repeats are checked against
+  mixed-kind baskets before acceptance. A mixed basket can replace a repeat
+  when its residual is materially better.
+- Added hard rejection for low-vote static shelf freezer candidates and a
+  freezer-only single-item ROI-weight rescue path for strong
+  `freezer_roi_filtered` evidence with strict loadcell residual fit.
+
 ## [2026-07-01] maintenance | freezer trigger-first close and raw confidence gate
 
 - Added the freezer trigger-products-first CLOSE rule. In aggregate-eligible

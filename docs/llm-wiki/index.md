@@ -109,7 +109,7 @@ shape without rereading every long historical document.
   the engine path to `models/set9_imbalance_16.engine`. Current freezer product
   vote floors are `MODEL__VISION__TOP_CONFIDENCE_THRESHOLD=0.70` and
   `MODEL__VISION__SIDE_CONFIDENCE_THRESHOLD=0.70`; hand tracking uses the
-  separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.30` with hand class id
+  separate `MODEL__VISION__HAND_CONFIDENCE_THRESHOLD=0.40` with hand class id
   `0`, but freezer `dual_top_proxy` only includes hand class `0` for the
   physical `top_middle` stream. The physical `top_side` stream remains
   product-only for inference and cannot drive hand-path filtering.
@@ -127,10 +127,11 @@ shape without rereading every long historical document.
   (`MODEL__VISION__FREEZER_ROI_VERTICAL_REGION=upper`,
   `center_y <= MODEL__VISION__FREEZER_ROI_Y_SPLIT`, default `240`). It applies
   stronger motion/vote floors and a `0.70` raw product confidence floor, while
-  hand detections are filtered independently at `0.30`. Threshold/ROI/stage/
+  hand detections are filtered independently at `0.40`. Threshold/stage/
   diagnostic fallback evidence below the product floor cannot create freezer
   product identity. `freezer_roi_passed` increments exit-path votes; rejected
-  `freezer_roi_filtered` evidence remains diagnostic only.
+  `freezer_roi_filtered` evidence is diagnostic except for the strict
+  single-item ROI-weight rescue path.
 - Freezer handled candidates are now a vision candidate pool, not a
   weight-narrowed single choice. Raw regular candidates that pass raw/max
   product threshold, ROI, motion, and valid top-middle hand-path gates stay in
@@ -142,23 +143,32 @@ shape without rereading every long historical document.
 - Freezer loadcell validation runs in the decision engine as an ordered
   candidate-pool combination search. The engine tests candidate rank-1 `x1`,
   rank-2 `x1`, and so on, then same-product counts by count/rank, then mixed
-  combinations by total count and rank. The first combination whose expected
-  weight is within `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0` is
-  selected. Weight residual is pass/fail only, so a rank-1 cheese burger
-  `176g` at target `183.7g` beats a lower-rank dumpling `189g` even though the
-  dumpling has a smaller residual.
+  combinations by total count and rank. Single `x1` candidates still preserve
+  vision order inside `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`;
+  same-product repeats are checked against mixed-kind combinations before
+  acceptance. An all-single mixed basket with the same total item count can
+  replace the repeat within the configured `5g` extra residual slack, and other
+  mixed baskets can replace it when their residual is materially better.
+  Weight residual is otherwise pass/fail only, so a rank-1
+  cheese burger `176g` at target `183.7g` beats a lower-rank dumpling `189g`
+  even though the dumpling has a smaller residual.
 - Freezer handled selection also uses interaction evidence, not only exit-path
   counts. Trace diagnostics record path displacement, max movement, center
   span, trajectory pass, static shelf likelihood, upper-ROI hand validity,
   hand proximity counts/ratios, and hand-path pass/block state. Top-only
-  static shelf candidates are softly demoted, and valid `top_middle` hand-path
-  blocks can hard-reject a candidate only when at least one hand-near
+  static shelf candidates at the freezer vote floor with no trajectory and
+  below-floor motion are hard-rejected; other static candidates are softly
+  demoted. Valid `top_middle` hand-path blocks can hard-reject a candidate only
+  when at least one hand-near
   alternative remains; no-near/all-blocked hand-path cases still fail open.
 - Freezer stage-only rescue, active-only fallback, and weight-nearest products
   are not chargeable identity sources under the freezer vision-candidate-pool
   policy. They may explain diagnostics, but the ordered solver can only charge
   products that were present in the passed vision candidate pool, active
-  snapshot, stock-positive, and valid positive-weight.
+  snapshot, stock-positive, and valid positive-weight. The exception is
+  freezer-only single-item ROI-weight rescue, which can recover strong
+  `freezer_roi_filtered` evidence when the unit weight matches the loadcell
+  delta within strict rescue tolerance.
 - Freezer loadcell is now treated as reliable to about `15g` by
   `MODEL__WEIGHT__FREEZER_WEIGHT_TOLERANCE_GRAMS=15.0`. Strong dual-camera
   freezer evidence can keep multiple handled identities only when their
@@ -262,6 +272,12 @@ shape without rereading every long historical document.
   evidence-required physical channel targets cannot explain every channel. This
   lets sequential removals such as Haluyache + LetsBe + Jagabee recover before
   aggregate strict or active-only forced fallback.
+- Freezer channel targets use a stricter shelf geometry policy before aggregate
+  solving: one product group per physical loadcell, at most left/right two
+  groups per freezer shelf. The engine locks `x1` channel matches first, then
+  solves remaining channel targets as same-product multiples from the visual
+  candidate pool; prior freezer trigger products are excluded fail-closed in
+  later trigger solving.
 - Segment-first matching treats low-confidence stage traces as unsupported
   evidence, so weak Pepero/Binch-style small-item repeats do not outrank
   active large-bottle explanations or become `COMPLETE`.

@@ -503,6 +503,20 @@ def _vote_results_to_ensemble(vote_results: List[Any]) -> List[Any]:
     return ensemble_results
 
 
+def _candidate_ops_confidence_fields(vote: Any) -> Tuple[float, float, float, float]:
+    from model_service.video import VideoProcessor
+
+    _, identity_confidence, identity_threshold, top_confidence, side_confidence = (
+        VideoProcessor._freezer_identity_confidence_gate(vote)
+    )
+    return (
+        float(identity_confidence),
+        float(identity_threshold),
+        float(top_confidence),
+        float(side_confidence),
+    )
+
+
 def _record_raw_and_filter_handled_candidates(
     *,
     vote_results: List[Any],
@@ -600,6 +614,47 @@ def _loadcell_payload_issue_reason(payload_diagnostics: Optional[dict]) -> Optio
     if payload_state in {"empty_payload", "invalid_only", "all_zero"}:
         return f"loadcell_payload_{payload_state}"
     return None
+
+
+def _freezer_prior_selected_product_idxs(
+    door_session_store: DoorSessionStore | None,
+    delta_weight: float,
+) -> set[str]:
+    if not bool(config.weight.freezer_prior_trigger_dedupe_enabled):
+        return set()
+    if str(config.machine.cabinet_type).strip().lower() != "freezer":
+        return set()
+    if delta_weight >= 0:
+        return set()
+    if door_session_store is None:
+        return set()
+
+    global_session = door_session_store.get_global_session()
+    if global_session is None:
+        return set()
+
+    selected: set[str] = set()
+    for session in global_session.zone_sessions.values():
+        for trigger in getattr(session, "triggers", []) or []:
+            try:
+                if float(getattr(trigger, "delta_weight", 0.0) or 0.0) >= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            for product in getattr(trigger, "products", []) or []:
+                try:
+                    if int(getattr(product, "count", 0) or 0) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                product_idx = getattr(product, "product_idx", None)
+                if product_idx is not None and str(product_idx).strip():
+                    selected.add(str(product_idx).strip())
+                try:
+                    selected.add(f"id:{int(getattr(product, 'product_id'))}")
+                except (TypeError, ValueError):
+                    pass
+    return selected
 
 
 def _record_no_charge_diagnostic(
@@ -1164,10 +1219,20 @@ async def trigger_judgment(
                 f"weighted_conf={vote.weighted_confidence:.3f}, "
                 f"top={vote.top_detected}, side={vote.side_detected}"
             )
+            (
+                identity_confidence,
+                identity_threshold,
+                top_confidence,
+                side_confidence,
+            ) = _candidate_ops_confidence_fields(vote)
             ops_logger.info(
                 f"[OPS][CANDIDATES] zone={request.zone} rank={index} "
                 f"name={vote.class_name} weight={weight_text} "
-                f"confidence={vote.weighted_confidence:.3f} "
+                f"confidence={identity_confidence:.3f} "
+                f"weighted_confidence={vote.weighted_confidence:.3f} "
+                f"top_confidence={top_confidence:.3f} "
+                f"side_confidence={side_confidence:.3f} "
+                f"identity_threshold={identity_threshold:.3f} "
                 f"top={vote.top_detected} side={vote.side_detected} "
                 f"source={getattr(vote, 'source', 'vision')} "
                 f"count_hint={getattr(vote, 'instance_count_hint', 1)} "
@@ -1209,6 +1274,15 @@ async def trigger_judgment(
             _should_force_vision_only(request.videos, delta_analysis)
             or (delta_weight == 0.0 and len(effective_loadcells) == 0)
         )
+        prior_selected_product_idxs = _freezer_prior_selected_product_idxs(
+            door_session_store,
+            delta_weight,
+        )
+        if prior_selected_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-DEDUPE] prior_selected_product_idxs=%s",
+                sorted(prior_selected_product_idxs),
+            )
 
         result = engine.judge(
             vision_candidates=vision_candidates,
@@ -1216,6 +1290,7 @@ async def trigger_judgment(
             vision_only=vision_only,
             active_products=active_products_snapshot,
             trace_context=trace_context,
+            prior_selected_product_idxs=prior_selected_product_idxs,
         )
 
         def get_product_idx(product_id: int) -> str | None:
