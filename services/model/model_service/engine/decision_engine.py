@@ -559,6 +559,8 @@ class ProductDecisionEngine:
         )
         rejected_stage_only_candidates: list[dict[str, Any]] = []
         rejected_roi_weight_rescue_candidates: list[dict[str, Any]] = []
+        channel_weight_stage_rescue_candidates: list[dict[str, Any]] = []
+        rejected_channel_weight_stage_rescue_candidates: list[dict[str, Any]] = []
         regular_vision_candidates = [
             candidate
             for candidate in vision_candidates
@@ -570,6 +572,15 @@ class ProductDecisionEngine:
             trace_context=trace_context,
             target_weight=target_weight,
             rejected_candidates=rejected_roi_weight_rescue_candidates,
+        )
+        channel_targets = self._freezer_channel_targets_from_trace(trace_context)
+        vision_candidates = self._augment_freezer_channel_weight_stage_rescue_candidates(
+            vision_candidates=vision_candidates,
+            active_products=active_products,
+            trace_context=trace_context,
+            channel_targets=channel_targets,
+            accepted_candidates=channel_weight_stage_rescue_candidates,
+            rejected_candidates=rejected_channel_weight_stage_rescue_candidates,
         )
         if not vision_candidates:
             diagnostics = {
@@ -584,6 +595,14 @@ class ProductDecisionEngine:
             if rejected_roi_weight_rescue_candidates:
                 diagnostics["rejectedRoiWeightRescueCandidates"] = (
                     rejected_roi_weight_rescue_candidates
+                )
+            if channel_weight_stage_rescue_candidates:
+                diagnostics["channelWeightStageRescueCandidates"] = (
+                    channel_weight_stage_rescue_candidates
+                )
+            if rejected_channel_weight_stage_rescue_candidates:
+                diagnostics["rejectedChannelWeightStageRescueCandidates"] = (
+                    rejected_channel_weight_stage_rescue_candidates
                 )
             self._record_weight_diagnostics(
                 trace_context,
@@ -604,7 +623,11 @@ class ProductDecisionEngine:
                 candidate
                 for candidate in vision_candidates[top_k:]
                 if str(getattr(candidate, "source", "") or "")
-                in {"freezer_stage_exit_path", "freezer_roi_weight_rescue"}
+                in {
+                    "freezer_stage_exit_path",
+                    "freezer_roi_weight_rescue",
+                    "freezer_channel_weight_stage_rescue",
+                }
             ],
         ]
         candidate_class_ids = {int(candidate.class_id) for candidate in candidate_pool}
@@ -690,6 +713,14 @@ class ProductDecisionEngine:
                     getattr(candidate, "motion_gate_passed", True)
                 ),
             }
+            if source == "freezer_channel_weight_stage_rescue":
+                extra_diagnostics = getattr(
+                    candidate,
+                    "channel_weight_stage_rescue_diagnostics",
+                    None,
+                )
+                if isinstance(extra_diagnostics, dict):
+                    diag.update(extra_diagnostics)
             if product is None:
                 diag["reason"] = "not_in_active_products"
                 considered.append(diag)
@@ -879,6 +910,14 @@ class ProductDecisionEngine:
                 diagnostics["rejectedRoiWeightRescueCandidates"] = (
                     rejected_roi_weight_rescue_candidates
                 )
+            if channel_weight_stage_rescue_candidates:
+                diagnostics["channelWeightStageRescueCandidates"] = (
+                    channel_weight_stage_rescue_candidates
+                )
+            if rejected_channel_weight_stage_rescue_candidates:
+                diagnostics["rejectedChannelWeightStageRescueCandidates"] = (
+                    rejected_channel_weight_stage_rescue_candidates
+                )
             self._record_weight_diagnostics(
                 trace_context,
                 {
@@ -892,7 +931,6 @@ class ProductDecisionEngine:
             self._filter_freezer_interaction_rejections(options)
         )
 
-        channel_targets = self._freezer_channel_targets_from_trace(trace_context)
         if len(channel_targets) >= 1:
             selected_options, reason, search_diagnostics = (
                 self._select_freezer_channel_target_combination(
@@ -918,6 +956,12 @@ class ProductDecisionEngine:
                     rejected_roi_weight_rescue_candidates=(
                         rejected_roi_weight_rescue_candidates
                     ),
+                    channel_weight_stage_rescue_candidates=(
+                        channel_weight_stage_rescue_candidates
+                    ),
+                    rejected_channel_weight_stage_rescue_candidates=(
+                        rejected_channel_weight_stage_rescue_candidates
+                    ),
                     reason=reason,
                     combination_search=search_diagnostics,
                 )
@@ -931,6 +975,12 @@ class ProductDecisionEngine:
                 rejected_stage_only_candidates=rejected_stage_only_candidates,
                 rejected_roi_weight_rescue_candidates=(
                     rejected_roi_weight_rescue_candidates
+                ),
+                channel_weight_stage_rescue_candidates=(
+                    channel_weight_stage_rescue_candidates
+                ),
+                rejected_channel_weight_stage_rescue_candidates=(
+                    rejected_channel_weight_stage_rescue_candidates
                 ),
                 search_diagnostics=search_diagnostics,
             )
@@ -964,6 +1014,12 @@ class ProductDecisionEngine:
                 rejected_roi_weight_rescue_candidates=(
                     rejected_roi_weight_rescue_candidates
                 ),
+                channel_weight_stage_rescue_candidates=(
+                    channel_weight_stage_rescue_candidates
+                ),
+                rejected_channel_weight_stage_rescue_candidates=(
+                    rejected_channel_weight_stage_rescue_candidates
+                ),
                 reason=reason,
                 combination_search=search_diagnostics,
             )
@@ -977,6 +1033,12 @@ class ProductDecisionEngine:
             interaction_rejected_options=interaction_rejected_options,
             rejected_stage_only_candidates=rejected_stage_only_candidates,
             rejected_roi_weight_rescue_candidates=rejected_roi_weight_rescue_candidates,
+            channel_weight_stage_rescue_candidates=(
+                channel_weight_stage_rescue_candidates
+            ),
+            rejected_channel_weight_stage_rescue_candidates=(
+                rejected_channel_weight_stage_rescue_candidates
+            ),
             search_diagnostics=search_diagnostics,
         )
         return JudgmentResult(
@@ -2043,6 +2105,12 @@ class ProductDecisionEngine:
         interaction_rejected_options: Optional[list[dict[str, Any]]] = None,
         rejected_stage_only_candidates: Optional[list[dict[str, Any]]] = None,
         rejected_roi_weight_rescue_candidates: Optional[list[dict[str, Any]]] = None,
+        channel_weight_stage_rescue_candidates: Optional[
+            list[dict[str, Any]]
+        ] = None,
+        rejected_channel_weight_stage_rescue_candidates: Optional[
+            list[dict[str, Any]]
+        ] = None,
     ) -> None:
         diagnostics = {
             "accepted": False,
@@ -2078,6 +2146,14 @@ class ProductDecisionEngine:
         if rejected_roi_weight_rescue_candidates:
             diagnostics["rejectedRoiWeightRescueCandidates"] = (
                 rejected_roi_weight_rescue_candidates
+            )
+        if channel_weight_stage_rescue_candidates:
+            diagnostics["channelWeightStageRescueCandidates"] = (
+                channel_weight_stage_rescue_candidates
+            )
+        if rejected_channel_weight_stage_rescue_candidates:
+            diagnostics["rejectedChannelWeightStageRescueCandidates"] = (
+                rejected_channel_weight_stage_rescue_candidates
             )
         self._record_weight_diagnostics(
             trace_context,
@@ -2578,6 +2654,316 @@ class ProductDecisionEngine:
             )
         return augmented
 
+    def _augment_freezer_channel_weight_stage_rescue_candidates(
+        self,
+        *,
+        vision_candidates: List[EnsembleResult],
+        active_products: Optional[List],
+        trace_context: Optional[object],
+        channel_targets: list[dict[str, Any]],
+        accepted_candidates: Optional[list[dict[str, Any]]] = None,
+        rejected_candidates: Optional[list[dict[str, Any]]] = None,
+    ) -> List[EnsembleResult]:
+        stage_counts = getattr(trace_context, "stage_counts_by_class", {}) or {}
+        if (
+            not isinstance(stage_counts, dict)
+            or not stage_counts
+            or not active_products
+            or not channel_targets
+        ):
+            return vision_candidates
+
+        active_map = self._active_products_by_class(active_products)
+        if not active_map:
+            return vision_candidates
+
+        existing_class_ids = {
+            int(candidate.class_id)
+            for candidate in vision_candidates
+            if getattr(candidate, "class_id", None) is not None
+        }
+        augmented = list(vision_candidates)
+        tolerance = self._freezer_weight_tolerance_grams()
+        min_stage_votes = max(
+            1,
+            int(config.weight.detected_single_fallback_min_votes),
+        )
+        min_exit_votes = max(
+            0,
+            int(getattr(config.vision, "freezer_min_exit_path_votes", 3)),
+        )
+        relaxed_exit_votes = 2
+        top_threshold = self._freezer_threshold_for_camera("top")
+        side_threshold = self._freezer_threshold_for_camera("side")
+
+        def target_payload(
+            target: Optional[dict[str, Any]],
+            residual: Optional[float],
+        ) -> dict[str, Any]:
+            if not isinstance(target, dict):
+                return {}
+            payload = {
+                "channelSide": str(target.get("channel_side")),
+                "channelIndex": self._coerce_int(target.get("channel_index")),
+                "channelPosition": self._coerce_int(target.get("position")),
+                "channelTargetWeight": round(
+                    float(target.get("weight", 0.0) or 0.0),
+                    1,
+                ),
+                "channelTargetSource": str(target.get("source") or ""),
+            }
+            if residual is not None:
+                payload["channelWeightResidual"] = round(float(residual), 1)
+            return payload
+
+        def reject(
+            entry: dict[str, Any],
+            reason: str,
+            *,
+            target: Optional[dict[str, Any]] = None,
+            residual: Optional[float] = None,
+            **extra: Any,
+        ) -> None:
+            if rejected_candidates is None:
+                return
+            rejected_candidates.append(
+                {
+                    "class_id": int(entry.get("class_id", -1) or -1),
+                    "name": str(entry.get("name") or ""),
+                    "source": "freezer_channel_weight_stage_rescue",
+                    "reason": reason,
+                    **target_payload(target, residual),
+                    **extra,
+                }
+            )
+
+        for raw_class_id, entry in stage_counts.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                class_id = int(entry.get("class_id", raw_class_id))
+            except (TypeError, ValueError):
+                continue
+            if class_id in existing_class_ids:
+                continue
+
+            product = active_map.get(class_id)
+            if product is None or not self._active_product_has_loadcell(product):
+                continue
+            stock = self._coerce_int(getattr(product, "stock_qty", 0))
+            unit_weight = self._coerce_float(getattr(product, "product_weight", 0.0))
+            if stock <= 0 or unit_weight <= 0.0:
+                reject(entry, "invalid_weight_or_stock")
+                continue
+
+            best_target: Optional[dict[str, Any]] = None
+            best_residual: Optional[float] = None
+            for target in channel_targets:
+                residual = abs(float(target.get("weight", 0.0) or 0.0) - unit_weight)
+                if best_residual is None or residual < best_residual:
+                    best_target = target
+                    best_residual = residual
+            if best_target is None or best_residual is None:
+                reject(entry, "no_channel_target")
+                continue
+            if best_residual > tolerance:
+                reject(
+                    entry,
+                    "channel_weight_residual_exceeds_tolerance",
+                    target=best_target,
+                    residual=best_residual,
+                    unitWeight=round(unit_weight, 1),
+                    tolerance=round(tolerance, 1),
+                )
+                continue
+
+            summary = self._stage_evidence_summary(entry)
+            stage_votes = max(
+                int(summary.votes),
+                self._freezer_stage_int(
+                    entry,
+                    "threshold_passed",
+                    "motion_passed",
+                    "raw",
+                ),
+            )
+            cameras = entry.get("cameras") if isinstance(entry.get("cameras"), dict) else {}
+            top_entry = cameras.get("top", {}) if isinstance(cameras, dict) else {}
+            side_entry = cameras.get("side", {}) if isinstance(cameras, dict) else {}
+            if not isinstance(top_entry, dict):
+                top_entry = {}
+            if not isinstance(side_entry, dict):
+                side_entry = {}
+            top_confidence = float(summary.top_confidence)
+            side_confidence = float(summary.side_confidence)
+            confidence = max(
+                float(summary.confidence),
+                top_confidence,
+                side_confidence,
+            )
+            top_detected = top_confidence > 0.0
+            side_detected = side_confidence > 0.0
+            identity_passed = (
+                (top_detected and top_confidence >= top_threshold)
+                or (side_detected and side_confidence >= side_threshold)
+                or (
+                    not top_detected
+                    and not side_detected
+                    and confidence >= min(top_threshold, side_threshold)
+                )
+            )
+            if not identity_passed:
+                reject(
+                    entry,
+                    "identity_confidence_below_threshold",
+                    target=best_target,
+                    residual=best_residual,
+                    confidence=round(confidence, 4),
+                    topConfidence=round(top_confidence, 4),
+                    sideConfidence=round(side_confidence, 4),
+                    identityThreshold=round(min(top_threshold, side_threshold), 4),
+                )
+                continue
+            if stage_votes < min_stage_votes:
+                reject(
+                    entry,
+                    "insufficient_stage_votes",
+                    target=best_target,
+                    residual=best_residual,
+                    votes=stage_votes,
+                    minVotes=min_stage_votes,
+                )
+                continue
+
+            exit_path_votes = self._freezer_stage_int(
+                entry,
+                "freezerExitPathVotes",
+                "freezer_exit_path_votes",
+                "freezer_roi_passed",
+            )
+            camera_exit_counts = self._freezer_stage_camera_exit_counts(entry)
+            top_votes = self._freezer_stage_int(
+                top_entry,
+                "freezerExitPathVotes",
+                "freezer_roi_passed",
+                "threshold_passed",
+                "raw",
+            )
+            side_votes = self._freezer_stage_int(
+                side_entry,
+                "freezerExitPathVotes",
+                "freezer_roi_passed",
+                "threshold_passed",
+                "raw",
+            )
+            candidate = EnsembleResult(
+                class_id=class_id,
+                class_name=str(entry.get("name") or getattr(product, "product_name", "")),
+                top_confidence=top_confidence,
+                side_confidence=side_confidence,
+                combined_confidence=confidence,
+                vote_count=2 if top_votes > 0 and side_votes > 0 else 1,
+                source="freezer_channel_weight_stage_rescue",
+                raw_vote_count=stage_votes,
+                top_motion_passed=bool(
+                    summary.top_motion_passed
+                    or top_entry.get("motion_passed")
+                    or top_entry.get("motion_filtered")
+                ),
+                side_motion_passed=bool(
+                    summary.side_motion_passed
+                    or side_entry.get("motion_passed")
+                    or side_entry.get("motion_filtered")
+                ),
+                motion_gate_passed=bool(summary.motion_gate_passed),
+                weight_gate_passed=True,
+                rescue_tolerance_g=tolerance,
+                rescue_weight_residual_g=float(best_residual),
+                freezer_exit_path_votes=exit_path_votes,
+            )
+            interaction = self._freezer_candidate_interaction_evidence(
+                candidate,
+                stage_entry=entry,
+                dual_camera_exit_path=len(camera_exit_counts) >= 2,
+            )
+            if bool(interaction.get("handPathBlocked")):
+                reject(
+                    entry,
+                    "hand_path_blocked",
+                    target=best_target,
+                    residual=best_residual,
+                    freezerExitPathVotes=exit_path_votes,
+                    handPathPassed=bool(interaction.get("handPathPassed")),
+                )
+                continue
+            if bool(interaction.get("staticShelfLikely")):
+                reject(
+                    entry,
+                    "static_shelf_likely",
+                    target=best_target,
+                    residual=best_residual,
+                    freezerExitPathVotes=exit_path_votes,
+                    pathDisplacementPx=interaction.get("pathDisplacementPx"),
+                    motionThresholdPx=interaction.get("motionThresholdPx"),
+                )
+                continue
+            strict_exit_passed = exit_path_votes >= min_exit_votes
+            relaxed_exit_passed = bool(
+                exit_path_votes >= relaxed_exit_votes
+                and interaction.get("handPathPassed")
+                and interaction.get("trajectoryExitPathPassed")
+            )
+            if not (strict_exit_passed or relaxed_exit_passed):
+                reject(
+                    entry,
+                    "insufficient_exit_path_evidence",
+                    target=best_target,
+                    residual=best_residual,
+                    freezerExitPathVotes=exit_path_votes,
+                    minExitPathVotes=min_exit_votes,
+                    relaxedMinExitPathVotes=relaxed_exit_votes,
+                    handPathPassed=bool(interaction.get("handPathPassed")),
+                    trajectoryExitPathPassed=bool(
+                        interaction.get("trajectoryExitPathPassed")
+                    ),
+                )
+                continue
+
+            diagnostic = {
+                "class_id": class_id,
+                "name": candidate.class_name,
+                "source": "freezer_channel_weight_stage_rescue",
+                "accepted": True,
+                "unitWeight": round(unit_weight, 1),
+                "stock": stock,
+                "stageVotes": stage_votes,
+                "confidence": round(confidence, 4),
+                "topConfidence": round(top_confidence, 4),
+                "sideConfidence": round(side_confidence, 4),
+                "freezerExitPathVotes": exit_path_votes,
+                "strictExitPathPassed": bool(strict_exit_passed),
+                "relaxedExitPathPassed": bool(relaxed_exit_passed),
+                "cameraExitCounts": dict(camera_exit_counts),
+                "pathDisplacementPx": interaction.get("pathDisplacementPx"),
+                "motionThresholdPx": interaction.get("motionThresholdPx"),
+                "trajectoryExitPathPassed": bool(
+                    interaction.get("trajectoryExitPathPassed")
+                ),
+                "handPathPassed": bool(interaction.get("handPathPassed")),
+                "handPathBlocked": bool(interaction.get("handPathBlocked")),
+                "handInteractionPassed": bool(
+                    interaction.get("handInteractionPassed")
+                ),
+                **target_payload(best_target, best_residual),
+            }
+            setattr(candidate, "channel_weight_stage_rescue_diagnostics", diagnostic)
+            augmented.append(candidate)
+            existing_class_ids.add(class_id)
+            if accepted_candidates is not None:
+                accepted_candidates.append(diagnostic)
+
+        return augmented
+
     def _augment_freezer_stage_exit_path_candidates(
         self,
         *,
@@ -2869,6 +3255,12 @@ class ProductDecisionEngine:
         interaction_rejected_options: Optional[list[dict[str, Any]]] = None,
         rejected_stage_only_candidates: Optional[list[dict[str, Any]]] = None,
         rejected_roi_weight_rescue_candidates: Optional[list[dict[str, Any]]] = None,
+        channel_weight_stage_rescue_candidates: Optional[
+            list[dict[str, Any]]
+        ] = None,
+        rejected_channel_weight_stage_rescue_candidates: Optional[
+            list[dict[str, Any]]
+        ] = None,
         combination_search: Optional[dict[str, Any]] = None,
     ) -> JudgmentResult:
         products_by_id: dict[int, ProductJudgment] = {}
@@ -3008,6 +3400,14 @@ class ProductDecisionEngine:
         if rejected_roi_weight_rescue_candidates:
             diagnostics["rejectedRoiWeightRescueCandidates"] = (
                 rejected_roi_weight_rescue_candidates
+            )
+        if channel_weight_stage_rescue_candidates:
+            diagnostics["channelWeightStageRescueCandidates"] = (
+                channel_weight_stage_rescue_candidates
+            )
+        if rejected_channel_weight_stage_rescue_candidates:
+            diagnostics["rejectedChannelWeightStageRescueCandidates"] = (
+                rejected_channel_weight_stage_rescue_candidates
             )
         ambiguous_candidates = [
             item
@@ -4721,6 +5121,7 @@ class ProductDecisionEngine:
             "threshold_rescue",
             "roi_rescue",
             "freezer_roi_weight_rescue",
+            "freezer_channel_weight_stage_rescue",
         }:
             return 3
         if source_name == "diagnostic":
@@ -9392,6 +9793,12 @@ class ProductDecisionEngine:
                 confidence >= self._product_identity_confidence_floor()
             )
         if source == "freezer_roi_weight_rescue":
+            return (
+                self._is_freezer_mode()
+                and bool(getattr(candidate, "weight_gate_passed", False))
+                and confidence >= self._product_identity_confidence_floor()
+            )
+        if source == "freezer_channel_weight_stage_rescue":
             return (
                 self._is_freezer_mode()
                 and bool(getattr(candidate, "weight_gate_passed", False))

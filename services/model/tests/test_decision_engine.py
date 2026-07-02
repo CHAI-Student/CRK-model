@@ -246,6 +246,113 @@ def make_stage_count_entry(
     return entry
 
 
+def make_freezer_channel_trace(
+    *,
+    weight: float,
+    side: str = "left",
+    index: int = 0,
+) -> FakeLoadcellTrace:
+    return FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": weight,
+                    "delta": -abs(weight),
+                    "channel_index": index,
+                    "channel_position": index,
+                    "channel_side": side,
+                }
+            ]
+        }
+    )
+
+
+def make_freezer_channel_stage_evidence(
+    *,
+    class_id: int,
+    name: str,
+    raw: int,
+    confidence: float,
+    threshold_passed: int,
+    exit_path_votes: int,
+    top_confidence: float = 0.0,
+    side_confidence: float = 0.0,
+    hand_path_passed: bool = True,
+    hand_path_blocked: bool = False,
+    trajectory_passed: bool = True,
+    static_shelf: bool = False,
+    path_displacement: float | None = 60.0,
+    motion_threshold: float = 12.0,
+) -> dict:
+    top_confidence = top_confidence or confidence
+    side_confidence = side_confidence or 0.0
+    top_votes = max(0, exit_path_votes - (exit_path_votes // 2))
+    side_votes = max(0, exit_path_votes - top_votes)
+    cameras = {
+        "top": {
+            "raw": max(raw - (raw // 3), top_votes),
+            "raw_max_confidence": top_confidence,
+            "threshold_passed": max(0, threshold_passed - (threshold_passed // 2)),
+            "threshold_passed_max_confidence": top_confidence,
+        }
+    }
+    if top_votes > 0:
+        cameras["top"].update(
+            {
+                "freezer_roi_passed": top_votes,
+                "freezerExitPathVotes": top_votes,
+                "freezer_roi_passed_max_confidence": top_confidence,
+            }
+        )
+    if side_confidence > 0.0:
+        cameras["side"] = {
+            "raw": max(raw // 3, side_votes),
+            "raw_max_confidence": side_confidence,
+            "threshold_passed": threshold_passed // 2,
+            "threshold_passed_max_confidence": side_confidence,
+        }
+        if side_votes > 0:
+            cameras["side"].update(
+                {
+                    "freezer_roi_passed": side_votes,
+                    "freezerExitPathVotes": side_votes,
+                    "freezer_roi_passed_max_confidence": side_confidence,
+                }
+            )
+
+    entry = {
+        "class_id": class_id,
+        "name": name,
+        "raw": raw,
+        "raw_max_confidence": confidence,
+        "threshold_passed": threshold_passed,
+        "threshold_passed_max_confidence": confidence,
+        "freezer_roi_passed": exit_path_votes,
+        "freezerExitPathVotes": exit_path_votes,
+        "freezer_roi_passed_max_confidence": confidence,
+        "trajectoryExitPathPassed": trajectory_passed,
+        "staticShelfLikely": static_shelf,
+        "handPathValid": hand_path_passed or hand_path_blocked,
+        "handPathPassed": hand_path_passed,
+        "handPathBlocked": hand_path_blocked,
+        "handInteractionPassed": hand_path_passed,
+        "handPathValidUpperRoi": hand_path_passed or hand_path_blocked,
+        "cameras": cameras,
+    }
+    if path_displacement is not None:
+        entry.update(
+            {
+                "pathDisplacementPx": path_displacement,
+                "maxDistancePx": path_displacement,
+                "motionThresholdPx": motion_threshold,
+                "motion_passed": threshold_passed if trajectory_passed else 0,
+            }
+        )
+    return entry
+
+
 def test_vision_only_without_product_db_returns_partial():
     engine = ProductDecisionEngine(product_db=None, strict_mode=True)
     candidate = make_candidate(confidence=0.95)
@@ -1431,6 +1538,285 @@ def test_freezer_vision_first_roi_weight_rescues_worldcon_over_static_melona(
     assert rejected[0]["interactionRejectedReason"] == (
         "static_low_vote_shelf_candidate"
     )
+
+
+def test_freezer_channel_target_stage_rescue_selects_lala_without_final_candidates(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = make_freezer_channel_trace(weight=74.8)
+    trace.stage_counts_by_class = {
+        "46": make_freezer_channel_stage_evidence(
+            class_id=46,
+            name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            raw=49,
+            confidence=0.697,
+            top_confidence=0.697,
+            side_confidence=0.6229,
+            threshold_passed=4,
+            exit_path_votes=2,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=137.4,
+            motion_threshold=14.2,
+        )
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-71.5,
+        active_products=[
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                stock=82,
+                price=500,
+            ),
+            make_active_product(
+                35,
+                "BOX_LOTTE_WORLDCON_160ML",
+                weight=70.0,
+                stock=41,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (46, 1)
+    ]
+    assert result.weight_residual == pytest.approx(0.5)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    selected = diagnostics["selected"][0]
+    assert selected["source"] == "freezer_channel_weight_stage_rescue"
+    assert selected["relaxedExitPathPassed"] is True
+    assert diagnostics["channelWeightStageRescueCandidates"][0]["class_id"] == 46
+
+
+def test_freezer_channel_target_stage_rescue_prefers_dumpling_over_hotdog_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = make_freezer_channel_trace(weight=182.3)
+    trace.stage_counts_by_class = {
+        "13": make_freezer_channel_stage_evidence(
+            class_id=13,
+            name="BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+            raw=188,
+            confidence=0.8269,
+            top_confidence=0.6793,
+            side_confidence=0.8269,
+            threshold_passed=3,
+            exit_path_votes=3,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=60.0,
+            motion_threshold=36.2,
+        ),
+        "23": make_freezer_channel_stage_evidence(
+            class_id=23,
+            name="BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+            raw=16,
+            confidence=0.2391,
+            top_confidence=0.0742,
+            side_confidence=0.2391,
+            threshold_passed=0,
+            exit_path_votes=0,
+            hand_path_passed=False,
+            trajectory_passed=False,
+            path_displacement=None,
+        ),
+        "24": make_freezer_channel_stage_evidence(
+            class_id=24,
+            name="BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+            raw=252,
+            confidence=0.7616,
+            top_confidence=0.6182,
+            side_confidence=0.7616,
+            threshold_passed=11,
+            exit_path_votes=11,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=120.8,
+        ),
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=24,
+                name="BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+                combined=0.7992,
+                top=0.6182,
+                side=0.7616,
+                raw_vote_count=11,
+            )
+        ],
+        delta_weight=-178.9,
+        active_products=[
+            make_active_product(
+                13,
+                "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+                weight=189.0,
+                stock=70,
+                price=2100,
+            ),
+            make_active_product(
+                23,
+                "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+                weight=176.0,
+                stock=84,
+            ),
+            make_active_product(
+                24,
+                "BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+                weight=165.0,
+                stock=73,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (13, 1)
+    ]
+    assert result.weight_residual == pytest.approx(10.1)
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    selected = diagnostics["selected"][0]
+    assert selected["source"] == "freezer_channel_weight_stage_rescue"
+    assert selected["channelTargetWeight"] == pytest.approx(182.3)
+    rejected = diagnostics["rejectedChannelWeightStageRescueCandidates"]
+    assert any(
+        item["class_id"] == 23
+        and item["reason"] == "identity_confidence_below_threshold"
+        for item in rejected
+    )
+
+
+def test_freezer_channel_target_stage_rescue_rejects_weight_only_stage_match(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = make_freezer_channel_trace(weight=74.8)
+    trace.stage_counts_by_class = {
+        "46": make_freezer_channel_stage_evidence(
+            class_id=46,
+            name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            raw=20,
+            confidence=0.90,
+            top_confidence=0.90,
+            threshold_passed=4,
+            exit_path_votes=0,
+            hand_path_passed=False,
+            trajectory_passed=False,
+            path_displacement=None,
+        )
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-71.5,
+        active_products=[
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                stock=82,
+            )
+        ],
+        trace_context=trace,
+    )
+
+    assert result.products == []
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    rejected = diagnostics["rejectedChannelWeightStageRescueCandidates"]
+    assert rejected[0]["reason"] == "insufficient_exit_path_evidence"
+
+
+def test_freezer_channel_target_stage_rescue_rejects_blocked_or_static_stage(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = make_freezer_channel_trace(weight=74.8)
+    trace.stage_counts_by_class = {
+        "46": make_freezer_channel_stage_evidence(
+            class_id=46,
+            name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            raw=20,
+            confidence=0.90,
+            top_confidence=0.90,
+            threshold_passed=4,
+            exit_path_votes=3,
+            hand_path_passed=False,
+            hand_path_blocked=True,
+            trajectory_passed=True,
+        ),
+        "35": make_freezer_channel_stage_evidence(
+            class_id=35,
+            name="BOX_LOTTE_WORLDCON_160ML",
+            raw=20,
+            confidence=0.88,
+            top_confidence=0.88,
+            threshold_passed=4,
+            exit_path_votes=3,
+            hand_path_passed=True,
+            trajectory_passed=False,
+            static_shelf=True,
+            path_displacement=1.0,
+        ),
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-71.5,
+        active_products=[
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                stock=82,
+            ),
+            make_active_product(
+                35,
+                "BOX_LOTTE_WORLDCON_160ML",
+                weight=70.0,
+                stock=41,
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.products == []
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    rejected_reasons = {
+        item["class_id"]: item["reason"]
+        for item in diagnostics["rejectedChannelWeightStageRescueCandidates"]
+    }
+    assert rejected_reasons[46] == "hand_path_blocked"
+    assert rejected_reasons[35] == "static_shelf_likely"
 
 
 def test_freezer_vision_first_multi_without_weight_flag_false_uses_single_path(
