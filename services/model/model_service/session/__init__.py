@@ -25,6 +25,7 @@ from .active_product_store import ActiveProductStore
 from .door_session import (
     AggregatedProduct,
     DoorSession,
+    ReturnedPositionHint,
     TriggerResult,
     UnmatchedReturn,
     build_trigger_candidate_snapshot,
@@ -46,6 +47,7 @@ __all__ = [
     "TriggerResult",
     "AggregatedProduct",
     "UnmatchedReturn",
+    "ReturnedPositionHint",
     "build_trigger_candidate_snapshot",
     "generate_door_session_id",
     "DoorSessionStore",

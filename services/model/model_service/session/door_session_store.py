@@ -75,6 +75,7 @@ from .door_session import (
     CrossZoneReturn,
     DeferredReturn,
     DoorSession,
+    ReturnedPositionHint,
     TriggerResult,
     UnmatchedReturn,
     generate_door_session_id,
@@ -618,6 +619,231 @@ class DoorSessionStore:
                 unit.setdefault("name", product.name)
                 unit.setdefault("channelSide", "unknown")
 
+    @staticmethod
+    def _dedupe_returned_position_hints(
+        hints: List[ReturnedPositionHint],
+    ) -> List[ReturnedPositionHint]:
+        deduped: List[ReturnedPositionHint] = []
+        seen: set[tuple] = set()
+        for hint in hints:
+            key = (
+                int(hint.product_id),
+                hint.product_idx,
+                int(hint.zone) if hint.zone is not None else None,
+                hint.channel_side,
+                hint.channel_index,
+                hint.channel_position,
+                hint.trigger_id,
+                hint.source,
+                hint.reason,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(hint)
+        return deduped
+
+    @staticmethod
+    def _candidate_identity_passed(candidate: Dict[str, object]) -> bool:
+        try:
+            top_confidence = float(candidate.get("top_confidence", 0.0) or 0.0)
+            side_confidence = float(candidate.get("side_confidence", 0.0) or 0.0)
+            identity_confidence = float(
+                candidate.get(
+                    "identity_confidence",
+                    candidate.get("confidence", 0.0),
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            return False
+
+        top_detected = bool(candidate.get("top")) or top_confidence > 0.0
+        side_detected = bool(candidate.get("side")) or side_confidence > 0.0
+        if top_detected and top_confidence >= float(config.vision.top_confidence_threshold):
+            return True
+        if side_detected and side_confidence >= float(config.vision.side_confidence_threshold):
+            return True
+        if not top_detected and not side_detected:
+            return identity_confidence >= min(
+                float(config.vision.top_confidence_threshold),
+                float(config.vision.side_confidence_threshold),
+            )
+        return False
+
+    @staticmethod
+    def _channel_target_has_position(target: Dict[str, object]) -> bool:
+        return any(
+            target.get(key) is not None
+            for key in (
+                "channel_side",
+                "channelSide",
+                "channel_index",
+                "channelIndex",
+                "channel_position",
+                "channelPosition",
+            )
+        )
+
+    @staticmethod
+    def _positive_channel_targets(trigger: TriggerResult) -> List[Dict[str, object]]:
+        diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+        if not isinstance(diagnostics, dict):
+            return []
+        targets: List[Dict[str, object]] = []
+        for entry in diagnostics.get("channel_movement_targets") or []:
+            if not isinstance(entry, dict):
+                continue
+            direction = str(entry.get("direction", "")).lower()
+            try:
+                delta = float(entry.get("delta", 0.0) or 0.0)
+                weight = abs(float(entry.get("weight", delta) or delta))
+            except (TypeError, ValueError):
+                continue
+            if weight <= 0:
+                continue
+            if delta > 0 or direction == "return":
+                target = dict(entry)
+                target["weight"] = round(weight, 1)
+                targets.append(target)
+        return targets
+
+    def _collect_touch_return_hints(
+        self,
+        session: DoorSession,
+    ) -> List[ReturnedPositionHint]:
+        if str(config.machine.cabinet_type).strip().lower() != "freezer":
+            return []
+
+        hints: List[ReturnedPositionHint] = []
+        recent_return_targets: List[Dict[str, object]] = []
+        ordered_triggers = sorted(
+            session.triggers,
+            key=lambda trigger: (float(trigger.timestamp), trigger.trigger_id),
+        )
+        for trigger in ordered_triggers:
+            positive_targets = [
+                target
+                for target in self._positive_channel_targets(trigger)
+                if self._channel_target_has_position(target)
+            ]
+            if positive_targets:
+                recent_return_targets = positive_targets
+
+            hint = self._touch_return_hint_from_trigger(
+                session,
+                trigger,
+                positive_targets or recent_return_targets,
+            )
+            if hint is not None:
+                hints.append(hint)
+
+            try:
+                delta = float(trigger.delta_weight)
+            except (TypeError, ValueError):
+                delta = 0.0
+            if delta < -float(config.trigger.min_weight_change_grams):
+                diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+                if not isinstance(diagnostics, dict) or not diagnostics.get(
+                    "mixed_sign_internal_segments"
+                ):
+                    recent_return_targets = []
+        return hints
+
+    def _touch_return_hint_from_trigger(
+        self,
+        session: DoorSession,
+        trigger: TriggerResult,
+        return_targets: List[Dict[str, object]],
+    ) -> Optional[ReturnedPositionHint]:
+        if not return_targets:
+            return None
+        if any(int(getattr(product, "count", 0) or 0) > 0 for product in trigger.products):
+            return None
+
+        try:
+            delta = float(trigger.delta_weight)
+        except (TypeError, ValueError):
+            return None
+
+        candidates = [
+            candidate
+            for candidate in getattr(trigger, "vision_candidates", []) or []
+            if isinstance(candidate, dict)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: int(item.get("rank", 999) or 999))
+        candidate = candidates[0]
+        if not self._candidate_identity_passed(candidate):
+            return None
+
+        try:
+            product_id = int(candidate.get("product_id"))
+            unit_weight = float(candidate.get("unit_weight", 0.0) or 0.0)
+            stock_qty = int(candidate.get("stock_qty", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if product_id < 0 or unit_weight <= 0 or stock_qty <= 0:
+            return None
+        touch_limit = max(
+            float(config.trigger.min_weight_change_grams),
+            float(config.weight.freezer_weight_tolerance_grams),
+            float(unit_weight) * 0.25,
+        )
+        if abs(delta) > touch_limit:
+            return None
+        if abs(abs(delta) - unit_weight) <= float(config.weight.freezer_weight_tolerance_grams):
+            return None
+
+        target = return_targets[0]
+        channel_side = target.get("channel_side") or target.get("channelSide")
+        channel_index = target.get("channel_index", target.get("channelIndex"))
+        channel_position = target.get(
+            "channel_position",
+            target.get("channelPosition"),
+        )
+        try:
+            parsed_channel_index = (
+                int(channel_index) if channel_index is not None else None
+            )
+        except (TypeError, ValueError):
+            parsed_channel_index = None
+        try:
+            parsed_channel_position = (
+                int(channel_position) if channel_position is not None else None
+            )
+        except (TypeError, ValueError):
+            parsed_channel_position = None
+        confidence = float(
+            candidate.get(
+                "identity_confidence",
+                candidate.get("confidence", 0.0),
+            )
+            or 0.0
+        )
+        return ReturnedPositionHint(
+            product_id=product_id,
+            product_idx=(
+                str(candidate.get("product_idx"))
+                if candidate.get("product_idx") is not None
+                else None
+            ),
+            name=str(candidate.get("name") or product_id),
+            unit_weight=round(unit_weight, 1),
+            count=1,
+            zone=int(session.zone),
+            trigger_id=trigger.trigger_id,
+            session_id=trigger.session_id,
+            timestamp=float(trigger.timestamp),
+            source="freezer_touch_return_candidate",
+            confidence=confidence,
+            reason="low_weight_touch_return_original_position",
+            channel_side=str(channel_side) if channel_side is not None else None,
+            channel_index=parsed_channel_index,
+            channel_position=parsed_channel_position,
+        )
+
     def add_trigger(
         self,
         zone: int,
@@ -911,10 +1137,16 @@ class DoorSessionStore:
             for product in diagnostics.get("selectedProducts", []) or []
             if isinstance(product, dict)
         ) or "none"
+        suppressed_text = ", ".join(
+            str(item.get("name") or item.get("productId"))
+            for item in diagnostics.get("returnedPositionSuppressedCandidates", []) or []
+            if isinstance(item, dict)
+        ) or "none"
         ops_logger.info(
             "[OPS][FREEZER-CLOSE-AGGREGATE] accepted=%s reason=%s "
             "policy=%s output_zone=%s global_net_delta=%.1f "
-            "final_target=%.1f selected_weight=%.1f residual=%.1f products=%s",
+            "final_target=%.1f selected_weight=%.1f residual=%.1f "
+            "products=%s returned_suppressed=%s",
             diagnostics.get("accepted", False),
             diagnostics.get("reason", "unknown"),
             diagnostics.get("policy", "unknown"),
@@ -924,6 +1156,7 @@ class DoorSessionStore:
             float(diagnostics.get("selectedWeight", 0.0) or 0.0),
             float(diagnostics.get("residual", 0.0) or 0.0),
             products_text,
+            suppressed_text,
         )
 
     def handle_close_signal(
@@ -1253,6 +1486,14 @@ class DoorSessionStore:
                 zone=active_session.zone,
             )
             active_session.aggregated_products = result.products
+            active_session.returned_position_hints = (
+                self._dedupe_returned_position_hints(
+                    [
+                        *result.returned_position_hints,
+                        *self._collect_touch_return_hints(active_session),
+                    ]
+                )
+            )
             if defer_returns_until_close:
                 active_session.unmatched_returns = result.unmatched_returns
                 active_session.deferred_returns = result.deferred_returns
@@ -1577,6 +1818,14 @@ class DoorSessionStore:
 
         for product_id, count in combo.items():
             product = session.aggregated_products[product_id]
+            selected_units = list(product.placement_units)[-count:]
+            self._append_deferred_returned_position_hint(
+                session,
+                product=product,
+                count=count,
+                deferred=deferred,
+                selected_units=selected_units,
+            )
             product.count = max(0, product.count - count)
             product.placement_units = list(product.placement_units)[
                 : max(0, product.count)
@@ -1594,6 +1843,70 @@ class DoorSessionStore:
             }
         )
         return True
+
+    def _append_deferred_returned_position_hint(
+        self,
+        session: DoorSession,
+        *,
+        product: AggregatedProduct,
+        count: int,
+        deferred: DeferredReturn,
+        selected_units: List[Dict[str, object]],
+    ) -> None:
+        unit = selected_units[0] if selected_units else None
+        channel_side: Optional[object] = deferred.channel_side
+        channel_index: Optional[object] = deferred.channel_index
+        channel_position: Optional[object] = deferred.channel_position
+        if isinstance(unit, dict):
+            channel_side = (
+                channel_side
+                or unit.get("channelSide")
+                or unit.get("channel_side")
+            )
+            channel_index = (
+                channel_index
+                if channel_index is not None
+                else unit.get("channelIndex", unit.get("channel_index"))
+            )
+            channel_position = (
+                channel_position
+                if channel_position is not None
+                else unit.get("channelPosition", unit.get("channel_position"))
+            )
+        try:
+            parsed_channel_index = (
+                int(channel_index) if channel_index is not None else None
+            )
+        except (TypeError, ValueError):
+            parsed_channel_index = None
+        try:
+            parsed_channel_position = (
+                int(channel_position) if channel_position is not None else None
+            )
+        except (TypeError, ValueError):
+            parsed_channel_position = None
+        hint = ReturnedPositionHint(
+            product_id=int(product.product_id),
+            product_idx=product.product_idx,
+            name=product.name,
+            unit_weight=round(float(product.weight), 1),
+            count=int(count),
+            zone=deferred.source_zone
+            if deferred.source_zone is not None
+            else int(session.zone),
+            trigger_id=deferred.trigger_id,
+            session_id=None,
+            timestamp=float(deferred.timestamp),
+            source=deferred.source,
+            confidence=float(product.average_confidence),
+            reason="deferred_return_reconciled",
+            channel_side=str(channel_side) if channel_side is not None else None,
+            channel_index=parsed_channel_index,
+            channel_position=parsed_channel_position,
+        )
+        session.returned_position_hints = self._dedupe_returned_position_hints(
+            [*session.returned_position_hints, hint]
+        )
 
     def _apply_close_final_weight_validation(self) -> None:
         """Repair over-fragmented close baskets with repeated candidate evidence."""

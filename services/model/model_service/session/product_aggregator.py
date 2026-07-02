@@ -30,6 +30,7 @@ from model_service.weight.strict_weight_matcher import StrictWeightMatcher
 from .door_session import (
     AggregatedProduct,
     DeferredReturn,
+    ReturnedPositionHint,
     TriggerResult,
     UnmatchedReturn,
     return_hint_delta_weight,
@@ -52,6 +53,7 @@ class AggregationResult:
     unmatched_returns: List[UnmatchedReturn] = field(default_factory=list)
     deferred_returns: List[DeferredReturn] = field(default_factory=list)
     location_return_diagnostics: List[dict[str, object]] = field(default_factory=list)
+    returned_position_hints: List[ReturnedPositionHint] = field(default_factory=list)
 
 
 class ProductAggregator:
@@ -128,6 +130,7 @@ class ProductAggregator:
         unmatched_returns: List[UnmatchedReturn] = []
         deferred_returns: List[DeferredReturn] = []
         location_return_diagnostics: List[dict[str, object]] = []
+        returned_position_hints: List[ReturnedPositionHint] = []
 
         # Replay by event timestamp rather than completion order. Loadcell-only
         # returns can finish before video-backed removals that happened earlier.
@@ -147,9 +150,16 @@ class ProductAggregator:
                     trigger,
                     source_zone=zone,
                     diagnostics=location_return_diagnostics,
+                    returned_position_hints=returned_position_hints,
                 )
                 if matched_id is None:
-                    matched_id = self._handle_return(aggregated, trigger.delta_weight)
+                    matched_id = self._handle_return(
+                        aggregated,
+                        trigger.delta_weight,
+                        trigger=trigger,
+                        source_zone=zone,
+                        returned_position_hints=returned_position_hints,
+                    )
                 if matched_id is None:
                     # 매칭 실패 → 기록
                     self._record_deferred_return(
@@ -183,6 +193,7 @@ class ProductAggregator:
             unmatched_returns=unmatched_returns,
             deferred_returns=deferred_returns,
             location_return_diagnostics=location_return_diagnostics,
+            returned_position_hints=returned_position_hints,
         )
 
     def _record_unmatched_return(
@@ -272,6 +283,81 @@ class ProductAggregator:
                     else None
                 ),
                 source_zone=source_zone,
+            )
+        )
+
+    def _append_returned_position_hint(
+        self,
+        returned_position_hints: Optional[List[ReturnedPositionHint]],
+        *,
+        product: AggregatedProduct,
+        trigger: TriggerResult,
+        count: int,
+        source_zone: Optional[int],
+        source: str,
+        reason: str,
+        target: Optional[dict[str, object]] = None,
+        selected_units: Optional[List[dict[str, object]]] = None,
+    ) -> None:
+        if returned_position_hints is None or count <= 0:
+            return
+        unit = selected_units[0] if selected_units else None
+        channel_side = None
+        channel_index = None
+        channel_position = None
+        if isinstance(target, dict):
+            channel_side = target.get("channel_side") or target.get("channelSide")
+            channel_index = target.get("channel_index") or target.get("channelIndex")
+            channel_position = (
+                target.get("channel_position")
+                if target.get("channel_position") is not None
+                else target.get("channelPosition")
+            )
+        if isinstance(unit, dict):
+            channel_side = (
+                channel_side
+                or unit.get("channelSide")
+                or unit.get("channel_side")
+            )
+            channel_index = (
+                channel_index
+                if channel_index is not None
+                else unit.get("channelIndex", unit.get("channel_index"))
+            )
+            channel_position = (
+                channel_position
+                if channel_position is not None
+                else unit.get("channelPosition", unit.get("channel_position"))
+            )
+        try:
+            parsed_channel_index = (
+                int(channel_index) if channel_index is not None else None
+            )
+        except (TypeError, ValueError):
+            parsed_channel_index = None
+        try:
+            parsed_channel_position = (
+                int(channel_position) if channel_position is not None else None
+            )
+        except (TypeError, ValueError):
+            parsed_channel_position = None
+        returned_position_hints.append(
+            ReturnedPositionHint(
+                product_id=int(product.product_id),
+                product_idx=product.product_idx,
+                name=product.name,
+                unit_weight=round(float(product.weight), 1),
+                count=int(count),
+                zone=source_zone,
+                trigger_id=trigger.trigger_id,
+                session_id=trigger.session_id,
+                timestamp=float(trigger.timestamp),
+                source=source,
+                confidence=float(product.average_confidence),
+                reason=reason,
+                channel_side=str(channel_side) if channel_side is not None else None,
+                channel_index=parsed_channel_index,
+                channel_position=parsed_channel_position,
             )
         )
 
@@ -549,6 +635,7 @@ class ProductAggregator:
         *,
         source_zone: Optional[int],
         diagnostics: List[dict[str, object]],
+        returned_position_hints: Optional[List[ReturnedPositionHint]] = None,
     ) -> Optional[int]:
         targets = self._positive_channel_return_targets(trigger)
         if not targets:
@@ -590,6 +677,17 @@ class ProductAggregator:
             product = match["product"]
             count = int(match["count"])
             product.count = max(0, int(product.count) - count)
+            self._append_returned_position_hint(
+                returned_position_hints,
+                product=product,
+                trigger=trigger,
+                count=count,
+                source_zone=source_zone,
+                source="freezer_location_return",
+                reason="same_zone_location_return_reconciled",
+                target=target,
+                selected_units=match["units"],
+            )
             self._remove_product_units(
                 product,
                 count,
@@ -621,6 +719,10 @@ class ProductAggregator:
         self,
         aggregated: Dict[int, AggregatedProduct],
         delta_weight: float,
+        *,
+        trigger: Optional[TriggerResult] = None,
+        source_zone: Optional[int] = None,
+        returned_position_hints: Optional[List[ReturnedPositionHint]] = None,
     ) -> Optional[int]:
         """
         반환 처리: 무게 매칭하여 차감.
@@ -662,7 +764,19 @@ class ProductAggregator:
                 # stay conservative when the rounded count would erase more
                 # inventory than is currently aggregated.
                 estimated_count = 1
+                selected_units = list(agg.placement_units)[-estimated_count:]
                 agg.count = max(0, agg.count - 1)
+                if trigger is not None:
+                    self._append_returned_position_hint(
+                        returned_position_hints,
+                        product=agg,
+                        trigger=trigger,
+                        count=estimated_count,
+                        source_zone=source_zone,
+                        source="positive_return",
+                        reason="weight_return_reconciled",
+                        selected_units=selected_units,
+                    )
                 self._remove_product_units(agg, estimated_count)
                 logger.info(
                     f"Return processed: {agg.name} x{estimated_count} "

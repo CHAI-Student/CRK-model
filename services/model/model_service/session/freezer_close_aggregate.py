@@ -7,7 +7,12 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from model_service.core.config import config
 
-from .door_session import AggregatedProduct, DoorSession, TriggerResult
+from .door_session import (
+    AggregatedProduct,
+    DoorSession,
+    ReturnedPositionHint,
+    TriggerResult,
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,11 @@ class FreezerCloseAggregateResolver:
             global_net_delta=global_net_delta,
             output_zone=output_zone,
         )
+        returned_hints = self._returned_position_hints(participants)
+        if returned_hints:
+            diagnostics["returnedPositionHints"] = [
+                self._returned_hint_diagnostic(hint) for hint in returned_hints
+            ]
 
         if abs(global_net_delta) <= self._tolerance:
             diagnostics.update(
@@ -151,7 +161,18 @@ class FreezerCloseAggregateResolver:
                 ),
             }
         )
-        if current_counts and current_residual <= self._tolerance:
+        current_suppressed, current_allowed = self._selection_returned_position_context(
+            current_counts,
+            current_groups,
+            participants,
+            returned_hints,
+        )
+        if current_suppressed:
+            diagnostics["returnedPositionSuppressedCandidates"] = current_suppressed
+            diagnostics["triggerProductsPreserveBlockedByReturnedPosition"] = True
+        if current_allowed:
+            diagnostics["samePositionReturnedProductAllowed"] = current_allowed
+        if current_counts and current_residual <= self._tolerance and not current_suppressed:
             diagnostics.update(
                 {
                     "accepted": True,
@@ -172,7 +193,31 @@ class FreezerCloseAggregateResolver:
             )
             return diagnostics
 
-        candidate_groups = self._candidate_groups(participants)
+        raw_candidate_groups = self._candidate_groups(participants)
+        (
+            candidate_groups,
+            suppressed_candidates,
+            allowed_candidates,
+        ) = self._filter_returned_position_candidates(
+            raw_candidate_groups,
+            participants,
+            returned_hints,
+        )
+        if suppressed_candidates:
+            existing = list(diagnostics.get("returnedPositionSuppressedCandidates", []))
+            diagnostics["returnedPositionSuppressedCandidates"] = [
+                *existing,
+                *suppressed_candidates,
+            ]
+        if allowed_candidates:
+            existing_allowed = list(
+                diagnostics.get("samePositionReturnedProductAllowed", [])
+            )
+            diagnostics["samePositionReturnedProductAllowed"] = [
+                *existing_allowed,
+                *allowed_candidates,
+            ]
+        diagnostics["rawCandidateCount"] = len(raw_candidate_groups)
         diagnostics["candidateCount"] = len(candidate_groups)
         combination = self._find_best_combination(
             candidate_groups,
@@ -316,6 +361,234 @@ class FreezerCloseAggregateResolver:
                     continue
                 self._merge_candidate(groups, parsed, item, source_rank=999)
         return groups
+
+    @staticmethod
+    def _returned_position_hints(
+        participants: List[_Participant],
+    ) -> List[ReturnedPositionHint]:
+        hints: List[ReturnedPositionHint] = []
+        seen: set[tuple] = set()
+        for item in participants:
+            for hint in getattr(item.session, "returned_position_hints", []) or []:
+                if not isinstance(hint, ReturnedPositionHint):
+                    continue
+                key = (
+                    int(hint.product_id),
+                    hint.product_idx,
+                    hint.zone,
+                    hint.channel_side,
+                    hint.channel_index,
+                    hint.channel_position,
+                    hint.trigger_id,
+                    hint.source,
+                    hint.reason,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                hints.append(hint)
+        return hints
+
+    @staticmethod
+    def _returned_hint_diagnostic(
+        hint: ReturnedPositionHint,
+    ) -> dict[str, object]:
+        return {
+            "productId": int(hint.product_id),
+            "productIdx": hint.product_idx,
+            "name": hint.name,
+            "count": int(hint.count),
+            "unitWeight": round(float(hint.unit_weight), 1),
+            "zone": hint.zone,
+            "channelSide": hint.channel_side,
+            "channelIndex": hint.channel_index,
+            "channelPosition": hint.channel_position,
+            "triggerId": hint.trigger_id,
+            "sessionId": hint.session_id,
+            "source": hint.source,
+            "reason": hint.reason,
+            "timestamp": round(float(hint.timestamp), 3),
+        }
+
+    def _filter_returned_position_candidates(
+        self,
+        candidate_groups: Dict[int, _CandidateGroup],
+        participants: List[_Participant],
+        returned_hints: List[ReturnedPositionHint],
+    ) -> tuple[
+        Dict[int, _CandidateGroup],
+        List[dict[str, object]],
+        List[dict[str, object]],
+    ]:
+        if not returned_hints:
+            return dict(candidate_groups), [], []
+
+        filtered: Dict[int, _CandidateGroup] = {}
+        suppressed: List[dict[str, object]] = []
+        allowed: List[dict[str, object]] = []
+        for product_id, group in candidate_groups.items():
+            context = self._returned_position_context_for_group(
+                group,
+                participants,
+                returned_hints,
+            )
+            if context.get("suppressed"):
+                suppressed.append(context["suppressed"])
+                continue
+            if context.get("allowed"):
+                allowed.append(context["allowed"])
+            filtered[product_id] = group
+        return filtered, suppressed, allowed
+
+    def _selection_returned_position_context(
+        self,
+        counts: Dict[int, int],
+        candidate_groups: Dict[int, _CandidateGroup],
+        participants: List[_Participant],
+        returned_hints: List[ReturnedPositionHint],
+    ) -> tuple[List[dict[str, object]], List[dict[str, object]]]:
+        if not returned_hints:
+            return [], []
+
+        suppressed: List[dict[str, object]] = []
+        allowed: List[dict[str, object]] = []
+        for product_id, count in counts.items():
+            if int(count) <= 0 or product_id not in candidate_groups:
+                continue
+            context = self._returned_position_context_for_group(
+                candidate_groups[product_id],
+                participants,
+                returned_hints,
+            )
+            if context.get("suppressed"):
+                suppressed.append(context["suppressed"])
+            elif context.get("allowed"):
+                allowed.append(context["allowed"])
+        return suppressed, allowed
+
+    def _returned_position_context_for_group(
+        self,
+        group: _CandidateGroup,
+        participants: List[_Participant],
+        returned_hints: List[ReturnedPositionHint],
+    ) -> dict[str, dict[str, object]]:
+        matching_hints = [
+            hint
+            for hint in returned_hints
+            if int(hint.product_id) == int(group.product_id)
+        ]
+        if not matching_hints:
+            return {}
+
+        evidence_participants = [
+            item
+            for item in participants
+            if item.trigger.trigger_id in group.trigger_ids
+        ]
+        for hint in matching_hints:
+            hint_key = self._hint_position_key(hint)
+            if hint_key is None:
+                continue
+            for item in evidence_participants:
+                if hint_key in self._removal_position_keys(item.trigger, item.zone):
+                    return {
+                        "allowed": {
+                            "productId": int(group.product_id),
+                            "name": group.name,
+                            "reason": "same_position_returned_product_allowed",
+                            "hint": self._returned_hint_diagnostic(hint),
+                            "triggerIds": sorted(group.trigger_ids),
+                        }
+                    }
+
+        first_hint = matching_hints[0]
+        return {
+            "suppressed": {
+                "productId": int(group.product_id),
+                "name": group.name,
+                "reason": "returned_original_position_different_or_unknown_target",
+                "hint": self._returned_hint_diagnostic(first_hint),
+                "triggerIds": sorted(group.trigger_ids),
+            }
+        }
+
+    @classmethod
+    def _hint_position_key(
+        cls,
+        hint: ReturnedPositionHint,
+    ) -> Optional[tuple]:
+        return cls._position_key(
+            zone=hint.zone,
+            channel_side=hint.channel_side,
+            channel_index=hint.channel_index,
+            channel_position=hint.channel_position,
+        )
+
+    @classmethod
+    def _removal_position_keys(
+        cls,
+        trigger: TriggerResult,
+        zone: int,
+    ) -> set[tuple]:
+        diagnostics = getattr(trigger, "loadcell_diagnostics", {}) or {}
+        if not isinstance(diagnostics, dict):
+            return set()
+        raw_targets = list(diagnostics.get("channel_removal_segment_targets") or [])
+        if not raw_targets:
+            raw_targets = list(diagnostics.get("channel_movement_targets") or [])
+
+        keys: set[tuple] = set()
+        for entry in raw_targets:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                delta = float(entry.get("delta", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                delta = 0.0
+            direction = str(entry.get("direction", "")).lower()
+            if delta >= 0 and direction != "removal":
+                continue
+            key = cls._position_key(
+                zone=zone,
+                channel_side=entry.get("channel_side") or entry.get("channelSide"),
+                channel_index=entry.get("channel_index", entry.get("channelIndex")),
+                channel_position=entry.get(
+                    "channel_position",
+                    entry.get("channelPosition"),
+                ),
+            )
+            if key is not None:
+                keys.add(key)
+        return keys
+
+    @staticmethod
+    def _position_key(
+        *,
+        zone: Optional[int],
+        channel_side: object,
+        channel_index: object,
+        channel_position: object,
+    ) -> Optional[tuple]:
+        if zone is None:
+            return None
+        side = str(channel_side).strip().lower() if channel_side is not None else None
+        if side in {"", "unknown", "none", "null"}:
+            side = None
+        try:
+            index = int(channel_index) if channel_index is not None else None
+        except (TypeError, ValueError):
+            index = None
+        try:
+            position = (
+                int(channel_position)
+                if channel_position is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            position = None
+        if side is None and index is None and position is None:
+            return None
+        return (int(zone), side, index, position)
 
     @classmethod
     def _candidate_from_snapshot(

@@ -422,6 +422,93 @@ class DeferredReturn:
 
 
 @dataclass
+class ReturnedPositionHint:
+    """A product that was returned to its original freezer position."""
+
+    product_id: int
+    product_idx: Optional[str]
+    name: str
+    unit_weight: float
+    count: int
+    zone: Optional[int]
+    trigger_id: str
+    session_id: Optional[str]
+    timestamp: float
+    source: str
+    confidence: float = 0.0
+    reason: str = "returned_to_original_position"
+    channel_side: Optional[str] = None
+    channel_index: Optional[int] = None
+    channel_position: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "product_id": self.product_id,
+            "product_idx": self.product_idx,
+            "name": self.name,
+            "unit_weight": self.unit_weight,
+            "count": self.count,
+            "zone": self.zone,
+            "trigger_id": self.trigger_id,
+            "session_id": self.session_id,
+            "timestamp": self.timestamp,
+            "source": self.source,
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "channel_side": self.channel_side,
+            "channel_index": self.channel_index,
+            "channel_position": self.channel_position,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ReturnedPositionHint":
+        return cls(
+            product_id=int(data["product_id"]),
+            product_idx=data.get("product_idx"),
+            name=str(data["name"]),
+            unit_weight=float(data.get("unit_weight", 0.0) or 0.0),
+            count=int(data.get("count", 1) or 1),
+            zone=(
+                int(data["zone"])
+                if data.get("zone") is not None
+                else None
+            ),
+            trigger_id=str(data["trigger_id"]),
+            session_id=(
+                str(data["session_id"])
+                if data.get("session_id") is not None
+                else None
+            ),
+            timestamp=float(data["timestamp"]),
+            source=str(data.get("source", "returned_position_hint")),
+            confidence=float(data.get("confidence", 0.0) or 0.0),
+            reason=str(
+                data.get("reason", "returned_to_original_position")
+                or "returned_to_original_position"
+            ),
+            channel_side=data.get("channel_side") or data.get("channelSide"),
+            channel_index=(
+                int(data["channel_index"])
+                if data.get("channel_index") is not None
+                else (
+                    int(data["channelIndex"])
+                    if data.get("channelIndex") is not None
+                    else None
+                )
+            ),
+            channel_position=(
+                int(data["channel_position"])
+                if data.get("channel_position") is not None
+                else (
+                    int(data["channelPosition"])
+                    if data.get("channelPosition") is not None
+                    else None
+                )
+            ),
+        )
+
+
+@dataclass
 class CrossZoneReturn:
     """
     크로스 존 반환 매칭 기록 (v4.9).
@@ -573,6 +660,7 @@ class DoorSession:
     aggregated_products: Dict[int, AggregatedProduct] = field(default_factory=dict)
     unmatched_returns: List[UnmatchedReturn] = field(default_factory=list)
     deferred_returns: List[DeferredReturn] = field(default_factory=list)
+    returned_position_hints: List[ReturnedPositionHint] = field(default_factory=list)
     cross_zone_returns: List[CrossZoneReturn] = field(default_factory=list)
     final_weight_validation: Dict[str, object] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -655,6 +743,9 @@ class DoorSession:
             },
             "unmatched_returns": [r.to_dict() for r in self.unmatched_returns],
             "deferred_returns": [r.to_dict() for r in self.deferred_returns],
+            "returned_position_hints": [
+                r.to_dict() for r in self.returned_position_hints
+            ],
             "cross_zone_returns": [r.to_dict() for r in self.cross_zone_returns],
             "final_weight_validation": dict(self.final_weight_validation),
             "created_at": self.created_at,
@@ -669,6 +760,7 @@ class DoorSession:
                 "unmatched_returns_weight": round(self.unmatched_returns_weight, 1),
                 "deferred_returns_count": len(self.deferred_returns),
                 "deferred_returns_weight": round(self.deferred_returns_weight, 1),
+                "returned_position_hints_count": len(self.returned_position_hints),
                 "cross_zone_returns_count": self.cross_zone_returns_count,
             },
         }
@@ -692,6 +784,10 @@ class DoorSession:
             DeferredReturn.from_dict(r)
             for r in data.get("deferred_returns", [])
         ]
+        returned_position_hints = [
+            ReturnedPositionHint.from_dict(r)
+            for r in data.get("returned_position_hints", [])
+        ]
         cross_zone_returns = [
             CrossZoneReturn.from_dict(r)
             for r in data.get("cross_zone_returns", [])
@@ -704,6 +800,7 @@ class DoorSession:
             aggregated_products=aggregated_products,
             unmatched_returns=unmatched_returns,
             deferred_returns=deferred_returns,
+            returned_position_hints=returned_position_hints,
             cross_zone_returns=cross_zone_returns,
             final_weight_validation=dict(data.get("final_weight_validation", {})),
             created_at=data.get("created_at", time.time()),

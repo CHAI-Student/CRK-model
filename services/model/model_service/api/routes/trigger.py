@@ -873,6 +873,63 @@ def _freezer_prior_selected_position_product_idxs(
     return {key: sorted(values) for key, values in sorted(selected.items())}
 
 
+def _position_key_from_returned_hint(hint: object) -> Optional[str]:
+    return ProductDecisionEngine._freezer_position_key(
+        channel_side=getattr(hint, "channel_side", None),
+        channel_index=getattr(hint, "channel_index", None),
+        channel_position=getattr(hint, "channel_position", None),
+    )
+
+
+def _freezer_returned_position_product_idxs(
+    door_session_store: DoorSessionStore | None,
+    *,
+    zone: int,
+    delta_weight: float,
+    current_diagnostics: object,
+) -> set[str]:
+    if str(config.machine.cabinet_type).strip().lower() != "freezer":
+        return set()
+    if delta_weight >= 0:
+        return set()
+    if door_session_store is None:
+        return set()
+
+    global_session = door_session_store.get_global_session()
+    if global_session is None:
+        return set()
+
+    current_position_keys = {
+        key
+        for key in (
+            _position_key_from_target(target)
+            for target in _removal_channel_targets_from_diagnostics(
+                current_diagnostics
+            )
+        )
+        if key is not None
+    }
+    suppressed: set[str] = set()
+    for session in global_session.zone_sessions.values():
+        for hint in getattr(session, "returned_position_hints", []) or []:
+            product_keys = _product_result_keys(hint)
+            if not product_keys:
+                continue
+            hint_position_key = _position_key_from_returned_hint(hint)
+            try:
+                same_zone = int(getattr(hint, "zone")) == int(zone)
+            except (TypeError, ValueError):
+                same_zone = False
+            if (
+                same_zone
+                and hint_position_key is not None
+                and hint_position_key in current_position_keys
+            ):
+                continue
+            suppressed.update(product_keys)
+    return suppressed
+
+
 def _record_no_charge_diagnostic(
     *,
     door_session_store: DoorSessionStore | None,
@@ -1491,10 +1548,21 @@ async def trigger_judgment(
             _should_force_vision_only(request.videos, delta_analysis)
             or (delta_weight == 0.0 and len(effective_loadcells) == 0)
         )
+        current_loadcell_diagnostics = (
+            loadcell_stats.close_trigger_loadcell_diagnostics(delta_analysis)
+        )
         prior_selected_product_idxs = _freezer_prior_selected_product_idxs(
             door_session_store,
             delta_weight,
         )
+        returned_position_product_idxs = _freezer_returned_position_product_idxs(
+            door_session_store,
+            zone=request.zone,
+            delta_weight=delta_weight,
+            current_diagnostics=current_loadcell_diagnostics,
+        )
+        if returned_position_product_idxs:
+            prior_selected_product_idxs.update(returned_position_product_idxs)
         prior_selected_position_product_idxs = (
             _freezer_prior_selected_position_product_idxs(
                 door_session_store,
@@ -1506,6 +1574,12 @@ async def trigger_judgment(
             logger.info(
                 "[TRIGGER][FREEZER-DEDUPE] prior_selected_product_idxs=%s",
                 sorted(prior_selected_product_idxs),
+            )
+        if returned_position_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-RETURNED-POSITION] "
+                "returned_position_product_idxs=%s",
+                sorted(returned_position_product_idxs),
             )
         if prior_selected_position_product_idxs:
             logger.info(
@@ -1635,11 +1709,7 @@ async def trigger_judgment(
                 timing_metadata=request.timing.model_dump(exclude_none=True) if request.timing else None,
                 return_weight_hints=return_weight_hints,
                 vision_candidates=close_candidate_snapshot,
-                loadcell_diagnostics=(
-                    loadcell_stats.close_trigger_loadcell_diagnostics(
-                        delta_analysis
-                    )
-                ),
+                loadcell_diagnostics=current_loadcell_diagnostics,
             )
             door_session = door_session_store.add_trigger_with_global(
                 zone=request.zone,

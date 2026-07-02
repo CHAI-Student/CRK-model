@@ -624,6 +624,447 @@ def test_freezer_close_aggregate_preserves_trigger_products_when_total_fits(
         store.clear_all()
 
 
+def test_freezer_close_aggregate_suppresses_returned_yomamte_candidate(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 15.0)
+    weights = {30: 82.0, 77: 224.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        weight_tolerance=5.0,
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=3,
+            result=TriggerResult(
+                trigger_id="zone3-yomamte-return",
+                session_id="zone3-yomamte-return-session",
+                timestamp=110.0,
+                products=[],
+                delta_weight=77.7,
+                confidence=0.0,
+                video_paths={},
+                is_return=True,
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=3,
+            result=TriggerResult(
+                trigger_id="zone3-yomamte-removal",
+                session_id="zone3-yomamte-removal-session",
+                timestamp=100.0,
+                products=[
+                    _product(
+                        30,
+                        "BOX_BINGGRAE_YOMAMTE_150ML",
+                        1,
+                        price=1500,
+                        confidence=0.797,
+                    )
+                ],
+                delta_weight=-86.8,
+                confidence=0.797,
+                video_paths={},
+                vision_candidates=[
+                    _candidate_snapshot(
+                        30,
+                        "BOX_BINGGRAE_YOMAMTE_150ML",
+                        rank=1,
+                        weight=82.0,
+                        price=1500,
+                        confidence=0.797,
+                        identity_confidence=0.797,
+                    )
+                ],
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=1,
+            result=TriggerResult(
+                trigger_id="zone1-dumpling-removal",
+                session_id="zone1-dumpling-removal-session",
+                timestamp=120.0,
+                products=[],
+                delta_weight=-224.5,
+                confidence=0.0,
+                video_paths={},
+                vision_candidates=[
+                    _candidate_snapshot(
+                        30,
+                        "BOX_BINGGRAE_YOMAMTE_150ML",
+                        rank=1,
+                        weight=82.0,
+                        price=1500,
+                        confidence=0.89,
+                        identity_confidence=0.89,
+                    ),
+                    _candidate_snapshot(
+                        77,
+                        "BAG_BIBIGO_DUMPLING_224G",
+                        rank=2,
+                        weight=224.0,
+                        price=3900,
+                        confidence=0.78,
+                        identity_confidence=0.78,
+                    ),
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_1 = next(zone for zone in response["zones"] if zone["zone"] == 1)
+        zone_3 = next(zone for zone in response["zones"] if zone["zone"] == 3)
+
+        assert zone_3["products"] == []
+        assert [product["name"] for product in zone_1["products"]] == [
+            "BAG_BIBIGO_DUMPLING_224G"
+        ]
+        assert all(
+            product["name"] != "BOX_BINGGRAE_YOMAMTE_150ML"
+            for zone in response["zones"]
+            for product in zone["products"]
+        )
+        aggregate = global_session.zone_sessions[1].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["reason"] == "freezer_close_aggregate_applied"
+        assert aggregate["selectedProducts"] == [
+            {"productId": 77, "name": "BAG_BIBIGO_DUMPLING_224G", "count": 1}
+        ]
+        suppressed_names = {
+            item["name"]
+            for item in aggregate["returnedPositionSuppressedCandidates"]
+        }
+        assert "BOX_BINGGRAE_YOMAMTE_150ML" in suppressed_names
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_prefers_worldcon_after_lala_touch_return(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 5.0)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    weights = {46: 71.0, 47: 70.0}
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: weights.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="zone2-lala-touch-video",
+                session_id="zone2-lala-touch-video-session",
+                timestamp=110.0,
+                products=[],
+                delta_weight=-5.8,
+                confidence=0.0,
+                video_paths={},
+                loadcell_diagnostics={
+                    "channel_movement_targets": [
+                        {
+                            "channel_side": "left",
+                            "channel_index": 0,
+                            "channel_position": 0,
+                            "delta": 6.0,
+                            "weight": 6.0,
+                            "direction": "return",
+                        }
+                    ]
+                },
+                vision_candidates=[
+                    _candidate_snapshot(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        rank=1,
+                        weight=71.0,
+                        price=500,
+                        confidence=0.856,
+                        identity_confidence=0.856,
+                        top_confidence=0.835,
+                        side_confidence=0.856,
+                    ),
+                    _candidate_snapshot(
+                        47,
+                        "BOX_LOTTE_WORLDCON_160ML",
+                        rank=2,
+                        weight=70.0,
+                        price=1200,
+                        confidence=0.816,
+                        identity_confidence=0.816,
+                        top_confidence=0.654,
+                        side_confidence=0.816,
+                    ),
+                ],
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=4,
+            result=TriggerResult(
+                trigger_id="zone4-worldcon-removal",
+                session_id="zone4-worldcon-removal-session",
+                timestamp=120.0,
+                products=[
+                    _product(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        1,
+                        price=500,
+                        confidence=0.856,
+                    )
+                ],
+                delta_weight=-65.9,
+                confidence=0.856,
+                video_paths={},
+                loadcell_diagnostics={
+                    "channel_removal_segment_targets": [
+                        {
+                            "channel_side": "right",
+                            "channel_index": 1,
+                            "channel_position": 0,
+                            "delta": -69.0,
+                            "weight": 69.0,
+                            "direction": "removal",
+                        }
+                    ]
+                },
+                vision_candidates=[
+                    _candidate_snapshot(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        rank=1,
+                        weight=71.0,
+                        price=500,
+                        confidence=0.856,
+                        identity_confidence=0.856,
+                        top_confidence=0.835,
+                        side_confidence=0.856,
+                    ),
+                    _candidate_snapshot(
+                        47,
+                        "BOX_LOTTE_WORLDCON_160ML",
+                        rank=2,
+                        weight=70.0,
+                        price=1200,
+                        confidence=0.816,
+                        identity_confidence=0.816,
+                        top_confidence=0.654,
+                        side_confidence=0.816,
+                    ),
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_4 = next(zone for zone in response["zones"] if zone["zone"] == 4)
+
+        assert [product["name"] for product in zone_4["products"]] == [
+            "BOX_LOTTE_WORLDCON_160ML"
+        ]
+        aggregate = global_session.zone_sessions[4].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["triggerProductsPreserveBlockedByReturnedPosition"] is True
+        assert aggregate["selectedProducts"] == [
+            {"productId": 47, "name": "BOX_LOTTE_WORLDCON_160ML", "count": 1}
+        ]
+        assert {
+            item["name"]
+            for item in aggregate["returnedPositionSuppressedCandidates"]
+        } == {"STICK_LALA_SWEET_GRAPE_ZERO_70ML"}
+    finally:
+        store.clear_all()
+
+
+def test_freezer_close_aggregate_allows_returned_product_same_position_again(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.api.routes.multi_zone import _handle_door_close
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 5.0)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {46: 71.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="zone2-lala-touch-video",
+                session_id="zone2-lala-touch-video-session",
+                timestamp=110.0,
+                products=[],
+                delta_weight=-1.0,
+                confidence=0.0,
+                video_paths={},
+                loadcell_diagnostics={
+                    "channel_movement_targets": [
+                        {
+                            "channel_side": "left",
+                            "channel_index": 0,
+                            "channel_position": 0,
+                            "delta": 6.0,
+                            "weight": 6.0,
+                            "direction": "return",
+                        }
+                    ]
+                },
+                vision_candidates=[
+                    _candidate_snapshot(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        rank=1,
+                        weight=71.0,
+                        price=500,
+                        confidence=0.856,
+                        identity_confidence=0.856,
+                        top_confidence=0.835,
+                        side_confidence=0.856,
+                    )
+                ],
+            ),
+        )
+        store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="zone2-lala-same-position-removal",
+                session_id="zone2-lala-same-position-removal-session",
+                timestamp=120.0,
+                products=[
+                    _product(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        1,
+                        price=500,
+                        confidence=0.856,
+                    )
+                ],
+                delta_weight=-71.0,
+                confidence=0.856,
+                video_paths={},
+                loadcell_diagnostics={
+                    "mixed_sign_internal_segments": True,
+                    "channel_removal_segment_targets": [
+                        {
+                            "channel_side": "left",
+                            "channel_index": 0,
+                            "channel_position": 0,
+                            "delta": -71.0,
+                            "weight": 71.0,
+                            "direction": "removal",
+                        }
+                    ]
+                },
+                vision_candidates=[
+                    _candidate_snapshot(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        rank=1,
+                        weight=71.0,
+                        price=500,
+                        confidence=0.856,
+                        identity_confidence=0.856,
+                        top_confidence=0.835,
+                        side_confidence=0.856,
+                    )
+                ],
+            ),
+        )
+
+        global_session = store.finalize_global_session()
+        response = _handle_door_close(FakeCloseReadyStore(global_session))
+        zone_2 = next(zone for zone in response["zones"] if zone["zone"] == 2)
+
+        assert [product["name"] for product in zone_2["products"]] == [
+            "STICK_LALA_SWEET_GRAPE_ZERO_70ML"
+        ]
+        aggregate = global_session.zone_sessions[2].final_weight_validation[
+            "freezerCloseAggregate"
+        ]
+        assert aggregate["reason"] == (
+            "freezer_close_aggregate_trigger_products_preserved"
+        )
+        assert aggregate["samePositionReturnedProductAllowed"][0]["productId"] == 46
+        assert "returnedPositionSuppressedCandidates" not in aggregate
+    finally:
+        store.clear_all()
+
+
+def test_freezer_touch_return_hint_requires_channel_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    from model_service.core.config import config
+    from model_service.session import DoorSessionStore
+    from model_service.session.door_session import TriggerResult
+
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.weight, "freezer_weight_tolerance_grams", 5.0)
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    store = DoorSessionStore(
+        yaml_dir=str(tmp_path),
+        get_product_weight=lambda product_id: {46: 71.0}.get(product_id, 0.0),
+    )
+    try:
+        store.get_or_start_global_session()
+        session = store.add_trigger_with_global(
+            zone=2,
+            result=TriggerResult(
+                trigger_id="zone2-lala-no-channel-touch",
+                session_id="zone2-lala-no-channel-touch-session",
+                timestamp=100.0,
+                products=[],
+                delta_weight=-1.0,
+                confidence=0.0,
+                video_paths={},
+                vision_candidates=[
+                    _candidate_snapshot(
+                        46,
+                        "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                        rank=1,
+                        weight=71.0,
+                        confidence=0.856,
+                        identity_confidence=0.856,
+                        top_confidence=0.835,
+                    )
+                ],
+            ),
+        )
+
+        assert session.returned_position_hints == []
+    finally:
+        store.clear_all()
+
+
 def test_freezer_close_aggregate_rejects_low_raw_confidence_candidate(
     monkeypatch,
     tmp_path,
