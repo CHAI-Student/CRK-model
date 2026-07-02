@@ -1197,6 +1197,79 @@ def test_freezer_vision_first_prior_trigger_dedupe_fails_closed(
     assert search["priorExclusionFallback"] is False
 
 
+def test_freezer_same_position_prior_repeat_overrides_prior_dedupe(monkeypatch):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    trace = FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "stable_channel_delta",
+                    "direction": "removal",
+                    "weight": 146.5,
+                    "delta": -146.5,
+                    "segment_index": 0,
+                    "channel_index": 1,
+                    "channel_position": 1,
+                    "channel_side": "right",
+                }
+            ]
+        }
+    )
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                combined=0.96,
+                top=0.96,
+            ),
+            make_freezer_candidate(
+                class_id=27,
+                name="BAG_NULLDAM_BAGEL_140G",
+                combined=0.92,
+                top=0.92,
+            ),
+        ],
+        delta_weight=-146.5,
+        active_products=[
+            make_active_product(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                weight=75.0,
+                stock=10,
+                product_idx="P_MELONA",
+            ),
+            make_active_product(
+                27,
+                "BAG_NULLDAM_BAGEL_140G",
+                weight=156.0,
+                stock=10,
+                product_idx="P_BAGEL",
+            ),
+        ],
+        trace_context=trace,
+        prior_selected_product_idxs={"P_BAGEL", "id:27"},
+        prior_selected_position_product_idxs={
+            "right|1|1": {"P_BAGEL", "id:27"},
+        },
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (27, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["priorExclusionApplied"] is True
+    assert search["samePositionRepeatApplied"] is True
+    assert "P_BAGEL" in search["samePositionRepeatProductIdxs"]
+    assert diagnostics["selected"][0]["samePositionRepeatApplied"] is True
+    assert diagnostics["selected"][0]["channelSide"] == "right"
+
+
 def test_freezer_vision_first_zone2_still_selects_baskin_single(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")

@@ -220,6 +220,7 @@ class ProductDecisionEngine:
         active_products: Optional[List] = None,
         trace_context: Optional[object] = None,
         prior_selected_product_idxs: Optional[object] = None,
+        prior_selected_position_product_idxs: Optional[object] = None,
     ) -> JudgmentResult:
         """
         상품 판단 수행.
@@ -278,6 +279,7 @@ class ProductDecisionEngine:
             active_products=active_products,
             trace_context=trace_context,
             prior_selected_product_idxs=prior_selected_product_idxs,
+            prior_selected_position_product_idxs=prior_selected_position_product_idxs,
         )
         if freezer_result is not None:
             if self._result_has_positive_product_weight(freezer_result):
@@ -545,6 +547,7 @@ class ProductDecisionEngine:
         active_products: Optional[List],
         trace_context: Optional[object],
         prior_selected_product_idxs: Optional[object],
+        prior_selected_position_product_idxs: Optional[object],
     ) -> Optional[JudgmentResult]:
         """Use freezer vision identity candidates and validate counts by weight."""
         if not self._is_freezer_mode() or delta_weight >= 0:
@@ -897,6 +900,9 @@ class ProductDecisionEngine:
                     channel_targets=channel_targets,
                     target_weight=target_weight,
                     prior_selected_product_idxs=prior_selected_product_idxs,
+                    prior_selected_position_product_idxs=(
+                        prior_selected_position_product_idxs
+                    ),
                 )
             )
             if selected_options:
@@ -1054,6 +1060,7 @@ class ProductDecisionEngine:
         channel_targets: list[dict[str, Any]],
         target_weight: float,
         prior_selected_product_idxs: Optional[object] = None,
+        prior_selected_position_product_idxs: Optional[object] = None,
     ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
         """Solve freezer left/right loadcell targets as one product group each."""
 
@@ -1066,9 +1073,17 @@ class ProductDecisionEngine:
         attempts: list[dict[str, Any]] = []
         order = 0
         reused_product_fallback = False
+        same_position_repeat_applied = False
+        same_position_repeat_product_idxs: set[str] = set()
+        same_position_repeat_target_keys: set[str] = set()
 
         prior_product_idxs = self._normalize_prior_selected_product_idxs(
             prior_selected_product_idxs
+        )
+        prior_position_product_idxs = (
+            self._normalize_prior_selected_position_product_idxs(
+                prior_selected_position_product_idxs
+            )
         )
         excluded_product_idxs = self._freezer_prior_excluded_product_idxs(
             ordered_options,
@@ -1106,24 +1121,26 @@ class ProductDecisionEngine:
             expected_weight: float,
             residual: float,
             accepted: bool,
+            same_position_repeat: bool = False,
         ) -> int:
             nonlocal order
             order += 1
-            attempts.append(
-                {
-                    "order": order,
-                    "channelSide": str(target["channel_side"]),
-                    "channelIndex": int(target["channel_index"]),
-                    "channelPosition": int(target["position"]),
-                    "targetWeight": round(float(target["weight"]), 1),
-                    "classId": int(option["candidate"].class_id),
-                    "name": str(option["candidate"].class_name),
-                    "count": int(count),
-                    "expectedWeight": round(float(expected_weight), 1),
-                    "residual": round(float(residual), 1),
-                    "accepted": bool(accepted),
-                }
-            )
+            attempt = {
+                "order": order,
+                "channelSide": str(target["channel_side"]),
+                "channelIndex": int(target["channel_index"]),
+                "channelPosition": int(target["position"]),
+                "targetWeight": round(float(target["weight"]), 1),
+                "classId": int(option["candidate"].class_id),
+                "name": str(option["candidate"].class_name),
+                "count": int(count),
+                "expectedWeight": round(float(expected_weight), 1),
+                "residual": round(float(residual), 1),
+                "accepted": bool(accepted),
+            }
+            if same_position_repeat:
+                attempt["samePositionRepeatCandidate"] = True
+            attempts.append(attempt)
             return order
 
         def diagnostics(
@@ -1163,11 +1180,22 @@ class ProductDecisionEngine:
                 "attempts": attempts[:100],
                 "attemptsTruncated": len(attempts) > 100,
                 "priorSelectedProductIdxs": sorted(prior_product_idxs),
+                "priorSelectedPositionProductIdxs": {
+                    key: sorted(values)
+                    for key, values in sorted(prior_position_product_idxs.items())
+                },
                 "priorExcludedProductIdxs": sorted(excluded_product_idxs),
                 "priorExclusionApplied": bool(prior_exclusion_applied),
                 "priorExclusionFallback": False,
                 "maxProductGroupsPerShelf": 2,
                 "sameProductLeftRightFallback": bool(reused_product_fallback),
+                "samePositionRepeatApplied": bool(same_position_repeat_applied),
+                "samePositionRepeatProductIdxs": sorted(
+                    same_position_repeat_product_idxs
+                ),
+                "samePositionRepeatTargetKeys": sorted(
+                    same_position_repeat_target_keys
+                ),
             }
             if selected_order is not None:
                 result["selectedOrder"] = int(selected_order)
@@ -1179,9 +1207,6 @@ class ProductDecisionEngine:
         if not targets:
             reason = "no_freezer_channel_targets"
             return [], reason, diagnostics(accepted=False, reason=reason)
-        if not eligible_options:
-            reason = "no_channel_candidates_after_prior_exclusion"
-            return [], reason, diagnostics(accepted=False, reason=reason)
 
         selected_by_position: dict[int, tuple[dict[str, Any], dict[str, Any], int, float, float, int]] = {}
         used_product_idxs: set[str] = set()
@@ -1191,12 +1216,57 @@ class ProductDecisionEngine:
                 int(option["candidate"].class_id)
             )
 
+        def target_key(target: dict[str, Any]) -> Optional[str]:
+            return self._freezer_position_key(
+                channel_side=target.get("channel_side"),
+                channel_index=target.get("channel_index"),
+                channel_position=target.get("position"),
+            )
+
+        has_same_position_options = any(
+            bool(prior_position_product_idxs.get(target_key(target)))
+            for target in targets
+        )
+        if not eligible_options and not has_same_position_options:
+            reason = "no_channel_candidates_after_prior_exclusion"
+            return [], reason, diagnostics(accepted=False, reason=reason)
+
+        def option_matches_same_position(
+            option: dict[str, Any],
+            keys_for_target: set[str],
+        ) -> bool:
+            return bool(keys_for_target & self._freezer_option_product_keys(option))
+
+        def ordered_options_for_target(
+            target: dict[str, Any],
+        ) -> list[tuple[dict[str, Any], bool, set[str], Optional[str]]]:
+            key = target_key(target)
+            keys_for_target = (
+                set(prior_position_product_idxs.get(key, set()))
+                if key is not None
+                else set()
+            )
+            ordered: list[tuple[dict[str, Any], bool, set[str], Optional[str]]] = []
+            seen: set[str] = set()
+            if keys_for_target:
+                for option in ordered_options:
+                    product_idx = option_key(option)
+                    if option_matches_same_position(option, keys_for_target):
+                        ordered.append((option, True, keys_for_target, key))
+                        seen.add(product_idx)
+            for option in eligible_options:
+                product_idx = option_key(option)
+                if product_idx in seen:
+                    continue
+                ordered.append((option, False, set(), key))
+            return ordered
+
         def select_for_target(
             target: dict[str, Any],
             *,
             counts: range,
         ) -> bool:
-            nonlocal reused_product_fallback
+            nonlocal reused_product_fallback, same_position_repeat_applied
             position = int(target["position"])
             for count in counts:
                 first_reused_fit: Optional[
@@ -1210,7 +1280,12 @@ class ProductDecisionEngine:
                         str,
                     ]
                 ] = None
-                for option in eligible_options:
+                for (
+                    option,
+                    is_same_position_repeat,
+                    keys_for_target,
+                    matched_target_key,
+                ) in ordered_options_for_target(target):
                     product_idx = option_key(option)
                     if count_cap(option) < count:
                         continue
@@ -1224,6 +1299,7 @@ class ProductDecisionEngine:
                         expected_weight=expected_weight,
                         residual=residual,
                         accepted=accepted,
+                        same_position_repeat=is_same_position_repeat,
                     )
                     if not accepted:
                         continue
@@ -1249,6 +1325,13 @@ class ProductDecisionEngine:
                         attempt_order,
                     )
                     used_product_idxs.add(product_idx)
+                    if is_same_position_repeat:
+                        same_position_repeat_applied = True
+                        same_position_repeat_product_idxs.update(
+                            self._freezer_option_product_keys(option) & keys_for_target
+                        )
+                        if matched_target_key:
+                            same_position_repeat_target_keys.add(matched_target_key)
                     return True
                 if first_reused_fit is not None:
                     (
@@ -1276,7 +1359,16 @@ class ProductDecisionEngine:
         for target in targets:
             select_for_target(target, counts=range(1, 2))
 
-        max_count = max(count_cap(option) for option in eligible_options)
+        count_cap_options: dict[str, dict[str, Any]] = {}
+        for option in eligible_options:
+            count_cap_options[option_key(option)] = option
+        for target in targets:
+            for option, _, _, _ in ordered_options_for_target(target):
+                count_cap_options.setdefault(option_key(option), option)
+        max_count = max(
+            (count_cap(option) for option in count_cap_options.values()),
+            default=1,
+        )
         for target in targets:
             if int(target["position"]) in selected_by_position:
                 continue
@@ -1320,6 +1412,15 @@ class ProductDecisionEngine:
         selected_order = min(int(item[5]) for item in selected_items)
         selected_options: list[dict[str, Any]] = []
         for target, option, count, expected_weight, residual, attempt_order in selected_items:
+            current_target_key = target_key(target)
+            current_prior_keys = (
+                prior_position_product_idxs.get(current_target_key, set())
+                if current_target_key is not None
+                else set()
+            )
+            selected_same_position = bool(
+                current_prior_keys & self._freezer_option_product_keys(option)
+            )
             option_diagnostics = dict(option["diagnostics"])
             option_diagnostics.update(
                 {
@@ -1343,6 +1444,8 @@ class ProductDecisionEngine:
                     "channelTargetSource": str(target["source"]),
                     "channelProductGroupPolicy": "one_product_group_per_loadcell",
                     "sameProductLeftRightFallback": bool(reused_product_fallback),
+                    "samePositionRepeatApplied": bool(selected_same_position),
+                    "samePositionRepeatTargetKey": current_target_key,
                 }
             )
             cloned = dict(option)
@@ -1762,6 +1865,49 @@ class ProductDecisionEngine:
             text = str(item).strip()
             if text:
                 normalized.add(text)
+        return normalized
+
+    @staticmethod
+    def _coerce_optional_int(value: object) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _freezer_position_key(
+        cls,
+        *,
+        channel_side: object = None,
+        channel_index: object = None,
+        channel_position: object = None,
+    ) -> Optional[str]:
+        side = str(channel_side or "").strip().lower()
+        index = cls._coerce_optional_int(channel_index)
+        position = cls._coerce_optional_int(channel_position)
+        if side in {"", "none", "unknown"}:
+            side = ""
+        if not side and index is None and position is None:
+            return None
+        return f"{side}|{'' if index is None else index}|{'' if position is None else position}"
+
+    @classmethod
+    def _normalize_prior_selected_position_product_idxs(
+        cls,
+        value: Optional[object],
+    ) -> dict[str, set[str]]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, set[str]] = {}
+        for raw_key, raw_values in value.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            product_idxs = cls._normalize_prior_selected_product_idxs(raw_values)
+            if product_idxs:
+                normalized.setdefault(key, set()).update(product_idxs)
         return normalized
 
     @staticmethod

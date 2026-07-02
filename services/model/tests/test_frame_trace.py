@@ -176,6 +176,25 @@ def two_channel_loadcells_for_delta(delta: float) -> list:
     ]
 
 
+def right_channel_loadcells_for_delta(delta: float) -> list:
+    start_channels = [1000.0, 1000.0]
+    end_channels = [1000.0, 1000.0 + delta]
+    mid_channels = [
+        start + ((end - start) * 0.5)
+        for start, end in zip(start_channels, end_channels)
+    ]
+    samples = [start_channels] * 5 + [mid_channels] * 2 + [end_channels] * 5
+    return [
+        {
+            "timestamp": f"2026-03-20T10:00:{index:02d}.000Z",
+            "raw_value": [f"{value:+.1f}" for value in values],
+            "filtered_value": [f"{value:+.1f}" for value in values],
+            "filter_method": "none",
+        }
+        for index, values in enumerate(samples)
+    ]
+
+
 def unstable_removal_loadcells() -> list:
     values = [1000.0] * 5 + [900.0, 800.0, 700.0, 620.0, 540.0]
     return [
@@ -1097,6 +1116,327 @@ async def test_trigger_service_freezer_single_bagel_candidate_counts_repeat_and_
             2.5,
             abs=0.2,
         )
+    finally:
+        door_store.shutdown()
+
+
+def test_trigger_service_prior_position_context_from_placement_units(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    import model_service.service.trigger_service as trigger_service_module
+    from model_service.service.trigger_service import TriggerService
+    from model_service.session import DoorSessionStore, ProductResult, TriggerResult
+
+    monkeypatch.setattr(trigger_service_module.config.machine, "cabinet_type", "freezer")
+    door_store = DoorSessionStore(yaml_dir=str(tmp_path / "sessions"))
+    try:
+        door_store.get_or_start_global_session()
+        door_store.add_trigger_with_global(
+            zone=5,
+            result=TriggerResult(
+                trigger_id="",
+                session_id="prior-bagel-session",
+                timestamp=1.0,
+                products=[
+                    ProductResult(
+                        product_id=27,
+                        product_idx="P_BAGEL",
+                        name="BAG_NULLDAM_BAGEL_140G",
+                        count=1,
+                        price=2800,
+                        confidence=0.92,
+                        placement_units=[
+                            {
+                                "zone": 5,
+                                "unitWeight": 156.0,
+                                "channelSide": "right",
+                                "channelIndex": 1,
+                                "channelPosition": 1,
+                            }
+                        ],
+                    )
+                ],
+                delta_weight=-152.7,
+                confidence=0.92,
+                video_paths={},
+                is_return=False,
+            ),
+        )
+        service = TriggerService(
+            video_processor=MagicMock(),
+            engine=MagicMock(),
+            session_store=session_store,
+            door_session_store=door_store,
+        )
+
+        context = service._freezer_prior_selected_position_product_idxs(
+            zone=5,
+            delta_weight=-146.5,
+        )
+
+        assert context == {"right|1|1": ["P_BAGEL", "id:27"]}
+    finally:
+        door_store.shutdown()
+
+
+def test_trigger_service_prior_position_context_single_channel_fallback(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    import model_service.service.trigger_service as trigger_service_module
+    from model_service.service.trigger_service import TriggerService
+    from model_service.session import DoorSessionStore, ProductResult, TriggerResult
+
+    monkeypatch.setattr(trigger_service_module.config.machine, "cabinet_type", "freezer")
+    door_store = DoorSessionStore(yaml_dir=str(tmp_path / "sessions"))
+    try:
+        door_store.get_or_start_global_session()
+        door_store.add_trigger_with_global(
+            zone=5,
+            result=TriggerResult(
+                trigger_id="",
+                session_id="prior-bagel-session",
+                timestamp=1.0,
+                products=[
+                    ProductResult(
+                        product_id=27,
+                        product_idx="P_BAGEL",
+                        name="BAG_NULLDAM_BAGEL_140G",
+                        count=1,
+                        price=2800,
+                        confidence=0.92,
+                    )
+                ],
+                delta_weight=-152.7,
+                confidence=0.92,
+                video_paths={},
+                is_return=False,
+                loadcell_diagnostics={
+                    "channel_movement_targets": [
+                        {
+                            "direction": "removal",
+                            "delta": -152.7,
+                            "weight": 152.7,
+                            "channel_side": "right",
+                            "channel_index": 1,
+                            "channel_position": 1,
+                        }
+                    ]
+                },
+            ),
+        )
+        service = TriggerService(
+            video_processor=MagicMock(),
+            engine=MagicMock(),
+            session_store=session_store,
+            door_session_store=door_store,
+        )
+
+        context = service._freezer_prior_selected_position_product_idxs(
+            zone=5,
+            delta_weight=-146.5,
+        )
+
+        assert context == {"right|1|1": ["P_BAGEL", "id:27"]}
+    finally:
+        door_store.shutdown()
+
+
+def test_filtered_channel_delta_log_fields_formats_left_and_right():
+    from model_service.api.routes.trigger import (
+        _filtered_channel_delta_log_fields as route_fields,
+    )
+    from model_service.service.trigger_service import TriggerService
+
+    diagnostics = {
+        "first_filtered_values": ["+00679", "+00701"],
+        "last_filtered_values": ["+00680", "+00553"],
+    }
+
+    expected = "left_delta=1.0g right_delta=-148.0g"
+    assert TriggerService._filtered_channel_delta_log_fields(diagnostics) == expected
+    assert route_fields(diagnostics) == expected
+
+
+def test_filtered_channel_delta_log_fields_handles_missing_values():
+    from model_service.api.routes.trigger import (
+        _filtered_channel_delta_log_fields as route_fields,
+    )
+    from model_service.service.trigger_service import TriggerService
+
+    diagnostics = {
+        "first_filtered_values": ["+00679"],
+        "last_filtered_values": ["+00680"],
+    }
+
+    expected = "left_delta=n/a right_delta=n/a"
+    assert TriggerService._filtered_channel_delta_log_fields(diagnostics) == expected
+    assert route_fields(diagnostics) == expected
+
+
+@pytest.mark.asyncio
+async def test_trigger_service_same_position_repeat_skips_video_and_engine(
+    monkeypatch,
+    tmp_path,
+    session_store,
+):
+    import asyncio
+
+    import model_service.service.trigger_service as trigger_service_module
+    from model_service.service.trigger_service import (
+        LoadcellReading,
+        TriggerInput,
+        TriggerService,
+    )
+    from model_service.session import DoorSessionStore, ProductResult, TriggerResult
+
+    trace_factory = make_trace_factory(tmp_path)
+    monkeypatch.setattr(trigger_service_module, "TriggerTraceContext", trace_factory)
+    monkeypatch.setattr(
+        trigger_service_module,
+        "generate_session_id",
+        lambda zone: "same-position-repeat-session",
+    )
+    monkeypatch.setattr(trigger_service_module.config.async_streaming, "enabled", True)
+    monkeypatch.setattr(trigger_service_module.config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(trigger_service_module.config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(
+        trigger_service_module.config.weight,
+        "freezer_weight_tolerance_grams",
+        15.0,
+    )
+
+    class FailingVideoProcessor:
+        async def process_videos_async(self, **kwargs):
+            raise AssertionError("video should be skipped")
+
+        def process_videos(self, **kwargs):
+            raise AssertionError("video should be skipped")
+
+    active_product = SimpleNamespace(
+        yolo_class_id=27,
+        product_name="BAG_NULLDAM_BAGEL_140G",
+        product_weight=156.0,
+        stock_qty=10,
+        sale_price=2800,
+        product_idx="P_BAGEL",
+        has_loadcell="true",
+    )
+
+    class FakeActiveProductStore:
+        def has_products(self):
+            return True
+
+        def get_all_products(self):
+            return [active_product]
+
+        def get_allowed_class_ids(self):
+            return [27]
+
+        def get_by_yolo_class_id(self, product_id):
+            return active_product if int(product_id) == 27 else None
+
+        def get_stats(self):
+            return {"source": "test"}
+
+    door_store = DoorSessionStore(
+        yaml_dir=str(tmp_path / "sessions"),
+        get_product_weight=lambda product_id: {27: 156.0}.get(product_id, 0.0),
+    )
+    engine = MagicMock()
+    engine.judge.side_effect = AssertionError("engine should be skipped")
+    try:
+        door_store.get_or_start_global_session()
+        door_store.add_trigger_with_global(
+            zone=5,
+            result=TriggerResult(
+                trigger_id="",
+                session_id="prior-bagel-session",
+                timestamp=1.0,
+                products=[
+                    ProductResult(
+                        product_id=27,
+                        product_idx="P_BAGEL",
+                        name="BAG_NULLDAM_BAGEL_140G",
+                        count=1,
+                        price=2800,
+                        confidence=0.92,
+                        placement_units=[
+                            {
+                                "zone": 5,
+                                "sourceSessionId": "prior-bagel-session",
+                                "product_id": 27,
+                                "product_idx": "P_BAGEL",
+                                "name": "BAG_NULLDAM_BAGEL_140G",
+                                "unitWeight": 156.0,
+                                "channelSide": "right",
+                                "channelIndex": 1,
+                                "channelPosition": 1,
+                            }
+                        ],
+                    )
+                ],
+                delta_weight=-152.7,
+                confidence=0.92,
+                video_paths={},
+                is_return=False,
+            ),
+        )
+        service = TriggerService(
+            video_processor=FailingVideoProcessor(),
+            engine=engine,
+            session_store=session_store,
+            door_session_store=door_store,
+            active_product_store=FakeActiveProductStore(),
+        )
+        service._queue = asyncio.Queue(maxsize=service.QUEUE_MAX_SIZE)
+
+        top_path = tmp_path / "top.avi"
+        side_path = tmp_path / "side.avi"
+        top_path.write_bytes(b"top")
+        side_path.write_bytes(b"side")
+        input_data = TriggerInput(
+            zone=5,
+            loadcells=[
+                LoadcellReading(**item)
+                for item in right_channel_loadcells_for_delta(-146.5)
+            ],
+            top_video_path=str(top_path),
+            side_video_path=str(side_path),
+            cabinet_type="freezer",
+        )
+
+        output = await service.enqueue_trigger(input_data)
+
+        assert output.status == "complete"
+        assert output.message == "same-position loadcell repeat; YOLO skipped"
+        assert service._queue.empty()
+        engine.judge.assert_not_called()
+
+        session_data = session_store.get("same-position-repeat-session")
+        assert session_data is not None
+        assert session_data.processing_stage == "same_position_loadcell_repeat"
+        assert [(product.name, product.count) for product in session_data.products] == [
+            ("BAG_NULLDAM_BAGEL_140G", 1)
+        ]
+        door_session = door_store.get_session(zone=5)
+        assert door_session is not None
+        assert [
+            (product.name, product.count)
+            for product in door_session.get_active_products()
+        ] == [("BAG_NULLDAM_BAGEL_140G", 2)]
+
+        detail = json.loads(
+            read_trigger_detail_files(tmp_path / "logs")[0].read_text(encoding="utf-8")
+        )
+        repeat = detail["weight_diagnostics"]["same_position_loadcell_repeat"]
+        assert repeat["product_idx"] == "P_BAGEL"
+        assert repeat["target_key"] == "right|1|1"
+        assert repeat["yolo_skipped"] is True
+        assert detail["video_stats"]["yolo_skipped"] is True
     finally:
         door_store.shutdown()
 

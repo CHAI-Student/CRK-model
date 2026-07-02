@@ -28,6 +28,7 @@ from model_service.core.exceptions import (
     YOLOModelNotLoadedError,
 )
 from model_service.core.logging_config import get_ops_logger
+from model_service.engine import ProductDecisionEngine
 from model_service.session import (
     DoorSessionStore,
     ProductResult,
@@ -94,6 +95,38 @@ class TriggerResponse(BaseModel):
 
 def _parse_loadcell_value(value: str) -> float:
     return loadcell_stats.parse_loadcell_value(value)
+
+
+def _parse_loadcell_value_optional(value: object) -> Optional[float]:
+    try:
+        cleaned = str(value).strip()
+        if cleaned.startswith("+"):
+            cleaned = cleaned[1:]
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def _filtered_channel_delta_log_fields(payload_diagnostics: dict) -> str:
+    first_values = payload_diagnostics.get("first_filtered_values")
+    last_values = payload_diagnostics.get("last_filtered_values")
+    if not isinstance(first_values, list) or not isinstance(last_values, list):
+        return "left_delta=n/a right_delta=n/a"
+    if len(first_values) < 2 or len(last_values) < 2:
+        return "left_delta=n/a right_delta=n/a"
+    deltas: list[Optional[float]] = []
+    for index in (0, 1):
+        first = _parse_loadcell_value_optional(first_values[index])
+        last = _parse_loadcell_value_optional(last_values[index])
+        if first is None or last is None:
+            deltas.append(None)
+        else:
+            deltas.append(round(float(last - first), 1))
+
+    def fmt(value: Optional[float]) -> str:
+        return "n/a" if value is None else f"{value:.1f}g"
+
+    return f"left_delta={fmt(deltas[0])} right_delta={fmt(deltas[1])}"
 
 
 def _avg_loadcell_channels(values: list) -> float:
@@ -708,6 +741,138 @@ def _freezer_prior_selected_product_idxs(
     return selected
 
 
+def _product_result_keys(product: object) -> set[str]:
+    keys: set[str] = set()
+    product_idx = getattr(product, "product_idx", None)
+    if product_idx is not None and str(product_idx).strip():
+        keys.add(str(product_idx).strip())
+    try:
+        keys.add(f"id:{int(getattr(product, 'product_id'))}")
+    except (TypeError, ValueError):
+        pass
+    return keys
+
+
+def _position_key_from_unit(unit: dict[str, object]) -> Optional[str]:
+    return ProductDecisionEngine._freezer_position_key(
+        channel_side=unit.get("channelSide") or unit.get("channel_side"),
+        channel_index=unit.get("channelIndex") or unit.get("channel_index"),
+        channel_position=unit.get("channelPosition")
+        if unit.get("channelPosition") is not None
+        else unit.get("channel_position"),
+    )
+
+
+def _position_key_from_target(target: dict[str, object]) -> Optional[str]:
+    return ProductDecisionEngine._freezer_position_key(
+        channel_side=target.get("channel_side") or target.get("channelSide"),
+        channel_index=target.get("channel_index") or target.get("channelIndex"),
+        channel_position=target.get("channel_position")
+        if target.get("channel_position") is not None
+        else target.get("channelPosition"),
+    )
+
+
+def _removal_channel_targets_from_diagnostics(
+    diagnostics: object,
+) -> list[dict[str, object]]:
+    if not isinstance(diagnostics, dict):
+        return []
+    raw_targets = list(diagnostics.get("channel_removal_segment_targets") or [])
+    if not raw_targets:
+        raw_targets = list(diagnostics.get("channel_movement_targets") or [])
+    targets: list[dict[str, object]] = []
+    for entry in raw_targets:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            delta = float(entry.get("delta", 0.0) or 0.0)
+            weight = abs(float(entry.get("weight", delta) or delta))
+        except (TypeError, ValueError):
+            continue
+        direction = str(entry.get("direction", "")).lower()
+        if delta >= 0 and direction != "removal":
+            continue
+        if weight <= 0:
+            continue
+        target = dict(entry)
+        target["weight"] = round(float(weight), 1)
+        targets.append(target)
+    return targets
+
+
+def _freezer_prior_selected_position_product_idxs(
+    door_session_store: DoorSessionStore | None,
+    *,
+    zone: int,
+    delta_weight: float,
+) -> dict[str, list[str]]:
+    if not bool(config.weight.freezer_prior_trigger_dedupe_enabled):
+        return {}
+    if str(config.machine.cabinet_type).strip().lower() != "freezer":
+        return {}
+    if delta_weight >= 0:
+        return {}
+    if door_session_store is None:
+        return {}
+
+    global_session = door_session_store.get_global_session()
+    if global_session is None:
+        return {}
+    session = global_session.zone_sessions.get(int(zone))
+    if session is None:
+        return {}
+
+    selected: dict[str, set[str]] = {}
+    for trigger in getattr(session, "triggers", []) or []:
+        try:
+            if float(getattr(trigger, "delta_weight", 0.0) or 0.0) >= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if bool(getattr(trigger, "is_return", False)):
+            continue
+
+        products = list(getattr(trigger, "products", []) or [])
+        for product in products:
+            try:
+                if int(getattr(product, "count", 0) or 0) <= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            product_keys = _product_result_keys(product)
+            if not product_keys:
+                continue
+            unit_matched = False
+            for unit in getattr(product, "placement_units", []) or []:
+                if not isinstance(unit, dict):
+                    continue
+                position_key = _position_key_from_unit(unit)
+                if position_key is None:
+                    continue
+                selected.setdefault(position_key, set()).update(product_keys)
+                unit_matched = True
+            if unit_matched:
+                continue
+
+        if len(products) != 1:
+            continue
+        product = products[0]
+        product_keys = _product_result_keys(product)
+        if not product_keys:
+            continue
+        prior_targets = _removal_channel_targets_from_diagnostics(
+            getattr(trigger, "loadcell_diagnostics", {}) or {}
+        )
+        if len(prior_targets) != 1:
+            continue
+        position_key = _position_key_from_target(prior_targets[0])
+        if position_key is not None:
+            selected.setdefault(position_key, set()).update(product_keys)
+
+    return {key: sorted(values) for key, values in sorted(selected.items())}
+
+
 def _record_no_charge_diagnostic(
     *,
     door_session_store: DoorSessionStore | None,
@@ -929,6 +1094,7 @@ async def trigger_judgment(
             f"filtered_zero={payload_diagnostics['filtered_zero_channel_count']} "
             f"first_filtered_total={payload_diagnostics['first_filtered_total']} "
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
+            f"{_filtered_channel_delta_log_fields(payload_diagnostics)} "
             f"analysis_reason={delta_analysis.reason} "
             f"cabinet_type={payload_diagnostics['cabinet_type']} "
             f"camera_layout={config.vision.camera_layout} "
@@ -1329,10 +1495,22 @@ async def trigger_judgment(
             door_session_store,
             delta_weight,
         )
+        prior_selected_position_product_idxs = (
+            _freezer_prior_selected_position_product_idxs(
+                door_session_store,
+                zone=request.zone,
+                delta_weight=delta_weight,
+            )
+        )
         if prior_selected_product_idxs:
             logger.info(
                 "[TRIGGER][FREEZER-DEDUPE] prior_selected_product_idxs=%s",
                 sorted(prior_selected_product_idxs),
+            )
+        if prior_selected_position_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-DEDUPE] prior_selected_position_product_idxs=%s",
+                prior_selected_position_product_idxs,
             )
 
         result = engine.judge(
@@ -1342,6 +1520,7 @@ async def trigger_judgment(
             active_products=active_products_snapshot,
             trace_context=trace_context,
             prior_selected_product_idxs=prior_selected_product_idxs,
+            prior_selected_position_product_idxs=prior_selected_position_product_idxs,
         )
 
         def get_product_idx(product_id: int) -> str | None:

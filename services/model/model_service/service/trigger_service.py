@@ -659,6 +659,38 @@ class TriggerService:
             "loadcell_validation_reason": input_data.loadcell_validation_reason,
         }
 
+    @staticmethod
+    def _parse_loadcell_value_optional(value: object) -> Optional[float]:
+        try:
+            cleaned = str(value).strip()
+            if cleaned.startswith("+"):
+                cleaned = cleaned[1:]
+            return float(cleaned)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _filtered_channel_delta_log_fields(cls, payload_diagnostics: dict) -> str:
+        first_values = payload_diagnostics.get("first_filtered_values")
+        last_values = payload_diagnostics.get("last_filtered_values")
+        if not isinstance(first_values, list) or not isinstance(last_values, list):
+            return "left_delta=n/a right_delta=n/a"
+        if len(first_values) < 2 or len(last_values) < 2:
+            return "left_delta=n/a right_delta=n/a"
+        deltas: list[Optional[float]] = []
+        for index in (0, 1):
+            first = cls._parse_loadcell_value_optional(first_values[index])
+            last = cls._parse_loadcell_value_optional(last_values[index])
+            if first is None or last is None:
+                deltas.append(None)
+            else:
+                deltas.append(round(float(last - first), 1))
+
+        def fmt(value: Optional[float]) -> str:
+            return "n/a" if value is None else f"{value:.1f}g"
+
+        return f"left_delta={fmt(deltas[0])} right_delta={fmt(deltas[1])}"
+
     def _loadcell_trace_metadata(
         self,
         loadcells: List[LoadcellReading],
@@ -951,6 +983,629 @@ class TriggerService:
                     except (TypeError, ValueError):
                         pass
         return selected
+
+    @staticmethod
+    def _product_result_keys(product: object) -> set[str]:
+        keys: set[str] = set()
+        product_idx = getattr(product, "product_idx", None)
+        if product_idx is not None and str(product_idx).strip():
+            keys.add(str(product_idx).strip())
+        try:
+            keys.add(f"id:{int(getattr(product, 'product_id'))}")
+        except (TypeError, ValueError):
+            pass
+        return keys
+
+    @staticmethod
+    def _position_key_from_unit(unit: dict[str, object]) -> Optional[str]:
+        return ProductDecisionEngine._freezer_position_key(
+            channel_side=unit.get("channelSide") or unit.get("channel_side"),
+            channel_index=unit.get("channelIndex") or unit.get("channel_index"),
+            channel_position=unit.get("channelPosition")
+            if unit.get("channelPosition") is not None
+            else unit.get("channel_position"),
+        )
+
+    @staticmethod
+    def _position_key_from_target(target: dict[str, object]) -> Optional[str]:
+        return ProductDecisionEngine._freezer_position_key(
+            channel_side=target.get("channel_side") or target.get("channelSide"),
+            channel_index=target.get("channel_index") or target.get("channelIndex"),
+            channel_position=target.get("channel_position")
+            if target.get("channel_position") is not None
+            else target.get("channelPosition"),
+        )
+
+    @staticmethod
+    def _removal_channel_targets_from_diagnostics(
+        diagnostics: object,
+    ) -> list[dict[str, object]]:
+        if not isinstance(diagnostics, dict):
+            return []
+        raw_targets = list(diagnostics.get("channel_removal_segment_targets") or [])
+        if not raw_targets:
+            raw_targets = list(diagnostics.get("channel_movement_targets") or [])
+        targets: list[dict[str, object]] = []
+        for entry in raw_targets:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                delta = float(entry.get("delta", 0.0) or 0.0)
+                weight = abs(float(entry.get("weight", delta) or delta))
+            except (TypeError, ValueError):
+                continue
+            direction = str(entry.get("direction", "")).lower()
+            if delta >= 0 and direction != "removal":
+                continue
+            if weight <= 0:
+                continue
+            target = dict(entry)
+            target["weight"] = round(float(weight), 1)
+            targets.append(target)
+        return targets
+
+    def _removal_channel_targets_from_analysis(
+        self,
+        delta_analysis: loadcell_stats.LoadcellDeltaAnalysis,
+    ) -> list[dict[str, object]]:
+        diagnostics = {
+            "channel_removal_segment_targets": list(
+                delta_analysis.channel_removal_segment_targets
+            ),
+            "channel_movement_targets": list(delta_analysis.channel_movement_targets),
+        }
+        return self._removal_channel_targets_from_diagnostics(diagnostics)
+
+    def _freezer_prior_selected_position_product_idxs(
+        self,
+        *,
+        zone: int,
+        delta_weight: float,
+    ) -> dict[str, list[str]]:
+        if not bool(config.weight.freezer_prior_trigger_dedupe_enabled):
+            return {}
+        if str(config.machine.cabinet_type).strip().lower() != "freezer":
+            return {}
+        if delta_weight >= 0:
+            return {}
+        if self._door_session_store is None:
+            return {}
+
+        global_session = self._door_session_store.get_global_session()
+        if global_session is None:
+            return {}
+        session = global_session.zone_sessions.get(int(zone))
+        if session is None:
+            return {}
+
+        selected: dict[str, set[str]] = {}
+        for trigger in getattr(session, "triggers", []) or []:
+            try:
+                if float(getattr(trigger, "delta_weight", 0.0) or 0.0) >= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if bool(getattr(trigger, "is_return", False)):
+                continue
+            products = list(getattr(trigger, "products", []) or [])
+            for product in products:
+                try:
+                    if int(getattr(product, "count", 0) or 0) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                product_keys = self._product_result_keys(product)
+                if not product_keys:
+                    continue
+                unit_matched = False
+                for unit in getattr(product, "placement_units", []) or []:
+                    if not isinstance(unit, dict):
+                        continue
+                    position_key = self._position_key_from_unit(unit)
+                    if position_key is None:
+                        continue
+                    selected.setdefault(position_key, set()).update(product_keys)
+                    unit_matched = True
+                if unit_matched:
+                    continue
+
+            if len(products) != 1:
+                continue
+            product = products[0]
+            product_keys = self._product_result_keys(product)
+            if not product_keys:
+                continue
+            prior_targets = self._removal_channel_targets_from_diagnostics(
+                getattr(trigger, "loadcell_diagnostics", {}) or {}
+            )
+            if len(prior_targets) != 1:
+                continue
+            position_key = self._position_key_from_target(prior_targets[0])
+            if position_key is not None:
+                selected.setdefault(position_key, set()).update(product_keys)
+
+        return {key: sorted(values) for key, values in sorted(selected.items())}
+
+    @staticmethod
+    def _coerce_positive_float(value: object) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
+
+    @staticmethod
+    def _coerce_positive_int(value: object) -> Optional[int]:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def _active_product_for_result(
+        self,
+        product: object,
+        active_products: Optional[List],
+    ) -> Optional[object]:
+        product_id = getattr(product, "product_id", None)
+        product_idx = getattr(product, "product_idx", None)
+        for active in active_products or []:
+            active_idx = getattr(active, "product_idx", None)
+            if (
+                product_idx is not None
+                and active_idx is not None
+                and str(active_idx) == str(product_idx)
+            ):
+                return active
+            try:
+                if int(getattr(active, "yolo_class_id", -1)) == int(product_id):
+                    return active
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _same_position_repeat_unit_weight(
+        self,
+        product: object,
+        *,
+        active_products: Optional[List],
+        unit: Optional[dict[str, object]] = None,
+    ) -> Optional[float]:
+        if isinstance(unit, dict):
+            unit_weight = self._coerce_positive_float(
+                unit.get("unitWeight") or unit.get("unit_weight")
+            )
+            if unit_weight is not None:
+                return unit_weight
+
+        active = self._active_product_for_result(product, active_products)
+        if active is not None:
+            active_weight = self._coerce_positive_float(
+                getattr(active, "product_weight", None)
+            )
+            if active_weight is not None:
+                return active_weight
+
+        for attr in ("unit_weight", "weight", "product_weight"):
+            product_weight = self._coerce_positive_float(getattr(product, attr, None))
+            if product_weight is not None:
+                return product_weight
+        return None
+
+    def _same_position_repeat_stock_cap(
+        self,
+        product: object,
+        *,
+        active_products: Optional[List],
+    ) -> Optional[int]:
+        active = self._active_product_for_result(product, active_products)
+        if active is None:
+            return None
+        return self._coerce_positive_int(getattr(active, "stock_qty", None))
+
+    def _same_position_repeat_count_for_weight(
+        self,
+        *,
+        target_weight: float,
+        unit_weight: float,
+        stock_cap: Optional[int],
+    ) -> Optional[dict[str, object]]:
+        if target_weight <= 0 or unit_weight <= 0:
+            return None
+        max_count = min(
+            max(1, int(config.weight.same_product_max_count)),
+            max(1, int(config.weight.max_items_per_segment)),
+            max(1, int(config.weight.max_count_per_item)),
+            max(1, int(config.weight.max_combination_items)),
+        )
+        if stock_cap is not None:
+            max_count = min(max_count, max(1, int(stock_cap)))
+        count = max(1, int(round(target_weight / unit_weight)))
+        if count > max_count:
+            return None
+        expected_weight = unit_weight * count
+        residual = abs(target_weight - expected_weight)
+        tolerance = ProductDecisionEngine._freezer_weight_tolerance_grams()
+        if residual > tolerance:
+            return None
+        return {
+            "count": count,
+            "expected_weight": expected_weight,
+            "residual": residual,
+            "tolerance": tolerance,
+            "max_count": max_count,
+        }
+
+    def _same_position_repeat_product_match(
+        self,
+        *,
+        product: object,
+        target: dict[str, object],
+        target_key: str,
+        target_weight: float,
+        active_products: Optional[List],
+        prior_trigger: object,
+        unit: Optional[dict[str, object]] = None,
+        match_source: str,
+    ) -> Optional[dict[str, object]]:
+        unit_weight = self._same_position_repeat_unit_weight(
+            product,
+            active_products=active_products,
+            unit=unit,
+        )
+        if unit_weight is None:
+            return None
+        count_match = self._same_position_repeat_count_for_weight(
+            target_weight=target_weight,
+            unit_weight=unit_weight,
+            stock_cap=self._same_position_repeat_stock_cap(
+                product,
+                active_products=active_products,
+            ),
+        )
+        if count_match is None:
+            return None
+
+        active = self._active_product_for_result(product, active_products)
+        product_id = int(getattr(product, "product_id"))
+        product_idx = getattr(product, "product_idx", None)
+        if product_idx is None and active is not None:
+            product_idx = getattr(active, "product_idx", None)
+        name = (
+            getattr(product, "name", None)
+            or (getattr(active, "product_name", None) if active is not None else None)
+            or (getattr(active, "name", None) if active is not None else None)
+            or str(product_id)
+        )
+        price = getattr(product, "price", None)
+        if price is None and active is not None:
+            price = getattr(active, "sale_price", 0)
+        try:
+            price_int = int(price or 0)
+        except (TypeError, ValueError):
+            price_int = 0
+
+        diagnostics = {
+            "accepted": True,
+            "reason": "same_zone_same_position_prior_product_weight_fit",
+            "product_id": product_id,
+            "product_idx": product_idx,
+            "name": str(name),
+            "count": int(count_match["count"]),
+            "unit_weight_g": round(float(unit_weight), 1),
+            "target_weight_g": round(float(target_weight), 1),
+            "expected_weight_g": round(float(count_match["expected_weight"]), 1),
+            "residual_g": round(float(count_match["residual"]), 1),
+            "tolerance_g": round(float(count_match["tolerance"]), 1),
+            "target_key": target_key,
+            "target": dict(target),
+            "match_source": match_source,
+            "source_session_id": getattr(prior_trigger, "session_id", None),
+            "source_trigger_id": getattr(prior_trigger, "trigger_id", None),
+        }
+        return {
+            "product_id": product_id,
+            "product_idx": str(product_idx) if product_idx is not None else None,
+            "name": str(name),
+            "price": price_int,
+            "count": int(count_match["count"]),
+            "unit_weight": float(unit_weight),
+            "target_weight": float(target_weight),
+            "target_key": target_key,
+            "target": dict(target),
+            "diagnostics": diagnostics,
+        }
+
+    def _same_position_repeat_fast_path_match(
+        self,
+        *,
+        zone: int,
+        delta_weight: float,
+        delta_analysis: loadcell_stats.LoadcellDeltaAnalysis,
+        active_products: Optional[List],
+    ) -> Optional[dict[str, object]]:
+        if str(config.machine.cabinet_type).strip().lower() != "freezer":
+            return None
+        if delta_weight >= 0:
+            return None
+        if self._door_session_store is None:
+            return None
+
+        current_targets = self._removal_channel_targets_from_analysis(delta_analysis)
+        if len(current_targets) != 1:
+            return None
+        current_target = current_targets[0]
+        target_key = self._position_key_from_target(current_target)
+        if target_key is None:
+            return None
+        target_weight = self._coerce_positive_float(
+            current_target.get("weight") or abs(float(delta_weight))
+        )
+        if target_weight is None:
+            return None
+
+        global_session = self._door_session_store.get_global_session()
+        if global_session is None:
+            return None
+        session = global_session.zone_sessions.get(int(zone))
+        if session is None:
+            return None
+
+        for prior_trigger in reversed(list(getattr(session, "triggers", []) or [])):
+            try:
+                if float(getattr(prior_trigger, "delta_weight", 0.0) or 0.0) >= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if bool(getattr(prior_trigger, "is_return", False)):
+                continue
+
+            products = list(getattr(prior_trigger, "products", []) or [])
+            for product in products:
+                try:
+                    if int(getattr(product, "count", 0) or 0) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                for unit in getattr(product, "placement_units", []) or []:
+                    if not isinstance(unit, dict):
+                        continue
+                    if self._position_key_from_unit(unit) != target_key:
+                        continue
+                    match = self._same_position_repeat_product_match(
+                        product=product,
+                        target=current_target,
+                        target_key=target_key,
+                        target_weight=target_weight,
+                        active_products=active_products,
+                        prior_trigger=prior_trigger,
+                        unit=unit,
+                        match_source="placement_units",
+                    )
+                    if match is not None:
+                        return match
+
+            if len(products) != 1:
+                continue
+            prior_targets = self._removal_channel_targets_from_diagnostics(
+                getattr(prior_trigger, "loadcell_diagnostics", {}) or {}
+            )
+            if len(prior_targets) != 1:
+                continue
+            if self._position_key_from_target(prior_targets[0]) != target_key:
+                continue
+            product = products[0]
+            match = self._same_position_repeat_product_match(
+                product=product,
+                target=current_target,
+                target_key=target_key,
+                target_weight=target_weight,
+                active_products=active_products,
+                prior_trigger=prior_trigger,
+                unit=None,
+                match_source="single_product_single_channel_fallback",
+            )
+            if match is not None:
+                return match
+        return None
+
+    def _handle_same_position_repeat_fast_path(
+        self,
+        *,
+        input_data: TriggerInput,
+        session_id: str,
+        idempotency_key: str,
+        delta_weight: float,
+        delta_analysis: loadcell_stats.LoadcellDeltaAnalysis,
+        payload_diagnostics: Optional[dict],
+        trace_context: Optional[TriggerTraceContext],
+        cached_active_products: Optional[List],
+        allowed_class_ids: Optional[List[int]],
+        snapshot_metadata: Optional[dict],
+        start_time: float,
+    ) -> Optional[TriggerOutput]:
+        match = self._same_position_repeat_fast_path_match(
+            zone=input_data.zone,
+            delta_weight=delta_weight,
+            delta_analysis=delta_analysis,
+            active_products=cached_active_products,
+        )
+        if match is None:
+            return None
+
+        target = dict(match["target"])
+        placement_units: list[dict[str, object]] = []
+        for _ in range(int(match["count"])):
+            placement_units.append(
+                {
+                    "zone": int(input_data.zone),
+                    "sourceSessionId": session_id,
+                    "product_id": int(match["product_id"]),
+                    "product_idx": match.get("product_idx"),
+                    "name": str(match["name"]),
+                    "unitWeight": round(float(match["unit_weight"]), 1),
+                    "channelSide": target.get("channel_side")
+                    or target.get("channelSide")
+                    or "unknown",
+                    "channelIndex": target.get("channel_index")
+                    if target.get("channel_index") is not None
+                    else target.get("channelIndex"),
+                    "channelPosition": target.get("channel_position")
+                    if target.get("channel_position") is not None
+                    else target.get("channelPosition"),
+                    "targetWeight": round(float(match["target_weight"]), 1),
+                    "source": "same_position_loadcell_repeat",
+                    "channelProductGroupPolicy": "same_position_prior_repeat",
+                }
+            )
+
+        products = [
+            ProductResult(
+                product_id=int(match["product_id"]),
+                product_idx=match.get("product_idx"),
+                name=str(match["name"]),
+                count=int(match["count"]),
+                price=int(match["price"]),
+                confidence=1.0,
+                placement_units=placement_units,
+            )
+        ]
+        final_total_price = sum(product.price * product.count for product in products)
+        product_weights = self._product_weights_from_snapshot(cached_active_products)
+        active_product_diagnostics = self._record_active_product_diagnostics(
+            trace_context=trace_context,
+            active_products=cached_active_products,
+            allowed_class_ids=allowed_class_ids,
+            snapshot_metadata=snapshot_metadata,
+            log_prefix="[TRIGGER]",
+        )
+        diagnostics = dict(match["diagnostics"])
+        diagnostics.update(
+            {
+                "engine_skipped": True,
+                "yolo_skipped": True,
+                "chargeable_vision_required": False,
+                "active_product_diagnostics": active_product_diagnostics,
+            }
+        )
+        if payload_diagnostics:
+            diagnostics["payload_state"] = payload_diagnostics.get("payload_state")
+            diagnostics["first_filtered_total"] = payload_diagnostics.get(
+                "first_filtered_total"
+            )
+            diagnostics["last_filtered_total"] = payload_diagnostics.get(
+                "last_filtered_total"
+            )
+
+        if trace_context is not None:
+            trace_context.record_video_stats(
+                {
+                    "top_frames": 0,
+                    "side_frames": 0,
+                    "processing_time_ms": 0.0,
+                    "yolo_inference_count": 0,
+                    "engine_skipped": True,
+                    "yolo_skipped": True,
+                }
+            )
+            trace_context.record_active_product_snapshot(
+                cached_active_products or [],
+                delta_weight=delta_weight,
+            )
+            trace_context.record_candidates([], product_weights)
+            existing = dict(getattr(trace_context, "weight_diagnostics", {}) or {})
+            existing.update(
+                {
+                    "decision_branch": "same_position_loadcell_repeat",
+                    "same_position_loadcell_repeat": diagnostics,
+                    "engine_skipped": True,
+                    "yolo_skipped": True,
+                    "chargeable_vision_required": False,
+                }
+            )
+            trace_context.record_weight_diagnostics(existing)
+            trace_context.record_final_result(
+                products=products,
+                total_price=final_total_price,
+                status="complete",
+                confidence=1.0,
+            )
+            trace_context.record_storage_result(
+                products=products,
+                total_price=final_total_price,
+            )
+            trace_context.finalize(status="complete")
+
+        elapsed_ms = (time.time() - start_time) * 1000
+        session_data = SessionData(
+            session_id=session_id,
+            zone=input_data.zone,
+            products=products,
+            total_price=final_total_price,
+            delta_weight=delta_weight,
+            status="complete",
+            processing_stage="same_position_loadcell_repeat",
+            processing_stage_detail="same-position prior product selected from loadcell",
+            confidence=1.0,
+            top_frames=0,
+            side_frames=0,
+            processing_time_ms=elapsed_ms,
+            vision_candidates=[],
+            trigger_timing=input_data.timing.to_dict() if input_data.timing else None,
+        )
+        self._session_store.save(session_id, session_data)
+
+        door_session_id = None
+        if self._door_session_store is not None:
+            loadcell_diagnostics = loadcell_stats.close_trigger_loadcell_diagnostics(
+                delta_analysis
+            )
+            loadcell_diagnostics["same_position_loadcell_repeat"] = diagnostics
+            trigger_result = TriggerResult(
+                trigger_id="",
+                session_id=session_id,
+                timestamp=start_time,
+                products=products,
+                delta_weight=delta_weight,
+                confidence=1.0,
+                video_paths={
+                    "top": str(input_data.top_video_path)
+                    if input_data.top_video_path
+                    else "",
+                    "side": str(input_data.side_video_path)
+                    if input_data.side_video_path
+                    else "",
+                },
+                is_return=False,
+                processing_time_ms=elapsed_ms,
+                timing_metadata=input_data.timing.to_dict() if input_data.timing else None,
+                loadcell_diagnostics=loadcell_diagnostics,
+            )
+            door_session = self._door_session_store.add_trigger_with_global(
+                zone=input_data.zone,
+                result=trigger_result,
+            )
+            door_session_id = door_session.door_session_id
+
+        self._register_request(idempotency_key, session_id)
+        ops_logger.info(
+            f"[OPS][RESULT] zone={input_data.zone} "
+            "status=same_position_loadcell_repeat "
+            f"products={self._format_products_for_ops(products)} "
+            f"product_count={sum(product.count for product in products)} "
+            f"total_price={final_total_price}"
+        )
+        return TriggerOutput(
+            success=True,
+            session_id=session_id,
+            door_session_id=door_session_id,
+            message="same-position loadcell repeat; YOLO skipped",
+            status="complete",
+        )
 
     @staticmethod
     def _candidate_ops_confidence_fields(
@@ -1699,6 +2354,7 @@ class TriggerService:
         # 워커가 시작되지 않은 경우 기존 방식으로 처리
         if self._queue is None:
             return await self.process_trigger(input_data)
+        start_time = time.time()
         # v4.5: 중복 요청 체크
         idempotency_key = self._generate_idempotency_key(input_data)
         duplicate_session_id = self._check_duplicate(idempotency_key)
@@ -1803,6 +2459,7 @@ class TriggerService:
             f"filtered_zero={payload_diagnostics['filtered_zero_channel_count']} "
             f"first_filtered_total={payload_diagnostics['first_filtered_total']} "
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
+            f"{self._filtered_channel_delta_log_fields(payload_diagnostics)} "
             f"analysis_reason={delta_analysis.reason} "
             f"cabinet_type={payload_diagnostics.get('cabinet_type')} "
             f"camera_layout={config.vision.camera_layout} "
@@ -1940,6 +2597,21 @@ class TriggerService:
                 event=event,
                 matched_event_ids=matched_event_ids,
             )
+        fast_path_output = self._handle_same_position_repeat_fast_path(
+            input_data=input_data,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            delta_weight=delta_weight,
+            delta_analysis=delta_analysis,
+            payload_diagnostics=payload_diagnostics,
+            trace_context=trace_context,
+            cached_active_products=cached_active_products,
+            allowed_class_ids=allowed_class_ids,
+            snapshot_metadata=snapshot_metadata,
+            start_time=start_time,
+        )
+        if fast_path_output is not None:
+            return fast_path_output
 
         # 5. active_products 캐시 (v4.11: 조회 시점 통일)
         product_weights = self._product_weights_from_snapshot(cached_active_products)
@@ -2826,10 +3498,21 @@ class TriggerService:
         prior_selected_product_idxs = self._freezer_prior_selected_product_idxs(
             delta_weight
         )
+        prior_selected_position_product_idxs = (
+            self._freezer_prior_selected_position_product_idxs(
+                zone=input_data.zone,
+                delta_weight=delta_weight,
+            )
+        )
         if prior_selected_product_idxs:
             logger.info(
                 "[TRIGGER][FREEZER-DEDUPE] prior_selected_product_idxs=%s",
                 sorted(prior_selected_product_idxs),
+            )
+        if prior_selected_position_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-DEDUPE] prior_selected_position_product_idxs=%s",
+                prior_selected_position_product_idxs,
             )
 
         removal_stabilization = self._removal_stabilization_conflict(
@@ -2868,6 +3551,7 @@ class TriggerService:
             active_products=active_products,
             trace_context=trace_context,
             prior_selected_product_idxs=prior_selected_product_idxs,
+            prior_selected_position_product_idxs=prior_selected_position_product_idxs,
         )
 
         # 6. Node.js 상품 리스트에 없는 상품 제거 (v4.6)
@@ -3166,6 +3850,7 @@ class TriggerService:
             f"filtered_zero={payload_diagnostics['filtered_zero_channel_count']} "
             f"first_filtered_total={payload_diagnostics['first_filtered_total']} "
             f"last_filtered_total={payload_diagnostics['last_filtered_total']} "
+            f"{self._filtered_channel_delta_log_fields(payload_diagnostics)} "
             f"analysis_reason={delta_analysis.reason} "
             f"cabinet_type={payload_diagnostics.get('cabinet_type')} "
             f"camera_layout={config.vision.camera_layout} "
@@ -3271,6 +3956,22 @@ class TriggerService:
             )
 
         # 2. 초기 세션 저장 (processing 상태)
+        fast_path_output = self._handle_same_position_repeat_fast_path(
+            input_data=input_data,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            delta_weight=delta_weight,
+            delta_analysis=delta_analysis,
+            payload_diagnostics=payload_diagnostics,
+            trace_context=trace_context,
+            cached_active_products=cached_active_products,
+            allowed_class_ids=allowed_class_ids,
+            snapshot_metadata=snapshot_metadata,
+            start_time=start_time,
+        )
+        if fast_path_output is not None:
+            return fast_path_output
+
         initial_session = SessionData(
             session_id=session_id,
             zone=input_data.zone,
@@ -3457,6 +4158,18 @@ class TriggerService:
                 sorted(prior_selected_product_idxs),
             )
 
+        prior_selected_position_product_idxs = (
+            self._freezer_prior_selected_position_product_idxs(
+                zone=input_data.zone,
+                delta_weight=delta_weight,
+            )
+        )
+        if prior_selected_position_product_idxs:
+            logger.info(
+                "[TRIGGER][FREEZER-DEDUPE] prior_selected_position_product_idxs=%s",
+                prior_selected_position_product_idxs,
+            )
+
         result = self._engine.judge(
             vision_candidates=vision_candidates,
             delta_weight=delta_weight,
@@ -3464,6 +4177,7 @@ class TriggerService:
             active_products=active_products,  # v4.7: 신규 파라미터
             trace_context=trace_context,
             prior_selected_product_idxs=prior_selected_product_idxs,
+            prior_selected_position_product_idxs=prior_selected_position_product_idxs,
         )
 
         # 7-B. Node.js 상품 리스트에 없는 상품 제거 (v4.6)
