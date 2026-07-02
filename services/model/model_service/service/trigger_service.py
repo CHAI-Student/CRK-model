@@ -2593,6 +2593,7 @@ class TriggerService:
                 session_id=session_id,
                 idempotency_key=idempotency_key,
                 delta_weight=delta_weight,
+                delta_analysis=delta_analysis,
                 trace_context=trace_context,
                 event=event,
                 matched_event_ids=matched_event_ids,
@@ -3116,6 +3117,7 @@ class TriggerService:
         session_id: str,
         idempotency_key: str,
         delta_weight: float,
+        delta_analysis: Optional[loadcell_stats.LoadcellDeltaAnalysis],
         trace_context: Optional[TriggerTraceContext],
         event: LoadcellEvent,
         matched_event_ids: List[str],
@@ -3161,6 +3163,11 @@ class TriggerService:
                 is_return=True,
                 processing_time_ms=0.0,
                 timing_metadata=input_data.timing.to_dict() if input_data.timing else None,
+                loadcell_diagnostics=(
+                    loadcell_stats.close_trigger_loadcell_diagnostics(
+                        delta_analysis
+                    )
+                ),
             )
             door_session = self._door_session_store.add_trigger_with_global(
                 zone=input_data.zone,

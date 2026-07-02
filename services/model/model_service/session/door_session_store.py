@@ -1476,6 +1476,9 @@ class DoorSessionStore:
             for zone in sorted(self._active_sessions.keys())
         ]
         defer_returns_until_close = self._global_session is not None
+        freezer_defer_returns_until_close = (
+            defer_returns_until_close and self._is_freezer_mode()
+        )
 
         # Cross-zone returns are recorded on the source session only, so any
         # reaggregation must rebuild every active session before replaying the
@@ -1484,6 +1487,7 @@ class DoorSessionStore:
             result = self._aggregator.aggregate_with_unmatched(
                 active_session.triggers,
                 zone=active_session.zone,
+                defer_returns_until_close=freezer_defer_returns_until_close,
             )
             active_session.aggregated_products = result.products
             active_session.returned_position_hints = (
@@ -1569,6 +1573,10 @@ class DoorSessionStore:
             + incoming_cross_zone_weight
         )
 
+    @staticmethod
+    def _is_freezer_mode() -> bool:
+        return str(config.machine.cabinet_type).strip().lower() == "freezer"
+
     def _validate_net_delta(
         self,
         session: DoorSession,
@@ -1582,6 +1590,8 @@ class DoorSessionStore:
         # This pass is a safety net after trigger-level aggregation. It uses
         # the net door-session delta to repair counts when an item was removed
         # and later put back before the session closes.
+        if self._is_freezer_mode():
+            return
         has_return_trigger = any(
             trigger.delta_weight > 0
             or trigger.is_return
@@ -1754,6 +1764,18 @@ class DoorSessionStore:
             "reason": "not_evaluated",
             "deferredCount": len(session.deferred_returns),
             "deferredWeight": round(session.deferred_returns_weight, 1),
+            "returnDeferredUntilClose": bool(session.deferred_returns),
+            "deferredReturnChannelTargets": [
+                {
+                    "triggerId": item.trigger_id,
+                    "deltaWeight": round(float(item.delta_weight), 1),
+                    "channelSide": item.channel_side,
+                    "channelIndex": item.channel_index,
+                    "channelPosition": item.channel_position,
+                    "source": item.source,
+                }
+                for item in session.deferred_returns
+            ],
             "targetWeight": round(target_weight, 1),
             "currentWeightBefore": round(current_weight, 1),
             "currentResidualBefore": round(abs(target_weight - current_weight), 1),
@@ -1790,6 +1812,27 @@ class DoorSessionStore:
             return True
         if current_weight <= target_weight:
             return False
+
+        position_match = self._find_same_zone_deferred_return_match(
+            session,
+            deferred,
+            same_position=True,
+        )
+        if position_match is None:
+            position_match = self._find_same_zone_deferred_return_match(
+                session,
+                deferred,
+                same_position=False,
+            )
+        if position_match is not None:
+            return self._apply_deferred_return_product_match(
+                session,
+                deferred,
+                position_match,
+                current_residual,
+                target_weight,
+                diagnostics,
+            )
 
         combo = self._aggregator._weight_matcher.find_return_combination(
             session.aggregated_products,
@@ -1831,6 +1874,7 @@ class DoorSessionStore:
                 : max(0, product.count)
             ]
 
+        diagnostics["deferredReturnAppliedAtClose"] = True
         diagnostics.setdefault("sameZoneApplied", []).append(
             {
                 "triggerId": deferred.trigger_id,
@@ -1838,11 +1882,184 @@ class DoorSessionStore:
                 "matchedWeight": round(combo_weight, 1),
                 "matchedUnits": combo_units,
                 "products": combo_names,
+                "matchTier": "same_zone_weight_combo",
                 "residualBefore": round(current_residual, 1),
                 "residualAfter": round(new_residual, 1),
             }
         )
         return True
+
+    def _find_same_zone_deferred_return_match(
+        self,
+        session: DoorSession,
+        deferred: DeferredReturn,
+        *,
+        same_position: bool,
+    ) -> Optional[Dict[str, object]]:
+        target_weight = abs(float(deferred.delta_weight))
+        if target_weight <= 0:
+            return None
+        target_side = deferred.channel_side
+        if not target_side:
+            return None
+        if same_position and (
+            deferred.channel_index is None and deferred.channel_position is None
+        ):
+            return None
+        tolerance = max(
+            float(self._weight_tolerance),
+            float(config.weight.freezer_weight_tolerance_grams),
+        )
+        matches: List[Dict[str, object]] = []
+        for product_id, product in session.aggregated_products.items():
+            if product.count <= 0 or product.weight <= 0:
+                continue
+            matching_units = [
+                unit
+                for unit in product.placement_units
+                if isinstance(unit, dict)
+                and self._deferred_unit_matches(
+                    unit,
+                    deferred,
+                    same_position=same_position,
+                )
+            ]
+            if not matching_units:
+                continue
+            matching_units = sorted(
+                matching_units,
+                key=lambda unit: float(unit.get("sourceTimestamp", 0.0) or 0.0),
+                reverse=True,
+            )
+            max_count = min(int(product.count), len(matching_units))
+            for count in range(1, max_count + 1):
+                expected = float(product.weight) * count
+                residual = abs(target_weight - expected)
+                if residual > tolerance:
+                    continue
+                latest_timestamp = max(
+                    float(unit.get("sourceTimestamp", 0.0) or 0.0)
+                    for unit in matching_units[:count]
+                )
+                matches.append(
+                    {
+                        "product_id": int(product_id),
+                        "product": product,
+                        "count": int(count),
+                        "expected": expected,
+                        "residual": residual,
+                        "tier": (
+                            "same_zone_same_position"
+                            if same_position
+                            else "same_zone_same_side"
+                        ),
+                        "units": matching_units[:count],
+                        "latestTimestamp": latest_timestamp,
+                    }
+                )
+        if not matches:
+            return None
+        return min(
+            matches,
+            key=lambda item: (
+                int(item["count"]),
+                float(item["residual"]),
+                -float(item["latestTimestamp"]),
+            ),
+        )
+
+    @staticmethod
+    def _deferred_unit_matches(
+        unit: Dict[str, object],
+        deferred: DeferredReturn,
+        *,
+        same_position: bool,
+    ) -> bool:
+        unit_side = unit.get("channelSide", unit.get("channel_side"))
+        if str(unit_side) != str(deferred.channel_side):
+            return False
+        if not same_position:
+            return True
+        unit_index = unit.get("channelIndex", unit.get("channel_index"))
+        unit_position = unit.get("channelPosition", unit.get("channel_position"))
+        if deferred.channel_index is not None:
+            try:
+                if int(unit_index) != int(deferred.channel_index):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if deferred.channel_position is not None:
+            try:
+                if int(unit_position) != int(deferred.channel_position):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _apply_deferred_return_product_match(
+        self,
+        session: DoorSession,
+        deferred: DeferredReturn,
+        match: Dict[str, object],
+        current_residual: float,
+        target_weight: float,
+        diagnostics: Dict[str, object],
+    ) -> bool:
+        product = match["product"]
+        if not isinstance(product, AggregatedProduct):
+            return False
+        count = int(match["count"])
+        if product.count < count:
+            return False
+        combo_weight = float(match["expected"])
+        new_weight = self._session_active_weight(session) - combo_weight
+        new_residual = abs(target_weight - new_weight)
+        if new_residual >= current_residual:
+            return False
+
+        selected_units = [
+            unit for unit in match.get("units", []) if isinstance(unit, dict)
+        ][:count]
+        self._append_deferred_returned_position_hint(
+            session,
+            product=product,
+            count=count,
+            deferred=deferred,
+            selected_units=selected_units,
+        )
+        product.count = max(0, int(product.count) - count)
+        self._remove_selected_placement_units(product, selected_units, count)
+
+        diagnostics["deferredReturnAppliedAtClose"] = True
+        diagnostics.setdefault("sameZoneApplied", []).append(
+            {
+                "triggerId": deferred.trigger_id,
+                "deltaWeight": round(float(deferred.delta_weight), 1),
+                "matchedWeight": round(combo_weight, 1),
+                "matchedUnits": count,
+                "products": [f"{product.name}x{count}"],
+                "matchTier": str(match.get("tier")),
+                "residualBefore": round(current_residual, 1),
+                "residualAfter": round(new_residual, 1),
+            }
+        )
+        return True
+
+    @staticmethod
+    def _remove_selected_placement_units(
+        product: AggregatedProduct,
+        selected_units: List[Dict[str, object]],
+        count: int,
+    ) -> None:
+        selected_ids = {id(unit) for unit in selected_units[:count]}
+        removed = 0
+        remaining: List[Dict[str, object]] = []
+        for unit in product.placement_units:
+            if id(unit) in selected_ids and removed < count:
+                removed += 1
+                continue
+            remaining.append(unit)
+        product.placement_units = remaining[: max(0, int(product.count))]
 
     def _append_deferred_returned_position_hint(
         self,
@@ -1913,6 +2130,36 @@ class DoorSessionStore:
         for zone in sorted(self._active_sessions.keys()):
             session = self._active_sessions[zone]
             net_delta = self._calculate_effective_net_delta(session)
+            if self._is_freezer_mode():
+                diagnostics = {
+                    "accepted": False,
+                    "reason": "freezer_close_candidate_rebuild_disabled",
+                    "freezerCloseCandidateRebuildDisabled": True,
+                    "targetWeight": round(abs(float(net_delta)), 1),
+                    "currentWeight": round(self._session_active_weight(session), 1),
+                    "freezerCloseAggregateMode": "preserve_only",
+                }
+                existing_deferred_diagnostics = (
+                    session.final_weight_validation.get(
+                        "deferredReturnReconciliation"
+                    )
+                )
+                if existing_deferred_diagnostics is not None:
+                    diagnostics["deferredReturnReconciliation"] = (
+                        existing_deferred_diagnostics
+                    )
+                existing_location_diagnostics = (
+                    session.final_weight_validation.get(
+                        "freezerLocationReturnReconciliation"
+                    )
+                )
+                if existing_location_diagnostics is not None:
+                    diagnostics["freezerLocationReturnReconciliation"] = (
+                        existing_location_diagnostics
+                    )
+                session.final_weight_validation = diagnostics
+                self._apply_unresolved_close_weight_mismatch_guard(session, net_delta)
+                continue
             replacement, diagnostics = self._select_close_final_weight_replacement(
                 session,
                 net_delta,

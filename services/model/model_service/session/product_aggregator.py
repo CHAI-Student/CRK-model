@@ -111,6 +111,7 @@ class ProductAggregator:
         triggers: List[TriggerResult],
         *,
         zone: Optional[int] = None,
+        defer_returns_until_close: bool = False,
     ) -> AggregationResult:
         """
         여러 TriggerResult의 상품을 통합 (unmatched_returns 포함, v4.2).
@@ -144,6 +145,13 @@ class ProductAggregator:
         for trigger in ordered_triggers:
             if trigger.is_return:
                 # 반환 처리: 무게 매칭하여 차감
+                if defer_returns_until_close:
+                    self._record_deferred_return_targets(
+                        deferred_returns,
+                        trigger,
+                        source_zone=zone,
+                    )
+                    continue
                 matched_id = self._handle_freezer_location_return(
                     aggregated,
                     unmatched_returns,
@@ -167,6 +175,7 @@ class ProductAggregator:
                         trigger,
                         source="positive_return",
                         replay_position="return",
+                        source_zone=zone,
                     )
             else:
                 # 제거 처리: YOLO 결과 합산
@@ -267,24 +276,80 @@ class ProductAggregator:
                 source=source,
                 replay_position=replay_position,
                 tolerance_used=self._weight_tolerance,
-                channel_side=(
-                    str(target.get("channel_side"))
-                    if isinstance(target, dict) and target.get("channel_side") is not None
-                    else None
-                ),
-                channel_index=(
-                    int(target["channel_index"])
-                    if isinstance(target, dict) and target.get("channel_index") is not None
-                    else None
-                ),
-                channel_position=(
-                    int(target["channel_position"])
-                    if isinstance(target, dict) and target.get("channel_position") is not None
-                    else None
-                ),
+                channel_side=self._target_channel_side(target),
+                channel_index=self._target_channel_index(target),
+                channel_position=self._target_channel_position(target),
                 source_zone=source_zone,
             )
         )
+
+    @staticmethod
+    def _target_channel_side(target: Optional[dict[str, object]]) -> Optional[str]:
+        if not isinstance(target, dict):
+            return None
+        value = target.get("channel_side", target.get("channelSide"))
+        return str(value) if value is not None else None
+
+    @staticmethod
+    def _target_channel_index(target: Optional[dict[str, object]]) -> Optional[int]:
+        if not isinstance(target, dict):
+            return None
+        value = target.get("channel_index", target.get("channelIndex"))
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _target_channel_position(target: Optional[dict[str, object]]) -> Optional[int]:
+        if not isinstance(target, dict):
+            return None
+        value = target.get("channel_position", target.get("channelPosition"))
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _record_deferred_return_targets(
+        self,
+        deferred_returns: List[DeferredReturn],
+        trigger: TriggerResult,
+        *,
+        source_zone: Optional[int],
+    ) -> None:
+        """Defer freezer returns until close, preserving per-channel targets."""
+        targets = self._positive_channel_return_targets(trigger)
+        diagnostic_targets: List[dict[str, object]] = []
+        if targets:
+            for target in targets:
+                self._record_deferred_return(
+                    deferred_returns,
+                    trigger,
+                    source="freezer_channel_return",
+                    replay_position="return",
+                    delta_weight=float(
+                        target.get("weight", trigger.delta_weight)
+                        or trigger.delta_weight
+                    ),
+                    target=target,
+                    source_zone=source_zone,
+                )
+                diagnostic_targets.append(dict(target))
+        else:
+            self._record_deferred_return(
+                deferred_returns,
+                trigger,
+                source="positive_return",
+                replay_position="return",
+                source_zone=source_zone,
+            )
+
+        diagnostics = trigger.loadcell_diagnostics
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+            trigger.loadcell_diagnostics = diagnostics
+        diagnostics["returnDeferredUntilClose"] = True
+        diagnostics["deferredReturnChannelTargets"] = diagnostic_targets
 
     def _append_returned_position_hint(
         self,
@@ -893,6 +958,7 @@ class ProductAggregator:
         deferred_returns: Optional[List[DeferredReturn]] = None,
         *,
         zone: Optional[int] = None,
+        defer_returns_until_close: bool = False,
     ) -> Tuple[Dict[int, AggregatedProduct], List[UnmatchedReturn]]:
         """
         단일 trigger를 증분 추가 (v4.2).
@@ -909,6 +975,16 @@ class ProductAggregator:
         """
         if trigger.is_return:
             # 반환 처리: 무게 매칭하여 차감
+            if defer_returns_until_close:
+                target_deferred_returns = (
+                    deferred_returns if deferred_returns is not None else []
+                )
+                self._record_deferred_return_targets(
+                    target_deferred_returns,
+                    trigger,
+                    source_zone=zone,
+                )
+                return aggregated, unmatched_returns
             matched_id = self._handle_freezer_location_return(
                 aggregated,
                 unmatched_returns,
@@ -928,6 +1004,7 @@ class ProductAggregator:
                         trigger,
                         source="positive_return",
                         replay_position="return",
+                        source_zone=zone,
                     )
         else:
             target_deferred_returns = (

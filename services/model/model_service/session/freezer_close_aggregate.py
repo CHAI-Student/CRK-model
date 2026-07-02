@@ -100,8 +100,33 @@ class FreezerCloseAggregateResolver:
             diagnostics["returnedPositionHints"] = [
                 self._returned_hint_diagnostic(hint) for hint in returned_hints
             ]
+        deferred_return_applied = self._has_deferred_return_reconciled(participants)
+        if deferred_return_applied:
+            diagnostics["deferredReturnAppliedAtClose"] = True
 
         if abs(global_net_delta) <= self._tolerance:
+            if deferred_return_applied:
+                diagnostics.update(
+                    {
+                        "accepted": True,
+                        "reason": "freezer_close_aggregate_deferred_return_preserved",
+                        "noChargeReason": "deferred_return_reconciled_at_close",
+                        "finalTargetWeight": 0.0,
+                        "selectedWeight": self._active_session_weight(participants),
+                        "residual": 0.0,
+                        "allowedResidual": round(float(self._tolerance), 1),
+                        "selectedProducts": self._active_session_product_diagnostics(
+                            participants
+                        ),
+                        "freezerCloseAggregateMode": "preserve_only",
+                    }
+                )
+                self._apply_preserve_existing_output(
+                    participants,
+                    output_zone=output_zone,
+                    diagnostics=diagnostics,
+                )
+                return diagnostics
             diagnostics.update(
                 {
                     "accepted": True,
@@ -207,93 +232,23 @@ class FreezerCloseAggregateResolver:
             )
             return diagnostics
 
-        raw_candidate_groups = self._candidate_groups(participants)
-        (
-            candidate_groups,
-            suppressed_candidates,
-            allowed_candidates,
-        ) = self._filter_returned_position_candidates(
-            raw_candidate_groups,
-            participants,
-            returned_hints,
-        )
-        if suppressed_candidates:
-            existing = list(diagnostics.get("returnedPositionSuppressedCandidates", []))
-            diagnostics["returnedPositionSuppressedCandidates"] = [
-                *existing,
-                *suppressed_candidates,
-            ]
-        if allowed_candidates:
-            existing_allowed = list(
-                diagnostics.get("samePositionReturnedProductAllowed", [])
-            )
-            diagnostics["samePositionReturnedProductAllowed"] = [
-                *existing_allowed,
-                *allowed_candidates,
-            ]
-        diagnostics["rawCandidateCount"] = len(raw_candidate_groups)
-        diagnostics["candidateCount"] = len(candidate_groups)
-        combination = self._find_best_combination(
-            candidate_groups,
-            target_weight,
-            max_total_count=self._max_total_count(participants),
-        )
-        if combination is None:
-            diagnostics.update(
-                {
-                    "accepted": False,
-                    "reason": "no_weight_fit_for_freezer_close_aggregate",
-                    "noChargeReason": "no_candidate_combination_for_signed_net_delta",
-                    "selectedWeight": 0.0,
-                    "residual": round(float(target_weight), 1),
-                    "allowedResidual": round(float(self._tolerance), 1),
-                    "selectedProducts": [],
-                }
-            )
-            self._apply_no_charge_output(
-                participants,
-                output_zone=output_zone,
-                weight_delta_override=round(float(global_net_delta), 1),
-                diagnostics=diagnostics,
-            )
-            return diagnostics
-
-        selected_counts = dict(combination.counts)
-        selected_weight = float(combination.total_weight)
-        residual = abs(target_weight - selected_weight)
         diagnostics.update(
             {
-                "accepted": residual <= self._tolerance,
-                "reason": (
-                    "freezer_close_aggregate_applied"
-                    if residual <= self._tolerance
-                    else "freezer_close_aggregate_residual_exceeds_tolerance"
-                ),
-                "selectedWeight": round(float(selected_weight), 1),
-                "residual": round(float(residual), 1),
+                "accepted": False,
+                "reason": "freezer_close_candidate_rebuild_disabled",
+                "freezerCloseCandidateRebuildDisabled": True,
+                "freezerCloseAggregateMode": "preserve_only",
+                "selectedWeight": round(float(current_weight), 1),
+                "residual": round(float(current_residual), 1),
                 "allowedResidual": round(float(self._tolerance), 1),
-                "selectedProducts": self._selected_product_diagnostics(
-                    selected_counts,
-                    candidate_groups,
+                "selectedProducts": self._active_session_product_diagnostics(
+                    participants
                 ),
             }
         )
-        if residual > self._tolerance:
-            diagnostics["noChargeReason"] = "candidate_combination_residual_exceeds_tolerance"
-            self._apply_no_charge_output(
-                participants,
-                output_zone=output_zone,
-                weight_delta_override=round(float(global_net_delta), 1),
-                diagnostics=diagnostics,
-            )
-            return diagnostics
-
-        self._apply_output(
+        self._apply_preserve_existing_output(
             participants,
             output_zone=output_zone,
-            selected_counts=selected_counts,
-            candidate_groups=candidate_groups,
-            output_delta=global_net_delta,
             diagnostics=diagnostics,
         )
         return diagnostics
@@ -915,6 +870,25 @@ class FreezerCloseAggregateResolver:
                 preserved_products_by_zone.get(item.zone, {})
             )
 
+    @staticmethod
+    def _apply_preserve_existing_output(
+        participants: List[_Participant],
+        *,
+        output_zone: int,
+        diagnostics: dict[str, object],
+    ) -> None:
+        for item in participants:
+            zone_diagnostics = dict(diagnostics)
+            zone_diagnostics["role"] = "preserved"
+            if item.zone == output_zone:
+                zone_diagnostics["outputZoneRole"] = "latest_trigger_zone"
+            item.session.final_weight_validation = dict(
+                item.session.final_weight_validation or {}
+            )
+            item.session.final_weight_validation[
+                "freezerCloseAggregate"
+            ] = zone_diagnostics
+
     def _apply_no_charge_output(
         self,
         participants: List[_Participant],
@@ -966,6 +940,56 @@ class FreezerCloseAggregateResolver:
             if product_id in groups
         )
         return counts, groups, float(selected_weight)
+
+    @staticmethod
+    def _has_deferred_return_reconciled(participants: List[_Participant]) -> bool:
+        for item in participants:
+            validation = item.session.final_weight_validation or {}
+            diagnostics = validation.get("deferredReturnReconciliation")
+            if not isinstance(diagnostics, dict):
+                continue
+            if diagnostics.get("accepted") or diagnostics.get(
+                "deferredReturnAppliedAtClose"
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _active_session_weight(participants: List[_Participant]) -> float:
+        sessions = {id(item.session): item.session for item in participants}.values()
+        return round(
+            sum(
+                float(product.weight) * int(product.count)
+                for session in sessions
+                for product in session.aggregated_products.values()
+                if int(product.count) > 0 and float(product.weight) > 0
+            ),
+            1,
+        )
+
+    @staticmethod
+    def _active_session_product_diagnostics(
+        participants: List[_Participant],
+    ) -> List[dict[str, object]]:
+        sessions = {id(item.session): item.session for item in participants}.values()
+        products: Dict[int, AggregatedProduct] = {}
+        for session in sessions:
+            for product_id, product in session.aggregated_products.items():
+                if int(product.count) <= 0:
+                    continue
+                existing = products.get(int(product_id))
+                if existing is None:
+                    products[int(product_id)] = AggregatedProduct(
+                        product_id=int(product.product_id),
+                        product_idx=product.product_idx,
+                        name=product.name,
+                        count=int(product.count),
+                        unit_price=int(product.unit_price),
+                        weight=float(product.weight),
+                    )
+                else:
+                    existing.count += int(product.count)
+        return FreezerCloseAggregateResolver._aggregated_product_diagnostics(products)
 
     @staticmethod
     def _has_channel_solved_trigger_products(

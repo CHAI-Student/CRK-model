@@ -369,17 +369,22 @@ class TestDoorSessionNetDeltaRecovery:
 
         zone_3 = global_session.zone_sessions[3]
         zone_2 = global_session.zone_sessions[2]
-        assert zone_3.get_active_products() == []
+        assert [(p.product_id, p.count) for p in zone_3.get_active_products()] == [
+            (70, 1)
+        ]
         finalized_products = zone_2.get_active_products()
         assert len(finalized_products) == 1
         assert finalized_products[0].product_id == 150
         assert finalized_products[0].count == 1
         aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
-        assert aggregate["accepted"] is True
+        assert aggregate["accepted"] is False
+        assert aggregate["reason"] == "freezer_close_candidate_rebuild_disabled"
+        assert aggregate["freezerCloseAggregateMode"] == "preserve_only"
         assert aggregate["policy"] == "signed_net_delta"
         assert aggregate["globalNetDelta"] == -150.0
         assert aggregate["selectedProducts"] == [
-            {"productId": 150, "name": "FREEZER_150G_ITEM", "count": 1}
+            {"productId": 150, "name": "FREEZER_150G_ITEM", "count": 1},
+            {"productId": 70, "name": "FREEZER_70G_ITEM", "count": 1},
         ]
         assert zone_2.cross_zone_returns == []
         store.clear_all()
@@ -432,15 +437,16 @@ class TestDoorSessionNetDeltaRecovery:
 
         zone_2 = global_session.zone_sessions[2]
         finalized_products = zone_2.get_active_products()
-        assert finalized_products == []
+        assert [(p.product_id, p.count) for p in finalized_products] == [(150, 1)]
         assert zone_2.unmatched_returns == []
         aggregate = zone_2.final_weight_validation["freezerCloseAggregate"]
         assert aggregate["accepted"] is False
+        assert aggregate["reason"] == "freezer_close_candidate_rebuild_disabled"
+        assert aggregate["freezerCloseAggregateMode"] == "preserve_only"
         assert aggregate["globalNetDelta"] == -80.0
-        assert aggregate["selectedProducts"] == []
-        assert aggregate["noChargeReason"] == (
-            "no_candidate_combination_for_signed_net_delta"
-        )
+        assert aggregate["selectedProducts"] == [
+            {"productId": 150, "name": "FREEZER_150G_ITEM", "count": 1}
+        ]
         store.clear_all()
 
 
