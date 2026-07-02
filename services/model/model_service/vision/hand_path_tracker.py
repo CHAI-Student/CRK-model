@@ -113,6 +113,24 @@ class HandTrajectory:
 
 
 @dataclass
+class HandTrack:
+    track_id: int
+    trajectory: HandTrajectory = field(default_factory=HandTrajectory)
+    last_center: Optional[Tuple[float, float]] = None
+    last_frame_idx: int = -1
+
+    def add_point(
+        self,
+        center: Tuple[float, float],
+        frame_idx: int,
+        bbox_size: Tuple[float, float],
+    ) -> None:
+        self.trajectory.add_point(center, frame_idx, bbox_size)
+        self.last_center = center
+        self.last_frame_idx = int(frame_idx)
+
+
+@dataclass
 class ProductBboxHistory:
     """
     상품 bbox 히스토리.
@@ -212,6 +230,8 @@ class HandPathTracker:
         self._hand_trajectories: List[HandTrajectory] = []
         # 현재 프레임의 손 경로 (단일 손으로 단순화)
         self._current_trajectory = HandTrajectory()
+        self._hand_tracks: List[HandTrack] = []
+        self._next_track_id = 1
 
         # 상품 bbox 히스토리: class_id -> ProductBboxHistory
         self._product_histories: Dict[int, ProductBboxHistory] = {}
@@ -227,6 +247,57 @@ class HandPathTracker:
         if self.roi_vertical_region == "lower":
             return center_y >= split
         return center_y <= split
+
+    def _track_is_valid(self, track: HandTrack) -> bool:
+        trajectory = track.trajectory
+        if len(trajectory.centers) < self.min_hand_detections:
+            return False
+        return trajectory.get_path_length() >= self.min_path_length
+
+    def _valid_hand_tracks(self) -> List[HandTrack]:
+        return [track for track in self._hand_tracks if self._track_is_valid(track)]
+
+    def _max_track_path_length(self) -> float:
+        if not self._hand_tracks:
+            return 0.0
+        return max(track.trajectory.get_path_length() for track in self._hand_tracks)
+
+    def _assign_hand_detections(
+        self,
+        hands: List[tuple[Tuple[float, float], Tuple[float, float]]],
+        frame_idx: int,
+    ) -> None:
+        if not hands:
+            return
+
+        candidate_pairs: list[tuple[float, int, int]] = []
+        for track_index, track in enumerate(self._hand_tracks):
+            if track.last_center is None:
+                continue
+            if int(frame_idx) - int(track.last_frame_idx) > self.frame_window:
+                continue
+            for hand_index, (center, _bbox_size) in enumerate(hands):
+                distance = self._center_distance(track.last_center, center)
+                if distance <= self.max_distance_px:
+                    candidate_pairs.append((distance, track_index, hand_index))
+
+        assigned_tracks: Set[int] = set()
+        assigned_hands: Set[int] = set()
+        for _distance, track_index, hand_index in sorted(candidate_pairs):
+            if track_index in assigned_tracks or hand_index in assigned_hands:
+                continue
+            center, bbox_size = hands[hand_index]
+            self._hand_tracks[track_index].add_point(center, frame_idx, bbox_size)
+            assigned_tracks.add(track_index)
+            assigned_hands.add(hand_index)
+
+        for hand_index, (center, bbox_size) in enumerate(hands):
+            if hand_index in assigned_hands:
+                continue
+            track = HandTrack(track_id=self._next_track_id)
+            self._next_track_id += 1
+            track.add_point(center, frame_idx, bbox_size)
+            self._hand_tracks.append(track)
 
     @property
     def hand_path_valid_upper_roi(self) -> bool:
@@ -246,6 +317,7 @@ class HandPathTracker:
         """
         self._frame_count = max(self._frame_count, frame_idx + 1)
 
+        hands: List[tuple[Tuple[float, float], Tuple[float, float]]] = []
         for det in detections:
             # 손 탐지 처리
             if det.is_hand or det.cls in self.HAND_CLASS_IDS:
@@ -254,6 +326,7 @@ class HandPathTracker:
                     continue
                 bbox_size = (det.x2 - det.x1, det.y2 - det.y1)
                 self._current_trajectory.add_point(center, frame_idx, bbox_size)
+                hands.append((center, bbox_size))
             else:
                 # 상품 탐지 처리
                 class_id = det.cls
@@ -270,6 +343,7 @@ class HandPathTracker:
                 self._product_histories[class_id].add_detection(
                     center, frame_idx, bbox_size
                 )
+        self._assign_hand_detections(hands, frame_idx)
 
     @staticmethod
     def _center_distance(
@@ -284,9 +358,10 @@ class HandPathTracker:
 
     def _hand_points_near_frame(
         self,
+        track: HandTrack,
         frame_idx: int,
     ) -> list[tuple[Tuple[float, float], Tuple[float, float]]]:
-        trajectory = self._current_trajectory
+        trajectory = track.trajectory
         paired = list(
             zip(
                 trajectory.centers,
@@ -299,22 +374,74 @@ class HandPathTracker:
             for center, hand_frame_idx, bbox_size in paired
             if abs(int(hand_frame_idx) - int(frame_idx)) <= self.frame_window
         ]
-        if near:
-            return near
-        return [(center, bbox_size) for center, _, bbox_size in paired]
+        return near
 
     def _product_interaction_metrics(
         self,
         history: Optional[ProductBboxHistory],
     ) -> dict[str, Any]:
+        valid_tracks = self._valid_hand_tracks()
+        base_payload = {
+            "handInteractionPassed": False,
+            "handNearFrameCount": 0,
+            "handNearVoteRatio": 0.0,
+            "minHandDistancePx": None,
+            "handTrackId": None,
+            "handTrackCount": len(self._hand_tracks),
+            "validHandTrackCount": len(valid_tracks),
+            "handTrackNearFrameCount": 0,
+        }
         if history is None or not history.centers:
-            return {
-                "handInteractionPassed": False,
-                "handNearFrameCount": 0,
-                "handNearVoteRatio": 0.0,
-                "minHandDistancePx": None,
-            }
+            return base_payload
+        if not valid_tracks:
+            return base_payload
 
+        best_metrics: Optional[dict[str, Any]] = None
+        for track in valid_tracks:
+            metrics = self._product_interaction_metrics_for_track(track, history)
+            if best_metrics is None or self._is_better_track_metric(
+                metrics,
+                best_metrics,
+            ):
+                best_metrics = metrics
+
+        if best_metrics is None:
+            return base_payload
+        return {
+            **base_payload,
+            **best_metrics,
+            "handInteractionPassed": int(best_metrics["handNearFrameCount"]) > 0,
+        }
+
+    @staticmethod
+    def _metric_distance(metric: dict[str, Any]) -> float:
+        value = metric.get("minHandDistancePx")
+        if value is None:
+            return float("inf")
+        return float(value)
+
+    def _is_better_track_metric(
+        self,
+        candidate: dict[str, Any],
+        current: dict[str, Any],
+    ) -> bool:
+        candidate_near = int(candidate.get("handNearFrameCount", 0) or 0)
+        current_near = int(current.get("handNearFrameCount", 0) or 0)
+        if candidate_near != current_near:
+            return candidate_near > current_near
+
+        candidate_ratio = float(candidate.get("handNearVoteRatio", 0.0) or 0.0)
+        current_ratio = float(current.get("handNearVoteRatio", 0.0) or 0.0)
+        if candidate_ratio != current_ratio:
+            return candidate_ratio > current_ratio
+
+        return self._metric_distance(candidate) < self._metric_distance(current)
+
+    def _product_interaction_metrics_for_track(
+        self,
+        track: HandTrack,
+        history: ProductBboxHistory,
+    ) -> dict[str, Any]:
         near_count = 0
         min_distance: Optional[float] = None
         for center, frame_idx, product_size in zip(
@@ -323,7 +450,10 @@ class HandPathTracker:
             history.bbox_sizes,
         ):
             product_near = False
-            for hand_center, hand_size in self._hand_points_near_frame(frame_idx):
+            for hand_center, hand_size in self._hand_points_near_frame(
+                track,
+                frame_idx,
+            ):
                 distance = self._center_distance(center, hand_center)
                 min_distance = (
                     distance
@@ -356,6 +486,10 @@ class HandPathTracker:
             "minHandDistancePx": (
                 round(float(min_distance), 1) if min_distance is not None else None
             ),
+            "handTrackId": int(track.track_id),
+            "handTrackCount": len(self._hand_tracks),
+            "validHandTrackCount": len(self._valid_hand_tracks()),
+            "handTrackNearFrameCount": int(near_count),
         }
 
     def hand_interaction_metrics(
@@ -368,6 +502,8 @@ class HandPathTracker:
             candidates = list(self._product_histories.keys())
 
         path_valid = self.has_valid_hand_path()
+        hand_track_count = len(self._hand_tracks)
+        valid_hand_track_count = len(self._valid_hand_tracks())
         metrics: Dict[int, dict[str, Any]] = {}
         for class_id in candidates:
             payload = {
@@ -377,6 +513,10 @@ class HandPathTracker:
                 "handNearFrameCount": 0,
                 "handNearVoteRatio": 0.0,
                 "minHandDistancePx": None,
+                "handTrackId": None,
+                "handTrackCount": hand_track_count,
+                "validHandTrackCount": valid_hand_track_count,
+                "handTrackNearFrameCount": 0,
             }
             if path_valid:
                 payload.update(
@@ -394,6 +534,9 @@ class HandPathTracker:
         Returns:
             손 경로가 유효하면 True
         """
+        if self._hand_tracks:
+            return any(self._track_is_valid(track) for track in self._hand_tracks)
+
         trajectory = self._current_trajectory
 
         # 최소 감지 횟수 체크
@@ -424,18 +567,19 @@ class HandPathTracker:
             logger.info(
                 f"[HAND_PATH] 유효한 손 경로 없음 "
                 f"(detections={len(self._current_trajectory.centers)}, "
-                f"path_length={self._current_trajectory.get_path_length():.1f}px), "
+                f"tracks={len(self._hand_tracks)}, "
+                f"max_path_length={self._max_track_path_length():.1f}px), "
                 f"필터링 스킵"
             )
             if candidate_class_ids is not None:
                 return candidate_class_ids
             return list(self._product_histories.keys())
 
-        trajectory = self._current_trajectory
         logger.info(
             f"[HAND_PATH] 손 경로 유효: "
-            f"detections={len(trajectory.centers)}, "
-            f"path_length={trajectory.get_path_length():.1f}px"
+            f"tracks={len(self._hand_tracks)}, "
+            f"valid_tracks={len(self._valid_hand_tracks())}, "
+            f"max_path_length={self._max_track_path_length():.1f}px"
         )
 
         # 후보 결정
@@ -510,12 +654,15 @@ class HandPathTracker:
     def get_stats(self) -> dict:
         """통계 정보 반환."""
         trajectory = self._current_trajectory
+        valid_tracks = self._valid_hand_tracks()
         return {
             "frame_count": self._frame_count,
             "hand_detections": len(trajectory.centers),
-            "hand_path_length": trajectory.get_path_length(),
+            "hand_path_length": self._max_track_path_length(),
             "hand_path_valid": self.has_valid_hand_path(),
             "hand_path_valid_upper_roi": self.hand_path_valid_upper_roi,
+            "hand_track_count": len(self._hand_tracks),
+            "valid_hand_track_count": len(valid_tracks),
             "roi_y_split": self.roi_y_split,
             "roi_vertical_region": self.roi_vertical_region,
             "product_classes": len(self._product_histories),
@@ -525,5 +672,7 @@ class HandPathTracker:
     def clear(self) -> None:
         """상태 초기화."""
         self._current_trajectory = HandTrajectory()
+        self._hand_tracks.clear()
+        self._next_track_id = 1
         self._product_histories.clear()
         self._frame_count = 0

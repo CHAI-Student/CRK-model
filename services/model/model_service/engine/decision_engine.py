@@ -703,6 +703,12 @@ class ProductDecisionEngine:
                 "handNearFrameCount": interaction_evidence["handNearFrameCount"],
                 "handNearVoteRatio": interaction_evidence["handNearVoteRatio"],
                 "minHandDistancePx": interaction_evidence["minHandDistancePx"],
+                "handTrackId": interaction_evidence["handTrackId"],
+                "handTrackCount": interaction_evidence["handTrackCount"],
+                "validHandTrackCount": interaction_evidence["validHandTrackCount"],
+                "handTrackNearFrameCount": interaction_evidence[
+                    "handTrackNearFrameCount"
+                ],
                 "interactionPenalty": interaction_evidence["interactionPenalty"],
                 "multiItemTraceEvidence": has_multi_item_trace_evidence,
                 "instance_count_hint": max(
@@ -2403,6 +2409,26 @@ class ProductDecisionEngine:
             "handNearVoteRatio",
             "hand_near_vote_ratio",
         )
+        hand_track_id = cls._freezer_stage_int(
+            stage_entry,
+            "handTrackId",
+            "hand_track_id",
+        )
+        hand_track_count = cls._freezer_stage_int(
+            stage_entry,
+            "handTrackCount",
+            "hand_track_count",
+        )
+        valid_hand_track_count = cls._freezer_stage_int(
+            stage_entry,
+            "validHandTrackCount",
+            "valid_hand_track_count",
+        )
+        hand_track_near_frame_count = cls._freezer_stage_int(
+            stage_entry,
+            "handTrackNearFrameCount",
+            "hand_track_near_frame_count",
+        )
         min_hand_distance = cls._freezer_stage_float(
             stage_entry,
             "minHandDistancePx",
@@ -2462,6 +2488,10 @@ class ProductDecisionEngine:
                 if min_hand_distance > 0.0
                 else None
             ),
+            "handTrackId": int(hand_track_id) if hand_track_id > 0 else None,
+            "handTrackCount": int(hand_track_count),
+            "validHandTrackCount": int(valid_hand_track_count),
+            "handTrackNearFrameCount": int(hand_track_near_frame_count),
             "interactionPenalty": interaction_penalty,
             "handPathHardReject": hand_path_hard_reject,
         }
@@ -3035,6 +3065,12 @@ class ProductDecisionEngine:
                 "handPathBlocked": bool(interaction.get("handPathBlocked")),
                 "handInteractionPassed": bool(
                     interaction.get("handInteractionPassed")
+                ),
+                "handTrackId": interaction.get("handTrackId"),
+                "handTrackCount": interaction.get("handTrackCount"),
+                "validHandTrackCount": interaction.get("validHandTrackCount"),
+                "handTrackNearFrameCount": interaction.get(
+                    "handTrackNearFrameCount"
                 ),
                 **target_payload(best_target, best_residual),
             }

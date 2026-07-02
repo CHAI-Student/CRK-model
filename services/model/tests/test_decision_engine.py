@@ -285,6 +285,10 @@ def make_freezer_channel_stage_evidence(
     static_shelf: bool = False,
     path_displacement: float | None = 60.0,
     motion_threshold: float = 12.0,
+    hand_track_id: int | None = None,
+    hand_track_count: int = 0,
+    valid_hand_track_count: int = 0,
+    hand_track_near_frame_count: int = 0,
 ) -> dict:
     top_confidence = top_confidence or confidence
     side_confidence = side_confidence or 0.0
@@ -341,6 +345,15 @@ def make_freezer_channel_stage_evidence(
         "handPathValidUpperRoi": hand_path_passed or hand_path_blocked,
         "cameras": cameras,
     }
+    if hand_track_id is not None:
+        entry.update(
+            {
+                "handTrackId": hand_track_id,
+                "handTrackCount": hand_track_count,
+                "validHandTrackCount": valid_hand_track_count,
+                "handTrackNearFrameCount": hand_track_near_frame_count,
+            }
+        )
     if path_displacement is not None:
         entry.update(
             {
@@ -1834,6 +1847,10 @@ def test_freezer_channel_target_stage_rescue_selects_lala_without_final_candidat
             trajectory_passed=True,
             path_displacement=137.4,
             motion_threshold=14.2,
+            hand_track_id=3,
+            hand_track_count=2,
+            valid_hand_track_count=1,
+            hand_track_near_frame_count=4,
         )
     }
     engine = ProductDecisionEngine(strict_mode=True)
@@ -1868,6 +1885,10 @@ def test_freezer_channel_target_stage_rescue_selects_lala_without_final_candidat
     selected = diagnostics["selected"][0]
     assert selected["source"] == "freezer_channel_weight_stage_rescue"
     assert selected["relaxedExitPathPassed"] is True
+    assert selected["handTrackId"] == 3
+    assert selected["handTrackCount"] == 2
+    assert selected["validHandTrackCount"] == 1
+    assert selected["handTrackNearFrameCount"] == 4
     assert diagnostics["channelWeightStageRescueCandidates"][0]["class_id"] == 46
 
 

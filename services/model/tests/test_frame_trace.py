@@ -544,6 +544,10 @@ def test_frame_trace_records_freezer_interaction_evidence(tmp_path):
         hand_path_valid=True,
         hand_path_passed=False,
         hand_path_blocked=True,
+        hand_track_id=7,
+        hand_track_count=2,
+        valid_hand_track_count=1,
+        hand_track_near_frame_count=0,
     )
     trace_context.finalize(status="complete")
 
@@ -558,6 +562,10 @@ def test_frame_trace_records_freezer_interaction_evidence(tmp_path):
     assert entry["handPathValid"] is True
     assert entry["handPathPassed"] is False
     assert entry["handPathBlocked"] is True
+    assert entry["handTrackId"] == 7
+    assert entry["handTrackCount"] == 2
+    assert entry["validHandTrackCount"] == 1
+    assert entry["handTrackNearFrameCount"] == 0
 
 
 def test_video_processor_process_videos_records_trace_samples(monkeypatch, tmp_path):

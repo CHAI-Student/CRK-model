@@ -1144,6 +1144,26 @@ class VideoProcessor:
             "handNearVoteRatio",
             "hand_near_vote_ratio",
         )
+        hand_track_id = cls._freezer_stage_int(
+            stage_entry,
+            "handTrackId",
+            "hand_track_id",
+        )
+        hand_track_count = cls._freezer_stage_int(
+            stage_entry,
+            "handTrackCount",
+            "hand_track_count",
+        )
+        valid_hand_track_count = cls._freezer_stage_int(
+            stage_entry,
+            "validHandTrackCount",
+            "valid_hand_track_count",
+        )
+        hand_track_near_frame_count = cls._freezer_stage_int(
+            stage_entry,
+            "handTrackNearFrameCount",
+            "hand_track_near_frame_count",
+        )
         min_hand_distance_values = [
             cls._freezer_stage_float(
                 stage_entry,
@@ -1204,6 +1224,10 @@ class VideoProcessor:
                 if min_hand_distance > 0.0
                 else None
             ),
+            "handTrackId": int(hand_track_id) if hand_track_id > 0 else None,
+            "handTrackCount": int(hand_track_count),
+            "validHandTrackCount": int(valid_hand_track_count),
+            "handTrackNearFrameCount": int(hand_track_near_frame_count),
             "interactionPenalty": interaction_penalty,
             "handPathHardReject": hand_path_hard_reject,
         }
@@ -1631,6 +1655,12 @@ class VideoProcessor:
                 "handNearFrameCount": interaction_payload.get("handNearFrameCount"),
                 "handNearVoteRatio": interaction_payload.get("handNearVoteRatio"),
                 "minHandDistancePx": interaction_payload.get("minHandDistancePx"),
+                "handTrackId": interaction_payload.get("handTrackId"),
+                "handTrackCount": interaction_payload.get("handTrackCount"),
+                "validHandTrackCount": interaction_payload.get("validHandTrackCount"),
+                "handTrackNearFrameCount": interaction_payload.get(
+                    "handTrackNearFrameCount"
+                ),
                 "interactionPenalty": bool(
                     interaction_payload.get("interactionPenalty")
                 ),
@@ -2106,6 +2136,12 @@ class VideoProcessor:
             hand_path_valid_upper_roi=metrics.get(
                 "handPathValidUpperRoi",
                 hand_path_valid,
+            ),
+            hand_track_id=metrics.get("handTrackId"),
+            hand_track_count=int(metrics.get("handTrackCount", 0) or 0),
+            valid_hand_track_count=int(metrics.get("validHandTrackCount", 0) or 0),
+            hand_track_near_frame_count=int(
+                metrics.get("handTrackNearFrameCount", 0) or 0
             ),
         )
 

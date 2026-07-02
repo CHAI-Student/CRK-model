@@ -410,6 +410,10 @@ class TriggerTraceContext:
         hand_near_vote_ratio: float = 0.0,
         min_hand_distance_px: Optional[float] = None,
         hand_path_valid_upper_roi: Optional[bool] = None,
+        hand_track_id: Optional[int] = None,
+        hand_track_count: int = 0,
+        valid_hand_track_count: int = 0,
+        hand_track_near_frame_count: int = 0,
     ) -> None:
         key = str(class_id)
         entry = self.stage_counts_by_class.setdefault(
@@ -440,6 +444,10 @@ class TriggerTraceContext:
                 if hand_path_valid_upper_roi is not None
                 else bool(hand_path_valid)
             ),
+            "handTrackId": int(hand_track_id) if hand_track_id is not None else None,
+            "handTrackCount": int(hand_track_count),
+            "validHandTrackCount": int(valid_hand_track_count),
+            "handTrackNearFrameCount": int(hand_track_near_frame_count),
         }
         camera_counts.update(payload)
         entry["handPathValid"] = bool(entry.get("handPathValid")) or bool(
@@ -462,6 +470,20 @@ class TriggerTraceContext:
             float(entry.get("handNearVoteRatio", 0.0) or 0.0),
             float(hand_near_vote_ratio),
         )
+        entry["handTrackCount"] = max(
+            int(entry.get("handTrackCount", 0) or 0),
+            int(hand_track_count),
+        )
+        entry["validHandTrackCount"] = max(
+            int(entry.get("validHandTrackCount", 0) or 0),
+            int(valid_hand_track_count),
+        )
+        entry["handTrackNearFrameCount"] = max(
+            int(entry.get("handTrackNearFrameCount", 0) or 0),
+            int(hand_track_near_frame_count),
+        )
+        if hand_track_id is not None:
+            entry["handTrackId"] = int(hand_track_id)
         if min_hand_distance_px is not None:
             current_distance = entry.get("minHandDistancePx")
             entry["minHandDistancePx"] = (
@@ -1026,6 +1048,19 @@ class TriggerTraceContext:
             "handPathValidUpperRoi": raw.get(
                 "handPathValidUpperRoi",
                 raw.get("hand_path_valid_upper_roi"),
+            ),
+            "handTrackId": raw.get("handTrackId", raw.get("hand_track_id")),
+            "handTrackCount": raw.get(
+                "handTrackCount",
+                raw.get("hand_track_count"),
+            ),
+            "validHandTrackCount": raw.get(
+                "validHandTrackCount",
+                raw.get("valid_hand_track_count"),
+            ),
+            "handTrackNearFrameCount": raw.get(
+                "handTrackNearFrameCount",
+                raw.get("hand_track_near_frame_count"),
             ),
             "instance_count_hint": raw.get(
                 "instance_count_hint",

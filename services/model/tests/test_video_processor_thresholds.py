@@ -1134,6 +1134,99 @@ def test_hand_path_tracker_upper_roi_keeps_hand_near_product() -> None:
     assert tracker.filter_products_by_path([52, 53]) == [52]
 
 
+def test_hand_path_tracker_tracks_two_hands_independently() -> None:
+    from model_service.vision.hand_path_tracker import HandPathTracker
+
+    tracker = HandPathTracker(
+        min_hand_detections=2,
+        min_path_length=5.0,
+        max_distance_px=80.0,
+        frame_window=1,
+    )
+    for frame_idx, offset in enumerate((0.0, 20.0, 40.0)):
+        tracker.update_frame(
+            [
+                YOLODetection(
+                    xyxy=(40.0 + offset, 80.0, 80.0 + offset, 120.0),
+                    cls=0,
+                    conf=0.9,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(300.0 + offset, 80.0, 340.0 + offset, 120.0),
+                    cls=0,
+                    conf=0.9,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(48.0 + offset, 88.0, 98.0 + offset, 138.0),
+                    cls=52,
+                    conf=0.9,
+                    name="LEFT_PRODUCT",
+                ),
+                YOLODetection(
+                    xyxy=(308.0 + offset, 88.0, 358.0 + offset, 138.0),
+                    cls=53,
+                    conf=0.9,
+                    name="RIGHT_PRODUCT",
+                ),
+            ],
+            frame_idx,
+        )
+
+    metrics = tracker.hand_interaction_metrics([52, 53])
+
+    assert tracker.has_valid_hand_path() is True
+    assert tracker.get_stats()["hand_track_count"] == 2
+    assert metrics[52]["handInteractionPassed"] is True
+    assert metrics[53]["handInteractionPassed"] is True
+    assert metrics[52]["handTrackId"] != metrics[53]["handTrackId"]
+    assert tracker.filter_products_by_path([52, 53]) == [52, 53]
+
+
+def test_hand_path_tracker_does_not_merge_moving_and_static_hands() -> None:
+    from model_service.vision.hand_path_tracker import HandPathTracker
+
+    tracker = HandPathTracker(
+        min_hand_detections=2,
+        min_path_length=30.0,
+        max_distance_px=80.0,
+        frame_window=1,
+    )
+    for frame_idx, moving_offset in enumerate((0.0, 40.0, 80.0)):
+        tracker.update_frame(
+            [
+                YOLODetection(
+                    xyxy=(40.0 + moving_offset, 80.0, 80.0 + moving_offset, 120.0),
+                    cls=0,
+                    conf=0.9,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(300.0, 80.0, 340.0, 120.0),
+                    cls=0,
+                    conf=0.9,
+                    name="hand",
+                ),
+                YOLODetection(
+                    xyxy=(308.0, 88.0, 358.0, 138.0),
+                    cls=52,
+                    conf=0.9,
+                    name="STATIC_HAND_NEAR_PRODUCT",
+                ),
+            ],
+            frame_idx,
+        )
+
+    metrics = tracker.hand_interaction_metrics([52])[52]
+
+    assert tracker.has_valid_hand_path() is True
+    assert tracker.get_stats()["hand_track_count"] == 2
+    assert metrics["validHandTrackCount"] == 1
+    assert metrics["handInteractionPassed"] is False
+    assert tracker.filter_products_by_path([52]) == []
+
+
 def test_video_processor_freezer_ignores_top_side_hands_for_hand_path_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
