@@ -1,0 +1,1236 @@
+{
+  "timestamp": "2026-07-02T14:45:25.404180",
+  "session_id": "zone_2_260702_144517_930810",
+  "zone": 2,
+  "status": "complete",
+  "video_paths": {
+    "top": "/home/chai/Desktop/Codes/Edge_Environment/20260702_144511/inference/zone_2/2026-07-02_05-45-13/top.avi",
+    "side": "/home/chai/Desktop/Codes/Edge_Environment/20260702_144511/inference/zone_2/2026-07-02_05-45-13/side.avi"
+  },
+  "camera_layout": "dual_top_proxy",
+  "camera_roles": {
+    "top": {
+      "logical_role": "top",
+      "physical_role": "top_middle",
+      "processing_profile": "top"
+    },
+    "side": {
+      "logical_role": "side",
+      "physical_role": "top_side",
+      "processing_profile": "top"
+    }
+  },
+  "loadcell": {
+    "delta_weight": -71.5,
+    "sample_count": 48,
+    "raw_state": "nonzero",
+    "raw_channel_count": 96,
+    "raw_parsed_channel_count": 96,
+    "raw_invalid_channel_count": 0,
+    "raw_zero_channel_count": 0,
+    "raw_nonzero_channel_count": 96,
+    "first_raw_values": [
+      "+00206",
+      "+00098"
+    ],
+    "last_raw_values": [
+      "+00136",
+      "+00098"
+    ],
+    "first_raw_total": 304.0,
+    "last_raw_total": 234.0,
+    "filtered_state": "nonzero",
+    "filtered_channel_count": 96,
+    "filtered_parsed_channel_count": 96,
+    "filtered_invalid_channel_count": 0,
+    "filtered_zero_channel_count": 0,
+    "filtered_nonzero_channel_count": 96,
+    "first_filtered_values": [
+      "+00206",
+      "+00098"
+    ],
+    "last_filtered_values": [
+      "+00136",
+      "+00098"
+    ],
+    "first_filtered_total": 304.0,
+    "last_filtered_total": 234.0,
+    "payload_state": "nonzero",
+    "cabinet_type": "freezer",
+    "loadcell_scope": "zone",
+    "loadcell_source": "loadcells",
+    "requested_zone": 2,
+    "effective_channel_count": 2,
+    "loadcell_validation_reason": null,
+    "parsed_sample_count": 48,
+    "working_sample_count": 48,
+    "reason": "stable_regions",
+    "net_delta_weight": -71.5,
+    "decision_delta_weight": -71.5,
+    "decision_delta_reliable": true,
+    "stable_delta_source": "confirmed_stable_plateaus",
+    "baseline_stable_avg": 308.0,
+    "final_stable_avg": 236.5,
+    "trailing_unstable_sample_count": 0,
+    "raw_simple_delta": -70.0,
+    "raw_extreme_delta": -100.0,
+    "endpoint_delta_weight": -70.0,
+    "endpoint_fallback_applied": false,
+    "endpoint_fallback_reason": "already_has_chargeable_decision_delta",
+    "stable_plateaus": [
+      {
+        "start_index": 0,
+        "end_index": 11,
+        "start_timestamp": "2026-07-02T05:45:12.999119Z",
+        "end_timestamp": "2026-07-02T05:45:14.117718Z",
+        "avg": 308.0,
+        "samples": 40
+      },
+      {
+        "start_index": 8,
+        "end_index": 16,
+        "start_timestamp": "2026-07-02T05:45:13.807190Z",
+        "end_timestamp": "2026-07-02T05:45:14.629207Z",
+        "avg": 332.2,
+        "samples": 25
+      },
+      {
+        "start_index": 17,
+        "end_index": 47,
+        "start_timestamp": "2026-07-02T05:45:14.728852Z",
+        "end_timestamp": "2026-07-02T05:45:17.799490Z",
+        "avg": 236.5,
+        "samples": 135
+      }
+    ],
+    "purchase_delta_candidates": [
+      {
+        "source": "net_stable_delta",
+        "weight": 71.5,
+        "delta": -71.5,
+        "segment_indices": [],
+        "reason": "stable_start_end_net_removal"
+      }
+    ],
+    "removal_segment_targets": [],
+    "channel_removal_segment_targets": [],
+    "channel_movement_targets": [
+      {
+        "source": "stable_channel_delta",
+        "direction": "removal",
+        "weight": 74.8,
+        "delta": -74.8,
+        "segment_index": 0,
+        "segment_indices": [
+          0
+        ],
+        "channel_index": 0,
+        "channel_position": 0,
+        "channel_side": "left",
+        "reason": "channel_removal",
+        "start_timestamp": "2026-07-02T05:45:14.117718Z",
+        "end_timestamp": "2026-07-02T05:45:14.728852Z",
+        "duration_seconds": 0.0
+      }
+    ],
+    "channel_delta_diagnostics": {
+      "accepted": false,
+      "reason": "insufficient_negative_channels",
+      "net_delta": -71.5,
+      "tolerance": 5.0,
+      "negative_channel_count": 1,
+      "positive_channel_count": 0,
+      "channels": [
+        {
+          "channel_index": 0,
+          "start": 212.9,
+          "end": 138.1,
+          "delta": -74.8,
+          "abs_delta": 74.8
+        },
+        {
+          "channel_index": 1,
+          "start": 98.0,
+          "end": 98.8,
+          "delta": 0.8,
+          "abs_delta": 0.8
+        }
+      ]
+    },
+    "return_segment_targets": [],
+    "vision_required_segment_targets": [],
+    "paired_loadcell_movements": [],
+    "ignored_loadcell_movements": [],
+    "mixed_sign_net_masking_guard": {},
+    "pressure_like_event": false,
+    "compound_segments": [
+      {
+        "start_index": 11,
+        "end_index": 8,
+        "start_timestamp": "2026-07-02T05:45:14.117718Z",
+        "end_timestamp": "2026-07-02T05:45:13.807190Z",
+        "start_avg": 308.0,
+        "end_avg": 332.2,
+        "delta": 24.2,
+        "abs_delta": 24.2,
+        "sign": 1,
+        "duration_seconds": 0.0
+      },
+      {
+        "start_index": 16,
+        "end_index": 17,
+        "start_timestamp": "2026-07-02T05:45:14.629207Z",
+        "end_timestamp": "2026-07-02T05:45:14.728852Z",
+        "start_avg": 332.2,
+        "end_avg": 236.5,
+        "delta": -95.7,
+        "abs_delta": 95.7,
+        "sign": -1,
+        "duration_seconds": 0.1
+      }
+    ],
+    "compound_segment_count": 2,
+    "compound_event": true,
+    "compound_positive_segment_count": 1,
+    "compound_negative_segment_count": 1,
+    "compound_positive_weights_g": [
+      24.2
+    ],
+    "compound_negative_weights_g": [
+      95.7
+    ],
+    "recent_same_zone_window_seconds": 3.0,
+    "recent_same_zone_events": [],
+    "recent_return_weights_g": [],
+    "target_weight_abs": 71.5,
+    "strict_tolerance_g": 5.0,
+    "rescue_tolerance_g": 5.0
+  },
+  "cameras": {
+    "top": {
+      "video_path": "/home/chai/Desktop/Codes/Edge_Environment/20260702_144511/inference/zone_2/2026-07-02_05-45-13/top.avi",
+      "total_frames": 198,
+      "processed_frames": 99,
+      "sample_indices": [],
+      "sample_files": []
+    },
+    "side": {
+      "video_path": "/home/chai/Desktop/Codes/Edge_Environment/20260702_144511/inference/zone_2/2026-07-02_05-45-13/side.avi",
+      "total_frames": 197,
+      "processed_frames": 99,
+      "sample_indices": [],
+      "sample_files": []
+    }
+  },
+  "video_stats": {
+    "top_frames": 99,
+    "side_frames": 99,
+    "top_original_frames": 198,
+    "side_original_frames": 197,
+    "original_frames": 395,
+    "processed_frames": 198,
+    "skipped_frames": 197,
+    "frame_stride": 2,
+    "top_raw_detections": 340,
+    "side_raw_detections": 370,
+    "top_threshold_filtered": 335,
+    "side_threshold_filtered": 367,
+    "top_detections": 4,
+    "side_detections": 2,
+    "total_frames": 198,
+    "total_detections": 6,
+    "processing_time_ms": 7458.2,
+    "yolo_inference_count": 198,
+    "yolo_total_time_ms": 5887.8,
+    "yolo_avg_time_ms": 29.7,
+    "roi_filtered_detections": 2,
+    "side_roi_soft_passed_detections": 0,
+    "side_roi_soft_filtered_detections": 0,
+    "motion_filtered_classes": 3,
+    "hand_path_filtered_classes": 0
+  },
+  "vision_config": {
+    "yolo_model_path": "models/set9_doorfas_0323_imbal.engine",
+    "yolo_internal_conf_threshold": 0.01,
+    "cabinet_type": "freezer",
+    "camera_layout": "dual_top_proxy",
+    "camera_roles": {
+      "top": {
+        "logical_role": "top",
+        "physical_role": "top_middle",
+        "processing_profile": "top"
+      },
+      "side": {
+        "logical_role": "side",
+        "physical_role": "top_side",
+        "processing_profile": "top"
+      }
+    },
+    "freezer_handled_filter_enabled": true,
+    "top_confidence_threshold": 0.5,
+    "side_confidence_threshold": 0.5,
+    "hand_confidence_threshold": 0.4,
+    "hand_class_id": 0,
+    "top_k": 10,
+    "freezer_min_vote_ratio": 0.08,
+    "freezer_min_vote_count": 4,
+    "freezer_motion_min_displacement_px": 12.0,
+    "freezer_roi_vertical_region": "upper",
+    "freezer_roi_y_split": 240.0,
+    "freezer_lower_roi_y_split_legacy": 240.0,
+    "freezer_min_exit_path_votes": 3,
+    "freezer_confidence_tie_band": 0.08,
+    "freezer_multi_min_confidence": 0.45,
+    "freezer_vision_multi_without_weight_enabled": false,
+    "regular_threshold": {
+      "top": 0.5,
+      "side": 0.5
+    },
+    "top_crop_policy": "left",
+    "side_crop_policy": "left",
+    "top_roi_enabled": true,
+    "top_roi_y_split": 240.0,
+    "side_roi_x_max": 400.0,
+    "side_roi_soft_margin_px": 5.0,
+    "side_roi_soft_x_max": 405.0,
+    "ffmpeg_top_gamma": 1.1,
+    "ffmpeg_top_contrast": 1.1,
+    "ffmpeg_side_gamma": 1.0,
+    "ffmpeg_side_contrast": 1.0,
+    "async_frame_stride": 2,
+    "min_vote_ratio": 0.02,
+    "min_vote_count": 1,
+    "motion_min_displacement_px": 10.0,
+    "top_weight": 0.6,
+    "side_weight": 0.4,
+    "top_only_weight": 0.6,
+    "side_only_weight": 0.4,
+    "common_class_bonus": 0.2,
+    "diagnostic_all_class_trace": true,
+    "threshold_rescue_enabled": true,
+    "threshold_rescue_require_motion": true,
+    "weight_rescue_no_motion_enabled": true,
+    "weight_rescue_no_motion_min_raw_votes": 8,
+    "weight_rescue_no_motion_max_residual_grams": 2.0,
+    "rescue_tolerance_g": 5.0,
+    "detected_single_fallback_enabled": true,
+    "detected_single_fallback_tolerance_g": 8.0,
+    "detected_single_fallback_min_votes": 4
+  },
+  "raw_vision_candidates": [],
+  "candidates": [],
+  "preprocess": {
+    "top": {
+      "camera_type": "top",
+      "original_width": 640,
+      "original_height": 480,
+      "processed_width": 480,
+      "processed_height": 480,
+      "crop_policy": "left",
+      "crop_box": {
+        "x1": 0,
+        "y1": 0,
+        "x2": 480,
+        "y2": 480
+      }
+    },
+    "side": {
+      "camera_type": "side",
+      "original_width": 640,
+      "original_height": 480,
+      "processed_width": 480,
+      "processed_height": 480,
+      "crop_policy": "left",
+      "crop_box": {
+        "x1": 0,
+        "y1": 0,
+        "x2": 480,
+        "y2": 480
+      }
+    }
+  },
+  "stage_counts_by_class": {
+    "24": {
+      "class_id": 24,
+      "name": "BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+      "cameras": {
+        "top": {
+          "raw": 134,
+          "raw_max_confidence": 0.4719,
+          "threshold_filtered": 134,
+          "threshold_filtered_max_confidence": 0.4719
+        },
+        "side": {
+          "raw": 89,
+          "raw_max_confidence": 0.5163,
+          "threshold_filtered": 88,
+          "threshold_filtered_max_confidence": 0.4352,
+          "threshold_passed": 1,
+          "threshold_passed_max_confidence": 0.5163,
+          "freezer_roi_passed": 1,
+          "freezerExitPathVotes": 1,
+          "freezer_roi_passed_max_confidence": 0.5163,
+          "roi_x_min": 174.2,
+          "roi_x_max": 174.2,
+          "roi_x_sum": 174.2,
+          "roi_x_count": 1,
+          "roi_x_avg": 174.2,
+          "roi_y_min": 116.7,
+          "roi_y_max": 116.7,
+          "roi_y_sum": 116.7,
+          "roi_y_count": 1,
+          "roi_y_avg": 116.7,
+          "roi_y_limit": 240.0,
+          "roi_direction": "freezer_upper_half",
+          "motion_filtered": 1,
+          "pathDisplacementPx": 0.0,
+          "maxDistancePx": 0.0,
+          "centerSpanX": 0.0,
+          "centerSpanY": 0.0,
+          "motionThresholdPx": 34.8,
+          "trajectoryExitPathPassed": false,
+          "staticShelfLikely": false
+        }
+      },
+      "raw": 223,
+      "raw_max_confidence": 0.5163,
+      "threshold_filtered": 222,
+      "threshold_filtered_max_confidence": 0.4719,
+      "threshold_passed": 1,
+      "threshold_passed_max_confidence": 0.5163,
+      "freezer_roi_passed": 1,
+      "freezerExitPathVotes": 1,
+      "freezer_roi_passed_max_confidence": 0.5163,
+      "roi_x_min": 174.2,
+      "roi_x_max": 174.2,
+      "roi_x_sum": 174.2,
+      "roi_x_count": 1,
+      "roi_x_avg": 174.2,
+      "roi_y_min": 116.7,
+      "roi_y_max": 116.7,
+      "roi_y_sum": 116.7,
+      "roi_y_count": 1,
+      "roi_y_avg": 116.7,
+      "roi_y_limit": 240.0,
+      "roi_direction": "freezer_upper_half",
+      "freezer_roi_passed_samples": [
+        {
+          "camera": "side",
+          "center_x": 174.2,
+          "center_y": 116.7
+        }
+      ],
+      "motion_filtered": 1,
+      "pathDisplacementPx": 0.0,
+      "maxDistancePx": 0.0,
+      "centerSpanX": 0.0,
+      "centerSpanY": 0.0,
+      "motionThresholdPx": 34.8,
+      "trajectoryExitPathPassed": false,
+      "staticShelfLikely": false,
+      "unit_weight_g": 165.0,
+      "stock_qty": 73,
+      "weight_residual_g": 93.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 93.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "44": {
+      "class_id": 44,
+      "name": "STICK_BINGGRAE_MELONA_75ML",
+      "cameras": {
+        "top": {
+          "raw": 30,
+          "raw_max_confidence": 0.4664,
+          "threshold_filtered": 30,
+          "threshold_filtered_max_confidence": 0.4664
+        },
+        "side": {
+          "raw": 74,
+          "raw_max_confidence": 0.5044,
+          "threshold_filtered": 73,
+          "threshold_filtered_max_confidence": 0.4888,
+          "threshold_passed": 1,
+          "threshold_passed_max_confidence": 0.5044,
+          "freezer_roi_passed": 1,
+          "freezerExitPathVotes": 1,
+          "freezer_roi_passed_max_confidence": 0.5044,
+          "roi_x_min": 115.1,
+          "roi_x_max": 115.1,
+          "roi_x_sum": 115.1,
+          "roi_x_count": 1,
+          "roi_x_avg": 115.1,
+          "roi_y_min": 168.2,
+          "roi_y_max": 168.2,
+          "roi_y_sum": 168.2,
+          "roi_y_count": 1,
+          "roi_y_avg": 168.2,
+          "roi_y_limit": 240.0,
+          "roi_direction": "freezer_upper_half",
+          "motion_filtered": 1,
+          "pathDisplacementPx": 0.0,
+          "maxDistancePx": 0.0,
+          "centerSpanX": 0.0,
+          "centerSpanY": 0.0,
+          "motionThresholdPx": 12.0,
+          "trajectoryExitPathPassed": false,
+          "staticShelfLikely": false
+        }
+      },
+      "raw": 104,
+      "raw_max_confidence": 0.5044,
+      "threshold_filtered": 103,
+      "threshold_filtered_max_confidence": 0.4888,
+      "threshold_passed": 1,
+      "threshold_passed_max_confidence": 0.5044,
+      "freezer_roi_passed": 1,
+      "freezerExitPathVotes": 1,
+      "freezer_roi_passed_max_confidence": 0.5044,
+      "roi_x_min": 115.1,
+      "roi_x_max": 115.1,
+      "roi_x_sum": 115.1,
+      "roi_x_count": 1,
+      "roi_x_avg": 115.1,
+      "roi_y_min": 168.2,
+      "roi_y_max": 168.2,
+      "roi_y_sum": 168.2,
+      "roi_y_count": 1,
+      "roi_y_avg": 168.2,
+      "roi_y_limit": 240.0,
+      "roi_direction": "freezer_upper_half",
+      "freezer_roi_passed_samples": [
+        {
+          "camera": "side",
+          "center_x": 115.1,
+          "center_y": 168.2
+        }
+      ],
+      "motion_filtered": 1,
+      "pathDisplacementPx": 0.0,
+      "maxDistancePx": 0.0,
+      "centerSpanX": 0.0,
+      "centerSpanY": 0.0,
+      "motionThresholdPx": 12.0,
+      "trajectoryExitPathPassed": false,
+      "staticShelfLikely": false,
+      "unit_weight_g": 79.0,
+      "stock_qty": 34,
+      "weight_residual_g": 7.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 7.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "13": {
+      "class_id": 13,
+      "name": "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+      "cameras": {
+        "top": {
+          "raw": 71,
+          "raw_max_confidence": 0.7072,
+          "threshold_filtered": 69,
+          "threshold_filtered_max_confidence": 0.4734,
+          "threshold_passed": 2,
+          "threshold_passed_max_confidence": 0.7072,
+          "freezer_roi_passed": 2,
+          "freezerExitPathVotes": 2,
+          "freezer_roi_passed_max_confidence": 0.7072,
+          "roi_x_min": 79.4,
+          "roi_x_max": 84.3,
+          "roi_x_sum": 163.7,
+          "roi_x_count": 2,
+          "roi_x_avg": 81.8,
+          "roi_y_min": 158.6,
+          "roi_y_max": 170.8,
+          "roi_y_sum": 329.4,
+          "roi_y_count": 2,
+          "roi_y_avg": 164.7,
+          "roi_y_limit": 240.0,
+          "roi_direction": "freezer_upper_half",
+          "motion_filtered": 2,
+          "pathDisplacementPx": 13.2,
+          "maxDistancePx": 13.2,
+          "centerSpanX": 4.9,
+          "centerSpanY": 12.2,
+          "motionThresholdPx": 16.9,
+          "trajectoryExitPathPassed": false,
+          "staticShelfLikely": false
+        },
+        "side": {
+          "raw": 94,
+          "raw_max_confidence": 0.3975,
+          "threshold_filtered": 94,
+          "threshold_filtered_max_confidence": 0.3975
+        }
+      },
+      "raw": 165,
+      "raw_max_confidence": 0.7072,
+      "threshold_filtered": 163,
+      "threshold_filtered_max_confidence": 0.4734,
+      "threshold_passed": 2,
+      "threshold_passed_max_confidence": 0.7072,
+      "freezer_roi_passed": 2,
+      "freezerExitPathVotes": 2,
+      "freezer_roi_passed_max_confidence": 0.7072,
+      "roi_x_min": 79.4,
+      "roi_x_max": 84.3,
+      "roi_x_sum": 163.7,
+      "roi_x_count": 2,
+      "roi_x_avg": 81.8,
+      "roi_y_min": 158.6,
+      "roi_y_max": 170.8,
+      "roi_y_sum": 329.4,
+      "roi_y_count": 2,
+      "roi_y_avg": 164.7,
+      "roi_y_limit": 240.0,
+      "roi_direction": "freezer_upper_half",
+      "freezer_roi_passed_samples": [
+        {
+          "camera": "top",
+          "center_x": 79.4,
+          "center_y": 170.8
+        },
+        {
+          "camera": "top",
+          "center_x": 84.3,
+          "center_y": 158.6
+        }
+      ],
+      "motion_filtered": 2,
+      "pathDisplacementPx": 13.2,
+      "maxDistancePx": 13.2,
+      "centerSpanX": 4.9,
+      "centerSpanY": 12.2,
+      "motionThresholdPx": 16.9,
+      "trajectoryExitPathPassed": false,
+      "staticShelfLikely": false,
+      "unit_weight_g": 189.0,
+      "stock_qty": 70,
+      "weight_residual_g": 117.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 117.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "3": {
+      "class_id": 3,
+      "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+      "cameras": {
+        "top": {
+          "raw": 26,
+          "raw_max_confidence": 0.3605,
+          "threshold_filtered": 26,
+          "threshold_filtered_max_confidence": 0.3605
+        },
+        "side": {
+          "raw": 44,
+          "raw_max_confidence": 0.2295,
+          "threshold_filtered": 44,
+          "threshold_filtered_max_confidence": 0.2295
+        }
+      },
+      "raw": 70,
+      "raw_max_confidence": 0.3605,
+      "threshold_filtered": 70,
+      "threshold_filtered_max_confidence": 0.3605,
+      "unit_weight_g": 224.0,
+      "stock_qty": 63,
+      "weight_residual_g": 152.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 152.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "46": {
+      "class_id": 46,
+      "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+      "cameras": {
+        "top": {
+          "raw": 32,
+          "raw_max_confidence": 0.697,
+          "threshold_filtered": 29,
+          "threshold_filtered_max_confidence": 0.2164,
+          "threshold_passed": 3,
+          "threshold_passed_max_confidence": 0.697,
+          "freezer_roi_filtered": 1,
+          "freezerRoiFilteredVotes": 1,
+          "freezer_roi_filtered_max_confidence": 0.697,
+          "roi_x_min": 437.9,
+          "roi_x_max": 454.1,
+          "roi_x_sum": 1342.5,
+          "roi_x_count": 3,
+          "roi_x_avg": 447.5,
+          "roi_y_min": 37.6,
+          "roi_y_max": 371.6,
+          "roi_y_sum": 583.6,
+          "roi_y_count": 3,
+          "roi_y_avg": 194.5,
+          "roi_y_limit": 240.0,
+          "roi_direction": "freezer_upper_half",
+          "freezer_roi_passed": 2,
+          "freezerExitPathVotes": 2,
+          "freezer_roi_passed_max_confidence": 0.6457,
+          "motion_passed": 2,
+          "pathDisplacementPx": 137.4,
+          "maxDistancePx": 137.4,
+          "centerSpanX": 12.6,
+          "centerSpanY": 136.8,
+          "motionThresholdPx": 14.2,
+          "trajectoryExitPathPassed": true,
+          "staticShelfLikely": false,
+          "handPathValid": true,
+          "handPathPassed": true,
+          "handPathBlocked": false,
+          "handInteractionPassed": true,
+          "handNearFrameCount": 26,
+          "handNearVoteRatio": 0.9286,
+          "minHandDistancePx": 8.9,
+          "handPathValidUpperRoi": true,
+          "hand_path_passed": 1
+        },
+        "side": {
+          "raw": 17,
+          "raw_max_confidence": 0.6229,
+          "threshold_filtered": 16,
+          "threshold_filtered_max_confidence": 0.3543,
+          "threshold_passed": 1,
+          "threshold_passed_max_confidence": 0.6229,
+          "freezer_roi_filtered": 1,
+          "freezerRoiFilteredVotes": 1,
+          "freezer_roi_filtered_max_confidence": 0.6229,
+          "roi_x_min": 458.3,
+          "roi_x_max": 458.3,
+          "roi_x_sum": 458.3,
+          "roi_x_count": 1,
+          "roi_x_avg": 458.3,
+          "roi_y_min": 355.8,
+          "roi_y_max": 355.8,
+          "roi_y_sum": 355.8,
+          "roi_y_count": 1,
+          "roi_y_avg": 355.8,
+          "roi_y_limit": 240.0,
+          "roi_direction": "freezer_upper_half"
+        }
+      },
+      "raw": 49,
+      "raw_max_confidence": 0.697,
+      "threshold_filtered": 45,
+      "threshold_filtered_max_confidence": 0.3543,
+      "threshold_passed": 4,
+      "threshold_passed_max_confidence": 0.697,
+      "freezer_roi_filtered": 2,
+      "freezerRoiFilteredVotes": 2,
+      "freezer_roi_filtered_max_confidence": 0.697,
+      "roi_x_min": 437.9,
+      "roi_x_max": 458.3,
+      "roi_x_sum": 1800.8,
+      "roi_x_count": 4,
+      "roi_x_avg": 450.2,
+      "roi_y_min": 37.6,
+      "roi_y_max": 371.6,
+      "roi_y_sum": 939.4,
+      "roi_y_count": 4,
+      "roi_y_avg": 234.8,
+      "roi_y_limit": 240.0,
+      "roi_direction": "freezer_upper_half",
+      "freezer_roi_filtered_samples": [
+        {
+          "camera": "top",
+          "center_x": 454.1,
+          "center_y": 371.6
+        },
+        {
+          "camera": "side",
+          "center_x": 458.3,
+          "center_y": 355.8
+        }
+      ],
+      "freezer_roi_passed": 2,
+      "freezerExitPathVotes": 2,
+      "freezer_roi_passed_max_confidence": 0.6457,
+      "freezer_roi_passed_samples": [
+        {
+          "camera": "top",
+          "center_x": 450.5,
+          "center_y": 174.4
+        },
+        {
+          "camera": "top",
+          "center_x": 437.9,
+          "center_y": 37.6
+        }
+      ],
+      "motion_passed": 2,
+      "pathDisplacementPx": 137.4,
+      "maxDistancePx": 137.4,
+      "centerSpanX": 12.6,
+      "centerSpanY": 136.8,
+      "motionThresholdPx": 14.2,
+      "trajectoryExitPathPassed": true,
+      "staticShelfLikely": false,
+      "handPathValid": true,
+      "handPathPassed": true,
+      "handInteractionPassed": true,
+      "handPathValidUpperRoi": true,
+      "handNearFrameCount": 26,
+      "handNearVoteRatio": 0.9286,
+      "minHandDistancePx": 8.9,
+      "handPathBlocked": false,
+      "hand_path_passed": 1,
+      "unit_weight_g": 71.0,
+      "stock_qty": 82,
+      "weight_residual_g": 0.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 0.5,
+      "strict_candidate_weight_mismatch": false,
+      "vision_seen_weight_rejected": false,
+      "weight_gate_passed": true
+    },
+    "27": {
+      "class_id": 27,
+      "name": "BAG_NULLDAM_BAGEL_140G",
+      "cameras": {
+        "top": {
+          "raw": 9,
+          "raw_max_confidence": 0.1114,
+          "threshold_filtered": 9,
+          "threshold_filtered_max_confidence": 0.1114
+        },
+        "side": {
+          "raw": 9,
+          "raw_max_confidence": 0.0928,
+          "threshold_filtered": 9,
+          "threshold_filtered_max_confidence": 0.0928
+        }
+      },
+      "raw": 18,
+      "raw_max_confidence": 0.1114,
+      "threshold_filtered": 18,
+      "threshold_filtered_max_confidence": 0.1114,
+      "unit_weight_g": 156.0,
+      "stock_qty": 65,
+      "weight_residual_g": 84.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 84.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "30": {
+      "class_id": 30,
+      "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+      "cameras": {
+        "side": {
+          "raw": 15,
+          "raw_max_confidence": 0.2224,
+          "threshold_filtered": 15,
+          "threshold_filtered_max_confidence": 0.2224
+        },
+        "top": {
+          "raw": 25,
+          "raw_max_confidence": 0.2211,
+          "threshold_filtered": 25,
+          "threshold_filtered_max_confidence": 0.2211
+        }
+      },
+      "raw": 40,
+      "raw_max_confidence": 0.2224,
+      "threshold_filtered": 40,
+      "threshold_filtered_max_confidence": 0.2224,
+      "unit_weight_g": 82.0,
+      "stock_qty": 75,
+      "weight_residual_g": 10.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 10.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "35": {
+      "class_id": 35,
+      "name": "BOX_LOTTE_WORLDCON_160ML",
+      "cameras": {
+        "top": {
+          "raw": 10,
+          "raw_max_confidence": 0.3773,
+          "threshold_filtered": 10,
+          "threshold_filtered_max_confidence": 0.3773
+        },
+        "side": {
+          "raw": 20,
+          "raw_max_confidence": 0.3353,
+          "threshold_filtered": 20,
+          "threshold_filtered_max_confidence": 0.3353
+        }
+      },
+      "raw": 30,
+      "raw_max_confidence": 0.3773,
+      "threshold_filtered": 30,
+      "threshold_filtered_max_confidence": 0.3773,
+      "unit_weight_g": 70.0,
+      "stock_qty": 41,
+      "weight_residual_g": 1.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 1.5,
+      "strict_candidate_weight_mismatch": false,
+      "vision_seen_weight_rejected": false,
+      "weight_gate_passed": true
+    },
+    "40": {
+      "class_id": 40,
+      "name": "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+      "cameras": {
+        "top": {
+          "raw": 1,
+          "raw_max_confidence": 0.0694,
+          "threshold_filtered": 1,
+          "threshold_filtered_max_confidence": 0.0694
+        },
+        "side": {
+          "raw": 2,
+          "raw_max_confidence": 0.06,
+          "threshold_filtered": 2,
+          "threshold_filtered_max_confidence": 0.06
+        }
+      },
+      "raw": 3,
+      "raw_max_confidence": 0.0694,
+      "threshold_filtered": 3,
+      "threshold_filtered_max_confidence": 0.0694,
+      "unit_weight_g": 131.0,
+      "stock_qty": 23,
+      "weight_residual_g": 59.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 59.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    },
+    "23": {
+      "class_id": 23,
+      "name": "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+      "cameras": {
+        "side": {
+          "raw": 6,
+          "raw_max_confidence": 0.0428,
+          "threshold_filtered": 6,
+          "threshold_filtered_max_confidence": 0.0428
+        },
+        "top": {
+          "raw": 2,
+          "raw_max_confidence": 0.0508,
+          "threshold_filtered": 2,
+          "threshold_filtered_max_confidence": 0.0508
+        }
+      },
+      "raw": 8,
+      "raw_max_confidence": 0.0508,
+      "threshold_filtered": 8,
+      "threshold_filtered_max_confidence": 0.0508,
+      "unit_weight_g": 176.0,
+      "stock_qty": 84,
+      "weight_residual_g": 104.5,
+      "delta_abs_g": 71.5,
+      "strict_tolerance_g": 5.0,
+      "rescue_tolerance_g": 5.0,
+      "rescue_weight_residual_g": 104.5,
+      "strict_candidate_weight_mismatch": true,
+      "vision_seen_weight_rejected": true,
+      "weight_gate_passed": false
+    }
+  },
+  "extractor_diagnostics": {
+    "top": {
+      "method": "async",
+      "expected_frames": 198,
+      "decoded_frames": 198,
+      "bytes_read": 182476800,
+      "partial_reads": 0,
+      "truncated_bytes": 0,
+      "ffmpeg_returncode": 0,
+      "stderr_tail": "",
+      "retry_used": false,
+      "final_branch": "async",
+      "decoder": "auto",
+      "ffprobe_attempts": 1,
+      "ffprobe_wait_ms": 212.3
+    },
+    "side": {
+      "method": "async",
+      "expected_frames": 197,
+      "decoded_frames": 197,
+      "bytes_read": 181555200,
+      "partial_reads": 0,
+      "truncated_bytes": 0,
+      "ffmpeg_returncode": 0,
+      "stderr_tail": "",
+      "retry_used": false,
+      "final_branch": "async",
+      "decoder": "auto",
+      "ffprobe_attempts": 1,
+      "ffprobe_wait_ms": 216.2
+    }
+  },
+  "diagnostic_candidates": [],
+  "threshold_rescue_candidates": [],
+  "roi_rescue_candidates": [],
+  "rescue_diagnostics": {
+    "threshold_rescue": {
+      "target_weight": 71.5,
+      "considered": 0,
+      "accepted": 0,
+      "rejections": {
+        "no_roi_votes": 0
+      },
+      "candidates": []
+    },
+    "roi_rescue": {
+      "target_weight": 71.5,
+      "considered": 0,
+      "accepted": 0,
+      "rejections": {
+        "no_roi_votes": 0
+      },
+      "candidates": []
+    }
+  },
+  "active_product_snapshot": [
+    {
+      "class_id": 3,
+      "name": "BAG_BIBIGO_CHEONGYANG_MEAT_DUMPLINGS_200G",
+      "stock_qty": 63,
+      "unit_weight_g": 224.0,
+      "unit_price": 3700,
+      "weight_residual_g": 152.5
+    },
+    {
+      "class_id": 13,
+      "name": "BAG_COOZROCK_JUICY_MEAT_DUMPLING_168G",
+      "stock_qty": 70,
+      "unit_weight_g": 189.0,
+      "unit_price": 2100,
+      "weight_residual_g": 117.5
+    },
+    {
+      "class_id": 23,
+      "name": "BAG_HANMAC_TRIPLE_CHEESE_HAMBURGER_155G",
+      "stock_qty": 84,
+      "unit_weight_g": 176.0,
+      "unit_price": 2700,
+      "weight_residual_g": 104.5
+    },
+    {
+      "class_id": 24,
+      "name": "BAG_JACKSONVILLE_BIG_HOT_DOG_115G",
+      "stock_qty": 73,
+      "unit_weight_g": 165.0,
+      "unit_price": 2200,
+      "weight_residual_g": 93.5
+    },
+    {
+      "class_id": 27,
+      "name": "BAG_NULLDAM_BAGEL_140G",
+      "stock_qty": 65,
+      "unit_weight_g": 156.0,
+      "unit_price": 2800,
+      "weight_residual_g": 84.5
+    },
+    {
+      "class_id": 30,
+      "name": "BOX_BINGGRAE_YOMAMTE_150ML",
+      "stock_qty": 75,
+      "unit_weight_g": 82.0,
+      "unit_price": 1500,
+      "weight_residual_g": 10.5
+    },
+    {
+      "class_id": 35,
+      "name": "BOX_LOTTE_WORLDCON_160ML",
+      "stock_qty": 41,
+      "unit_weight_g": 70.0,
+      "unit_price": 1400,
+      "weight_residual_g": 1.5
+    },
+    {
+      "class_id": 37,
+      "name": "BOX_SAJO_OLD_LUNCHBOX_JAJANGBAP_250G",
+      "stock_qty": 72,
+      "unit_weight_g": 309.0,
+      "unit_price": 6000,
+      "weight_residual_g": 237.5
+    },
+    {
+      "class_id": 40,
+      "name": "CUP_BASKIN_CHERRIES_JUBILEE_170ML",
+      "stock_qty": 23,
+      "unit_weight_g": 131.0,
+      "unit_price": 4000,
+      "weight_residual_g": 59.5
+    },
+    {
+      "class_id": 44,
+      "name": "STICK_BINGGRAE_MELONA_75ML",
+      "stock_qty": 34,
+      "unit_weight_g": 79.0,
+      "unit_price": 800,
+      "weight_residual_g": 7.5
+    },
+    {
+      "class_id": 46,
+      "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+      "stock_qty": 82,
+      "unit_weight_g": 71.0,
+      "unit_price": 500,
+      "weight_residual_g": 0.5
+    }
+  ],
+  "active_product_diagnostics": {
+    "active_products_count": 11,
+    "allowed_class_ids_count": 11,
+    "allowed_class_ids": [
+      3,
+      30,
+      46,
+      35,
+      40,
+      27,
+      37,
+      44,
+      24,
+      13,
+      23
+    ],
+    "stock_positive_products": 11,
+    "stock_positive_weight_products": 11,
+    "zero_stock_products": 0,
+    "zero_weight_products": 0,
+    "inference_fail_closed_reason": null,
+    "snapshot_source": "current",
+    "used_last_valid_snapshot": false,
+    "current_snapshot_present": true,
+    "last_valid_snapshot_present": true,
+    "last_valid_snapshot_expired": false,
+    "last_valid_age_seconds": 5.79,
+    "store_stats": {
+      "total_yolo_classes": 48,
+      "catalog_source_policy": "node_first",
+      "product_name_fallback_enabled": true,
+      "has_products": true,
+      "has_last_valid_snapshot": true,
+      "last_valid_age_seconds": 5.799,
+      "last_valid_ttl_seconds": 300.0,
+      "last_valid_expired": false,
+      "products_count": 11,
+      "allowed_classes_count": 11,
+      "zero_stock_products": 0,
+      "stock_positive_class_products": 11,
+      "stock_positive_weight_products": 11,
+      "weight_unavailable_products": 0,
+      "repaired_weight_products": 0,
+      "repaired_weight_diagnostics": [],
+      "unmapped_products": 0,
+      "unmapped_names": [],
+      "invalid_class_id_products": 0,
+      "invalid_class_ids": [],
+      "updated_at": 1782971112.142012
+    }
+  },
+  "weight_diagnostics": {
+    "mixed_return_segments": {
+      "accepted": false,
+      "decision_delta": -71.5,
+      "return_segment_targets": [],
+      "return_weight_hints": [],
+      "mixed_sign_net_masking_guard": {},
+      "reason": "no_unpaired_positive_segments_for_negative_trigger"
+    },
+    "freezer_candidate_filter": {
+      "cabinet_type": "freezer",
+      "camera_layout": "dual_top_proxy",
+      "freezer_handled_filter_enabled": true,
+      "raw_candidate_count": 0,
+      "handled_candidate_count": 0,
+      "target_weight": 71.5,
+      "top_k": 10,
+      "freezer_min_vote_ratio": 0.08,
+      "freezer_min_vote_count": 4,
+      "freezer_motion_min_displacement_px": 12.0,
+      "freezer_roi_vertical_region": "upper",
+      "freezer_roi_y_split": 240.0,
+      "freezer_lower_roi_y_split_legacy": 240.0,
+      "freezer_min_exit_path_votes": 3,
+      "freezer_vision_multi_without_weight_enabled": false,
+      "freezer_multi_min_confidence": 0.45,
+      "accepted": true,
+      "reason": "vision_identity_passthrough",
+      "targetWeight": 71.5,
+      "stage_only_candidate_count": 0,
+      "multiItemTraceEvidence": true,
+      "selectedClassIds": [],
+      "considered": [],
+      "rejectedInteractionCandidates": [],
+      "rejectedSourceCandidates": [],
+      "rejectedConfidenceCandidates": [],
+      "rejectedVoteFloorCandidates": []
+    },
+    "decision_branch": "freezer_vision_first",
+    "freezer_vision_first": {
+      "accepted": false,
+      "reason": "no_vision_candidates",
+      "target_weight": 71.5,
+      "rejectedRoiWeightRescueCandidates": [
+        {
+          "class_id": 46,
+          "name": "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+          "source": "freezer_roi_weight_rescue",
+          "reason": "roi_filtered_evidence_below_floor",
+          "filteredVotes": 2,
+          "confidence": 0.697,
+          "minVotes": 4
+        }
+      ]
+    },
+    "effective_count_guard": {
+      "accepted": false,
+      "raw_delta": -71.5,
+      "return_hint_total": 0.0,
+      "effective_delta": -71.5,
+      "expected_weight": 0.0,
+      "corrections": [],
+      "reason": "no_return_weight_hints"
+    }
+  },
+  "final_result": {
+    "status": "no_detection",
+    "confidence": 0.0,
+    "total_price": 0,
+    "products": []
+  },
+  "storage_result": {
+    "total_price": 0,
+    "products": []
+  }
+}

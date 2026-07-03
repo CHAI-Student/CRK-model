@@ -1404,6 +1404,265 @@ def test_freezer_dual_channel_targets_override_total_repeat_fit(monkeypatch):
     assert search["channelSelectionTotalResidualIgnored"] is True
 
 
+def test_freezer_dual_channel_defers_regular_to_better_channel_for_strict_rescue(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "simultaneous_channel_delta",
+                    "direction": "removal",
+                    "weight": 68.4,
+                    "delta": -68.4,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                },
+                {
+                    "source": "simultaneous_channel_delta",
+                    "direction": "removal",
+                    "weight": 75.8,
+                    "delta": -75.8,
+                    "channel_index": 1,
+                    "channel_position": 1,
+                    "channel_side": "right",
+                },
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "44": make_freezer_channel_stage_evidence(
+            class_id=44,
+            name="STICK_BINGGRAE_MELONA_75ML",
+            raw=321,
+            confidence=0.824,
+            top_confidence=0.824,
+            side_confidence=0.7537,
+            threshold_passed=34,
+            exit_path_votes=28,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=385.3,
+            motion_threshold=28.8,
+        ),
+        "30": make_freezer_channel_stage_evidence(
+            class_id=30,
+            name="BOX_BINGGRAE_YOMAMTE_150ML",
+            raw=73,
+            confidence=0.5694,
+            top_confidence=0.0788,
+            side_confidence=0.5694,
+            threshold_passed=73,
+            exit_path_votes=2,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=160.7,
+            motion_threshold=40.3,
+        ),
+        "46": make_freezer_channel_stage_evidence(
+            class_id=46,
+            name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            raw=239,
+            confidence=0.663,
+            top_confidence=0.6593,
+            side_confidence=0.663,
+            threshold_passed=5,
+            exit_path_votes=3,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=69.4,
+            motion_threshold=31.7,
+        ),
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                combined=0.8923,
+                top=0.824,
+                side=0.7537,
+                raw_vote_count=28,
+            )
+        ],
+        delta_weight=-144.1,
+        active_products=[
+            make_active_product(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                weight=79.0,
+                product_idx="P44",
+            ),
+            make_active_product(
+                30,
+                "BOX_BINGGRAE_YOMAMTE_150ML",
+                weight=82.0,
+                product_idx="P30",
+            ),
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                product_idx="P46",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {product.product_id: product.count for product in result.products} == {
+        44: 1,
+        46: 1,
+    }
+    placement_by_id = {
+        product.product_id: product.placement_units[0]
+        for product in result.products
+    }
+    assert placement_by_id[46]["channelSide"] == "left"
+    assert placement_by_id[44]["channelSide"] == "right"
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    selected_by_side = {
+        selected["channelSide"]: selected for selected in diagnostics["selected"]
+    }
+    assert selected_by_side["left"]["class_id"] == 46
+    assert selected_by_side["left"]["bestChannelDeferralApplied"] is True
+    assert selected_by_side["left"]["substituteClassId"] == 46
+    assert selected_by_side["right"]["class_id"] == 44
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["bestChannelDeferralApplied"] is True
+    deferred_attempt = next(
+        attempt
+        for attempt in search["attempts"]
+        if attempt["classId"] == 44 and attempt["channelSide"] == "left"
+    )
+    assert deferred_attempt["deferredToBetterChannel"] is True
+    assert deferred_attempt["betterChannelResidual"] == pytest.approx(3.2)
+    assert deferred_attempt["substituteClassId"] == 46
+
+
+def test_freezer_dual_channel_deferral_keeps_regular_without_strict_rescue(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = FakeLoadcellTrace(
+        {
+            "channel_movement_targets": [
+                {
+                    "source": "simultaneous_channel_delta",
+                    "direction": "removal",
+                    "weight": 68.4,
+                    "delta": -68.4,
+                    "channel_index": 0,
+                    "channel_position": 0,
+                    "channel_side": "left",
+                },
+                {
+                    "source": "simultaneous_channel_delta",
+                    "direction": "removal",
+                    "weight": 75.8,
+                    "delta": -75.8,
+                    "channel_index": 1,
+                    "channel_position": 1,
+                    "channel_side": "right",
+                },
+            ]
+        }
+    )
+    trace.stage_counts_by_class = {
+        "44": make_freezer_channel_stage_evidence(
+            class_id=44,
+            name="STICK_BINGGRAE_MELONA_75ML",
+            raw=321,
+            confidence=0.824,
+            top_confidence=0.824,
+            side_confidence=0.7537,
+            threshold_passed=34,
+            exit_path_votes=28,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=385.3,
+            motion_threshold=28.8,
+        ),
+        "30": make_freezer_channel_stage_evidence(
+            class_id=30,
+            name="BOX_BINGGRAE_YOMAMTE_150ML",
+            raw=73,
+            confidence=0.5694,
+            top_confidence=0.0788,
+            side_confidence=0.5694,
+            threshold_passed=73,
+            exit_path_votes=2,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=160.7,
+            motion_threshold=40.3,
+        ),
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[
+            make_freezer_candidate(
+                class_id=44,
+                name="STICK_BINGGRAE_MELONA_75ML",
+                combined=0.8923,
+                top=0.824,
+                side=0.7537,
+                raw_vote_count=28,
+            )
+        ],
+        delta_weight=-144.1,
+        active_products=[
+            make_active_product(
+                44,
+                "STICK_BINGGRAE_MELONA_75ML",
+                weight=79.0,
+                product_idx="P44",
+            ),
+            make_active_product(
+                30,
+                "BOX_BINGGRAE_YOMAMTE_150ML",
+                weight=82.0,
+                product_idx="P30",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert {product.product_id: product.count for product in result.products} == {
+        44: 1,
+        30: 1,
+    }
+    placement_by_id = {
+        product.product_id: product.placement_units[0]
+        for product in result.products
+    }
+    assert placement_by_id[44]["channelSide"] == "left"
+    assert placement_by_id[30]["channelSide"] == "right"
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    search = diagnostics["orderedCombinationSearch"]
+    assert search["bestChannelDeferralApplied"] is False
+    assert all(
+        not attempt.get("deferredToBetterChannel")
+        for attempt in search["attempts"]
+    )
+
+
 def test_freezer_dual_channel_targets_fallback_from_endpoint_values(monkeypatch):
     monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
     monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
@@ -1890,6 +2149,79 @@ def test_freezer_channel_target_stage_rescue_selects_lala_without_final_candidat
     assert selected["validHandTrackCount"] == 1
     assert selected["handTrackNearFrameCount"] == 4
     assert diagnostics["channelWeightStageRescueCandidates"][0]["class_id"] == 46
+
+
+def test_freezer_channel_target_stage_rescue_sorts_strict_lower_residual_first(
+    monkeypatch,
+):
+    monkeypatch.setattr(config.machine, "cabinet_type", "freezer")
+    monkeypatch.setattr(config.vision, "camera_layout", "dual_top_proxy")
+    monkeypatch.setattr(config.vision, "top_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "side_confidence_threshold", 0.50)
+    monkeypatch.setattr(config.vision, "freezer_min_vote_count", 4)
+    monkeypatch.setattr(config.vision, "freezer_min_exit_path_votes", 3)
+    trace = make_freezer_channel_trace(weight=74.8)
+    trace.stage_counts_by_class = {
+        "30": make_freezer_channel_stage_evidence(
+            class_id=30,
+            name="BOX_BINGGRAE_YOMAMTE_150ML",
+            raw=73,
+            confidence=0.5694,
+            top_confidence=0.0788,
+            side_confidence=0.5694,
+            threshold_passed=8,
+            exit_path_votes=3,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=160.7,
+            motion_threshold=40.3,
+        ),
+        "46": make_freezer_channel_stage_evidence(
+            class_id=46,
+            name="STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+            raw=239,
+            confidence=0.663,
+            top_confidence=0.6593,
+            side_confidence=0.663,
+            threshold_passed=5,
+            exit_path_votes=3,
+            hand_path_passed=True,
+            trajectory_passed=True,
+            path_displacement=69.4,
+            motion_threshold=31.7,
+        ),
+    }
+    engine = ProductDecisionEngine(strict_mode=True)
+
+    result = engine.judge(
+        vision_candidates=[],
+        delta_weight=-74.8,
+        active_products=[
+            make_active_product(
+                30,
+                "BOX_BINGGRAE_YOMAMTE_150ML",
+                weight=82.0,
+                product_idx="P30",
+            ),
+            make_active_product(
+                46,
+                "STICK_LALA_SWEET_GRAPE_ZERO_70ML",
+                weight=71.0,
+                product_idx="P46",
+            ),
+        ],
+        trace_context=trace,
+    )
+
+    assert result.status == JudgmentStatus.COMPLETE
+    assert [(product.product_id, product.count) for product in result.products] == [
+        (46, 1)
+    ]
+    diagnostics = trace.weight_diagnostics["freezer_vision_first"]
+    assert [
+        item["class_id"] for item in diagnostics["channelWeightStageRescueCandidates"]
+    ] == [46, 30]
+    assert diagnostics["selected"][0]["source"] == "freezer_channel_weight_stage_rescue"
 
 
 def test_freezer_channel_target_stage_rescue_prefers_dumpling_over_hotdog_candidate(

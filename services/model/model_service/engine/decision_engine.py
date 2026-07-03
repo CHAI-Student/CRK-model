@@ -1191,10 +1191,14 @@ class ProductDecisionEngine:
             key=lambda option: (int(option["rank"]), -float(option["confidence"])),
         )
         tolerance = self._freezer_weight_tolerance_grams()
+        best_channel_deferral_margin = 5.0
         targets = list(channel_targets)
         attempts: list[dict[str, Any]] = []
         order = 0
         reused_product_fallback = False
+        best_channel_deferral_applied = False
+        best_channel_deferrals: list[dict[str, Any]] = []
+        best_channel_deferral_by_position: dict[int, dict[str, Any]] = {}
         same_position_repeat_applied = False
         same_position_repeat_product_idxs: set[str] = set()
         same_position_repeat_target_keys: set[str] = set()
@@ -1328,6 +1332,7 @@ class ProductDecisionEngine:
                 "priorExclusionFallback": False,
                 "maxProductGroupsPerShelf": 2,
                 "sameProductLeftRightFallback": bool(reused_product_fallback),
+                "bestChannelDeferralApplied": bool(best_channel_deferral_applied),
                 "samePositionRepeatApplied": bool(same_position_repeat_applied),
                 "samePositionRepeatProductIdxs": sorted(
                     same_position_repeat_product_idxs
@@ -1336,6 +1341,8 @@ class ProductDecisionEngine:
                     same_position_repeat_target_keys
                 ),
             }
+            if best_channel_deferrals:
+                result["bestChannelDeferrals"] = list(best_channel_deferrals)
             if selected_order is not None:
                 result["selectedOrder"] = int(selected_order)
             return result
@@ -1400,11 +1407,114 @@ class ProductDecisionEngine:
                 ordered.append((option, False, set(), key))
             return ordered
 
+        def option_channel_position(option: dict[str, Any]) -> Optional[int]:
+            try:
+                value = option.get("diagnostics", {}).get("channelPosition")
+                if value is None:
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def strict_stage_rescue_substitute(
+            target: dict[str, Any],
+            *,
+            excluded_key: str,
+        ) -> Optional[tuple[dict[str, Any], float]]:
+            position = int(target["position"])
+            target_weight_value = float(target["weight"])
+            matches: list[tuple[float, float, int, int, dict[str, Any]]] = []
+            for option, _, _, _ in ordered_options_for_target(target):
+                if option_key(option) == excluded_key:
+                    continue
+                if option_key(option) in used_product_idxs:
+                    continue
+                if str(option.get("source", "vision") or "vision") != (
+                    "freezer_channel_weight_stage_rescue"
+                ):
+                    continue
+                diagnostics_payload = option.get("diagnostics", {})
+                if option_channel_position(option) != position:
+                    continue
+                if not bool(diagnostics_payload.get("strictExitPathPassed")):
+                    continue
+                if not bool(diagnostics_payload.get("handPathPassed")):
+                    continue
+                if not bool(diagnostics_payload.get("trajectoryExitPathPassed")):
+                    continue
+                if count_cap(option) < 1:
+                    continue
+                residual = abs(target_weight_value - float(option["unit_weight"]))
+                if residual > tolerance:
+                    continue
+                matches.append(
+                    (
+                        residual,
+                        -float(option["confidence"]),
+                        -int(diagnostics_payload.get("stageVotes", 0) or 0),
+                        int(option["candidate"].class_id),
+                        option,
+                    )
+                )
+            if not matches:
+                return None
+            best = min(matches, key=lambda item: item[:4])
+            return best[4], best[0]
+
+        def best_channel_deferral_payload(
+            target: dict[str, Any],
+            option: dict[str, Any],
+            *,
+            residual: float,
+            is_same_position_repeat: bool,
+        ) -> Optional[dict[str, Any]]:
+            if len(targets) != 2 or is_same_position_repeat:
+                return None
+            if str(option.get("source", "vision") or "vision") != "vision":
+                return None
+            other_targets = [
+                item
+                for item in targets
+                if int(item["position"]) != int(target["position"])
+            ]
+            if len(other_targets) != 1:
+                return None
+            other_target = other_targets[0]
+            expected_weight = float(option["unit_weight"])
+            other_residual = abs(float(other_target["weight"]) - expected_weight)
+            if other_residual > tolerance:
+                return None
+            if residual - other_residual < best_channel_deferral_margin:
+                return None
+            substitute = strict_stage_rescue_substitute(
+                target,
+                excluded_key=option_key(option),
+            )
+            if substitute is None:
+                return None
+            substitute_option, substitute_residual = substitute
+            return {
+                "deferredClassId": int(option["candidate"].class_id),
+                "deferredName": str(option["candidate"].class_name),
+                "currentChannelSide": str(target["channel_side"]),
+                "currentChannelPosition": int(target["position"]),
+                "currentResidual": round(float(residual), 1),
+                "betterChannelSide": str(other_target["channel_side"]),
+                "betterChannelPosition": int(other_target["position"]),
+                "betterChannelResidual": round(float(other_residual), 1),
+                "substituteClassId": int(substitute_option["candidate"].class_id),
+                "substituteName": str(substitute_option["candidate"].class_name),
+                "substituteProductKey": option_key(substitute_option),
+                "substituteResidual": round(float(substitute_residual), 1),
+                "margin": round(float(best_channel_deferral_margin), 1),
+            }
+
         def select_for_target(
             target: dict[str, Any],
             *,
             counts: range,
         ) -> bool:
+            nonlocal best_channel_deferral_applied
             nonlocal reused_product_fallback, same_position_repeat_applied
             position = int(target["position"])
             for count in counts:
@@ -1419,6 +1529,19 @@ class ProductDecisionEngine:
                         str,
                     ]
                 ] = None
+                first_deferred_fit: Optional[
+                    tuple[
+                        dict[str, Any],
+                        dict[str, Any],
+                        int,
+                        float,
+                        float,
+                        int,
+                        str,
+                    ]
+                ] = None
+                first_deferred_payload: Optional[dict[str, Any]] = None
+                deferred_substitute_key: Optional[str] = None
                 for (
                     option,
                     is_same_position_repeat,
@@ -1455,6 +1578,37 @@ class ProductDecisionEngine:
                         if first_reused_fit is None:
                             first_reused_fit = selected_item
                         continue
+                    if count == 1 and first_deferred_fit is None:
+                        deferral_payload = best_channel_deferral_payload(
+                            target,
+                            option,
+                            residual=residual,
+                            is_same_position_repeat=is_same_position_repeat,
+                        )
+                        if deferral_payload is not None:
+                            attempts[-1].update(
+                                {
+                                    "deferredToBetterChannel": True,
+                                    "betterChannelResidual": deferral_payload[
+                                        "betterChannelResidual"
+                                    ],
+                                    "substituteClassId": deferral_payload[
+                                        "substituteClassId"
+                                    ],
+                                }
+                            )
+                            first_deferred_fit = selected_item
+                            first_deferred_payload = deferral_payload
+                            deferred_substitute_key = str(
+                                deferral_payload["substituteProductKey"]
+                            )
+                            continue
+                    if (
+                        deferred_substitute_key is not None
+                        and product_idx != deferred_substitute_key
+                    ):
+                        attempts[-1]["blockedByBestChannelDeferral"] = True
+                        continue
                     selected_by_position[position] = (
                         target,
                         option,
@@ -1464,6 +1618,22 @@ class ProductDecisionEngine:
                         attempt_order,
                     )
                     used_product_idxs.add(product_idx)
+                    if (
+                        deferred_substitute_key is not None
+                        and product_idx == deferred_substitute_key
+                        and first_deferred_payload is not None
+                    ):
+                        best_channel_deferral_applied = True
+                        best_channel_deferrals.append(
+                            {
+                                key: value
+                                for key, value in first_deferred_payload.items()
+                                if key != "substituteProductKey"
+                            }
+                        )
+                        best_channel_deferral_by_position[position] = (
+                            first_deferred_payload
+                        )
                     if is_same_position_repeat:
                         same_position_repeat_applied = True
                         same_position_repeat_product_idxs.update(
@@ -1471,6 +1641,34 @@ class ProductDecisionEngine:
                         )
                         if matched_target_key:
                             same_position_repeat_target_keys.add(matched_target_key)
+                    return True
+                if first_deferred_fit is not None:
+                    (
+                        deferred_target,
+                        deferred_option,
+                        deferred_count,
+                        deferred_expected_weight,
+                        deferred_residual,
+                        deferred_attempt_order,
+                        deferred_product_idx,
+                    ) = first_deferred_fit
+                    selected_by_position[position] = (
+                        deferred_target,
+                        deferred_option,
+                        deferred_count,
+                        deferred_expected_weight,
+                        deferred_residual,
+                        deferred_attempt_order,
+                    )
+                    used_product_idxs.add(deferred_product_idx)
+                    if first_deferred_payload is not None:
+                        fallback_payload = {
+                            key: value
+                            for key, value in first_deferred_payload.items()
+                            if key != "substituteProductKey"
+                        }
+                        fallback_payload["fallbackApplied"] = True
+                        best_channel_deferrals.append(fallback_payload)
                     return True
                 if first_reused_fit is not None:
                     (
@@ -1561,6 +1759,9 @@ class ProductDecisionEngine:
                 current_prior_keys & self._freezer_option_product_keys(option)
             )
             option_diagnostics = dict(option["diagnostics"])
+            deferral_payload = best_channel_deferral_by_position.get(
+                int(target["position"])
+            )
             option_diagnostics.update(
                 {
                     "count": int(count),
@@ -1598,6 +1799,19 @@ class ProductDecisionEngine:
                     "samePositionRepeatTargetKey": current_target_key,
                 }
             )
+            if deferral_payload is not None:
+                option_diagnostics.update(
+                    {
+                        "bestChannelDeferralApplied": True,
+                        "deferredClassId": int(deferral_payload["deferredClassId"]),
+                        "betterChannelResidual": deferral_payload[
+                            "betterChannelResidual"
+                        ],
+                        "substituteClassId": int(
+                            deferral_payload["substituteClassId"]
+                        ),
+                    }
+                )
             cloned = dict(option)
             cloned.update(
                 {
@@ -2795,6 +3009,7 @@ class ProductDecisionEngine:
             if getattr(candidate, "class_id", None) is not None
         }
         augmented = list(vision_candidates)
+        accepted_rescue_candidates: list[tuple[EnsembleResult, dict[str, Any]]] = []
         tolerance = self._freezer_weight_tolerance_grams()
         min_stage_votes = max(
             1,
@@ -3075,8 +3290,26 @@ class ProductDecisionEngine:
                 **target_payload(best_target, best_residual),
             }
             setattr(candidate, "channel_weight_stage_rescue_diagnostics", diagnostic)
-            augmented.append(candidate)
             existing_class_ids.add(class_id)
+            accepted_rescue_candidates.append((candidate, diagnostic))
+
+        def rescue_sort_key(
+            item: tuple[EnsembleResult, dict[str, Any]],
+        ) -> tuple[bool, float, float, int, int]:
+            candidate, diagnostic = item
+            return (
+                not bool(diagnostic.get("strictExitPathPassed")),
+                float(diagnostic.get("channelWeightResidual", tolerance) or tolerance),
+                -float(diagnostic.get("confidence", 0.0) or 0.0),
+                -int(diagnostic.get("stageVotes", 0) or 0),
+                int(diagnostic.get("class_id", candidate.class_id)),
+            )
+
+        for candidate, diagnostic in sorted(
+            accepted_rescue_candidates,
+            key=rescue_sort_key,
+        ):
+            augmented.append(candidate)
             if accepted_candidates is not None:
                 accepted_candidates.append(diagnostic)
 
